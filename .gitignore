@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project data
+data/
+.chromadb/
+.chroma/
+.embedding_cache/
+.bm25_index/
+.semantic_memory/
+.traces/
+*.db
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Docker
+.docker/
