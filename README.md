@@ -58,7 +58,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统。它
 | 层次化检索 | RAPTOR Tree（自底向上摘要树） |
 | 图谱检索 | GraphRAG（跨文档实体关系发现） |
 | 工具协议 | MCP (Model Context Protocol) — 标准化工具接入 |
-| 模型 | OpenAI GPT-4o / DeepSeek-chat 一键切换 |
+| 模型 | OpenAI GPT-4o / DeepSeek-v4 一键切换 |
 | 记忆系统 | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
 | 质量保障 | Critic Agent 自评分 + Self-Refine 精炼循环 |
 | 防幻觉 | 引用验证工具 + 多源交叉验证 |
