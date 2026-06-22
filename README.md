@@ -22,14 +22,14 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 
 | 能力 | 说明 |
 |------|------|
-| **智能任务分解** | Planner Agent 将复杂问题拆解为 DAG 子任务，自动识别依赖关系 |
-| **多源信息检索** | 同时检索内部知识库（Qdrant 向量库）和互联网实时信息 |
-| **自适应检索策略** | 根据问题类型（事实/概念/比较/流程/分析/关系）自动选择最优检索策略 |
-| **自我批评优化** | Critic Agent 从 5 个维度评分，低于阈值自动触发精炼循环 |
-| **标准化工具接入** | 通过 MCP 协议动态发现和调用外部工具，支持热插拔 |
-| **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，DeepSeek 成本降低 90% |
-| **SSE 流式输出** | 实时推送 Agent 思考过程、工具调用、合成进度 |
-| **React 19 前端** | 暗色模式、响应式布局、React Flow DAG 可视化、Recharts 雷达图 |
+| 🧠 **智能任务分解** | Planner Agent 将复杂问题拆解为 DAG 子任务，自动识别依赖关系 |
+| 🔍 **多源信息检索** | 同时检索内部知识库（Qdrant 向量库）和互联网实时信息 |
+| 🎯 **自适应检索策略** | 根据问题类型（事实/概念/比较/流程/分析/关系）自动选择最优检索策略 |
+| 🔄 **自我批评优化** | Critic Agent 从 5 个维度评分，低于阈值自动触发精炼循环 |
+| 🔌 **标准化工具接入** | 通过 MCP 协议动态发现和调用外部工具，支持热插拔 |
+| ⚡ **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，DeepSeek 成本降低 90% |
+| 📡 **SSE 流式输出** | 实时推送 Agent 思考过程、工具调用、合成进度 |
+| 🎨 **React 19 前端** | 暗色模式、响应式布局、React Flow DAG 可视化、Recharts 雷达图 |
 
 ### 工作流程
 
@@ -70,19 +70,19 @@ flowchart TD
 
 | 层 | 技术 |
 |---|------|
-| **前端** | React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Vite |
-| **前端状态** | TanStack Router · TanStack Query · Zustand |
-| **前端可视化** | React Flow (DAG) · Recharts (雷达图) · react-markdown |
-| **Agent 框架** | Multi-Agent (Planner → Researcher → Synthesizer → Critic) |
-| **检索引擎** | Qdrant（向量库）+ BM25（稀疏检索）+ RRF 融合 + CrossEncoder 精排 |
-| **层次化检索** | RAPTOR Tree（自底向上摘要树） |
-| **图谱检索** | GraphRAG（跨文档实体关系发现） |
-| **工具协议** | MCP (Model Context Protocol) — 标准化工具接入 |
-| **模型** | OpenAI GPT-4o / DeepSeek-v4 一键切换 |
-| **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
-| **API** | FastAPI + SSE 流式 + Pydantic v2 |
-| **可观测** | LangFuse + 本地 JSONL 追踪 |
-| **部署** | Docker Compose（Qdrant + Redis + API）· 前端构建后由 FastAPI 托管 |
+| 🖥️ **前端框架** | React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Vite |
+| 🗂️ **前端状态** | TanStack Router · TanStack Query · Zustand |
+| 📈 **前端可视化** | React Flow（DAG）· Recharts（雷达图）· react-markdown（报告渲染） |
+| 🤖 **Agent 框架** | Multi-Agent（Planner → Researcher → Synthesizer → Critic） |
+| 🔎 **检索引擎** | Qdrant 向量库 + BM25 稀疏检索 + RRF 融合 + CrossEncoder 精排 |
+| 🏗️ **层次化检索** | RAPTOR Tree（自底向上摘要树） |
+| 🕸️ **图谱检索** | GraphRAG（跨文档实体关系发现） |
+| 🔌 **工具协议** | MCP（Model Context Protocol）— 标准化工具接入 |
+| 🧩 **模型** | OpenAI GPT-4o / DeepSeek-v4 一键切换 |
+| 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
+| ⚡ **API** | FastAPI + SSE 流式 + Pydantic v2 |
+| 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
+| 🐳 **部署** | Docker Compose（Qdrant + Redis + API）· 前端构建后 FastAPI 托管 |
 
 ## 项目结构
 
@@ -94,7 +94,7 @@ MindForge/
 ├── .env.example                    # 环境变量模板
 ├── .github/workflows/ci.yml        # CI/CD（ruff + pytest）
 │
-├── mindforge-web/                  # 🆕 React 前端
+├── mindforge-web/                  # React 前端
 │   ├── package.json                # 前端依赖（npm）
 │   ├── vite.config.ts              # Vite 构建配置 + API 代理
 │   ├── tsconfig.json               # TypeScript 严格模式
@@ -219,52 +219,6 @@ cd ../src && uvicorn mindforge.api.server:app --host 0.0.0.0 --port 8000
 ```
 
 打开 **`http://localhost:8000`** — FastAPI 同时托管 API 和前端静态文件，一个端口搞定。
-
-## API 接口
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/v1/query` | 提交研究任务（支持 `stream: true` SSE 流式） |
-| POST | `/api/v1/index` | 索引文档到知识库 |
-| GET | `/api/v1/health` | 健康检查（Qdrant / Redis / MCP 连通性） |
-| GET | `/api/v1/stats` | 系统统计（文档数 / 数据库状态） |
-| DELETE | `/api/v1/documents/{doc_id}` | 删除文档 |
-| GET | `/api/v1/mcp` | MCP 端点元信息 |
-| POST | `/api/v1/mcp` | MCP JSON-RPC 入口 |
-
-### 调用示例
-
-```bash
-# 提交研究任务（同步）
-curl -X POST http://localhost:8000/api/v1/query \
-  -H 'Content-Type: application/json' \
-  -d '{"task": "解释 Transformer 中的自注意力机制", "stream": false}'
-
-# 流式调用
-curl -X POST http://localhost:8000/api/v1/query \
-  -H 'Content-Type: application/json' \
-  -d '{"task": "比较 RAG 和微调两种方法的优劣", "stream": true}'
-
-# 索引文档
-curl -X POST http://localhost:8000/api/v1/index \
-  -H 'Content-Type: application/json' \
-  -d '{"file_path": "data/transformer_intro.md", "use_raptor": true}'
-```
-
-## SSE 事件协议
-
-流式查询（`stream: true`）返回以下 SSE 事件序列：
-
-| 事件类型 | 数据 | 说明 |
-|----------|------|------|
-| `plan_ready` | `{ type, plan: ResearchPlan }` | Planner 完成 DAG 分解 |
-| `subtask_start` | `{ type, task_id, description }` | 子任务开始执行 |
-| `subtask_result` | `{ type, task_id, result: AgentResult }` | 子任务执行完毕 |
-| `synthesizing` | `{ type, status: "start" \| "done" }` | 报告合成进度 |
-| `critic_feedback` | `{ type, score: CriticScore, round }` | Critic 评分反馈 |
-| `refining` | `{ type, round }` | 报告精炼中 |
-| `done` | `{ type, result: AgentResult }` | 研究完成 |
-| `[DONE]` | — | 流终止标记 |
 
 ## MCP 协议集成
 
