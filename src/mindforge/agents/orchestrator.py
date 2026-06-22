@@ -131,60 +131,9 @@ class Orchestrator:
                 logger.warning("Episodic memory recall failed: %s", exc)
 
         # ------------------------------------------------------------------
-        # Core pipeline — wrapped in timeout for safety
-        # ------------------------------------------------------------------
-        timeout_seconds = self._settings.agent.research_timeout
-        try:
-            core_result = await asyncio.wait_for(
-                self._run_pipeline(task, total_usage, pipeline_log, start_time),
-                timeout=timeout_seconds,
-            )
-            return core_result
-        except asyncio.TimeoutError:
-            elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.warning(
-                "Research task timed out after %d s — returning partial result.",
-                timeout_seconds,
-            )
-            # Return a clear timeout error message
-            partial_output = (
-                f"# Research Timed Out\n\n"
-                f"The task '{task[:100]}...' exceeded the {timeout_seconds}s "
-                f"time limit and was terminated.\n\n"
-                f"Consider simplifying the query or increasing AGENT_RESEARCH_TIMEOUT."
-            )
-            return AgentResult(
-                agent_name="orchestrator",
-                success=False,
-                output=partial_output,
-                data={
-                    "pipeline": pipeline_log,
-                    "error": f"Timed out after {timeout_seconds}s",
-                },
-                metadata={
-                    "quality": 0.0,
-                    "cost": 0.0,
-                    "subtask_count": 0,
-                    "refine_rounds": 0,
-                    "model": self._settings.llm.llm_provider,
-                    "timeout": True,
-                },
-                latency_ms=elapsed_ms,
-            )
-
-    async def _run_pipeline(
-        self,
-        task: str,
-        total_usage: dict[str, int],
-        pipeline_log: dict[str, Any],
-        start_time: float,
-    ) -> AgentResult:
-        """Core pipeline steps — separated for timeout wrapping."""
-
-        # ------------------------------------------------------------------
         # Step 1: Plan — decompose into DAG
         # ------------------------------------------------------------------
-        plan = await self._planner.run(task)
+        plan: ResearchPlan = await self._planner.run(task)
         pipeline_log["plan"] = {
             "subtask_count": len(plan.subtasks),
             "reasoning": plan.reasoning[:200],
