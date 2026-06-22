@@ -3,12 +3,12 @@ import { useDocuments } from "@/hooks/use-documents";
 import { useStats } from "@/hooks/use-stats";
 import { EmptyState } from "@/components/shared/empty-state";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
-import { FileText, Upload, X, Database, HardDrive, Eye, Loader2 } from "lucide-react";
+import { FileText, Upload, X, Database, HardDrive, Eye, Loader2, Trash2 } from "lucide-react";
 import { API_BASE } from "@/lib/constants";
 
 export function KnowledgeBasePage() {
   const { data: stats, isLoading: statsLoading } = useStats();
-  const { list: documents, upload } = useDocuments();
+  const { list: documents, upload, remove } = useDocuments();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [useRaptor, setUseRaptor] = useState(false);
@@ -20,6 +20,24 @@ export function KnowledgeBasePage() {
   const [viewingDoc, setViewingDoc] = useState<{ doc_id: string; filename: string } | null>(null);
   const [docContent, setDocContent] = useState<string>("");
   const [docLoading, setDocLoading] = useState(false);
+  // Delete confirmation
+  const [deleteTarget, setDeleteTarget] = useState<{ doc_id: string; filename: string } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteError(null);
+    try {
+      await remove.mutateAsync(deleteTarget.doc_id);
+      setDeleteTarget(null);
+      if (viewingDoc?.doc_id === deleteTarget.doc_id) {
+        setViewingDoc(null);
+        setDocContent("");
+      }
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "删除失败");
+    }
+  };
 
   const handleUpload = () => {
     if (!selectedFile) return;
@@ -80,20 +98,52 @@ export function KnowledgeBasePage() {
       {documents.isLoading ? <LoadingSkeleton variant="card" count={4} /> : documents.data && documents.data.length > 0 ? (
         <div className="space-y-2">
           {documents.data.map((doc) => (
-            <button
+            <div
               key={doc.doc_id}
-              type="button"
-              onClick={() => handleViewDocument(doc.doc_id, doc.filename)}
-              className="flex w-full items-center gap-4 rounded-xl border border-border bg-surface px-5 py-4 text-left transition-colors hover:border-primary/30 hover:shadow-sm cursor-pointer"
+              className="flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-4 transition-colors hover:border-primary/30 hover:shadow-sm group"
             >
-              <FileText className="h-5 w-5 text-text-muted shrink-0" />
-              <div className="flex-1 min-w-0"><p className="font-medium truncate">{doc.filename}</p><p className="text-xs text-text-muted">{doc.chunk_count} 块 · {doc.status}</p></div>
-              <Eye className="h-4 w-4 text-text-muted opacity-50" />
-            </button>
+              <button
+                type="button"
+                onClick={() => handleViewDocument(doc.doc_id, doc.filename)}
+                className="flex flex-1 items-center gap-4 text-left cursor-pointer"
+              >
+                <FileText className="h-5 w-5 text-text-muted shrink-0" />
+                <div className="flex-1 min-w-0"><p className="font-medium truncate">{doc.filename}</p><p className="text-xs text-text-muted">{doc.chunk_count} 块 · {doc.status}</p></div>
+                <Eye className="h-4 w-4 text-text-muted opacity-50 group-hover:opacity-100 transition-opacity" />
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setDeleteTarget({ doc_id: doc.doc_id, filename: doc.filename }); }}
+                disabled={remove.isPending}
+                className="shrink-0 rounded-lg p-1.5 text-text-muted hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors opacity-0 group-hover:opacity-100"
+                title="删除文档"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
           ))}
         </div>
       ) : (
         <EmptyState icon={<FileText className="h-12 w-12" />} title="暂无文档" description="上传 PDF、DOCX、Markdown 等文件到知识库" action={<button type="button" onClick={() => setUploadOpen(true)} className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-dark transition-colors">上传第一篇文档</button>} />
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDeleteTarget(null)}>
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">确认删除</h3>
+              <button type="button" onClick={() => setDeleteTarget(null)} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="text-sm text-text-muted mb-2">将永久删除文档及其所有索引数据：</p>
+            <p className="text-sm font-medium text-text mb-4 truncate">{deleteTarget.filename}</p>
+            {deleteError && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">{deleteError}</div>}
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setDeleteTarget(null)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">取消</button>
+              <button type="button" onClick={handleDelete} disabled={remove.isPending} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50 transition-colors">{remove.isPending ? "删除中…" : "确认删除"}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Upload Modal */}
