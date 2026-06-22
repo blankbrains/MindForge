@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 
@@ -154,12 +153,12 @@ class TestGraphRAGLogic:
             "Steve Jobs": {"type": "person"},
             "Cupertino": {"type": "location"},
         }
+        assert text
         assert "Apple Inc." in entities
         assert "Steve Jobs" in entities
         assert entities["Cupertino"]["type"] == "location"
 
     def test_relationship_extraction(self):
-        entities = {"OpenAI": "org", "GPT-4": "model", "Microsoft": "org"}
         relations = [("OpenAI", "developed", "GPT-4"), ("Microsoft", "invested", "OpenAI")]
         openai_relations = [r for r in relations if r[0] == "OpenAI" or r[2] == "OpenAI"]
         assert len(openai_relations) == 2
@@ -167,7 +166,6 @@ class TestGraphRAGLogic:
 
     def test_community_detection_basic(self):
         nodes = ["A", "B", "C", "D"]
-        edges = [("A", "B"), ("B", "C"), ("C", "D")]
         communities = {"comm_0": ["A", "B"], "comm_1": ["C", "D"]}
         all_nodes = set()
         for comm_nodes in communities.values():

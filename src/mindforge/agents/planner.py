@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import traceback
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional

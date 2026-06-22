@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import io
-import os
 import signal
-import sys
 import textwrap
 import time
 import traceback

@@ -1,7 +1,7 @@
 """多格式文档解析器 — 支持 PDF/DOCX/HTML/MD/TXT"""
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 from dataclasses import dataclass, field
 import hashlib
 import logging

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from mindforge.agents.base import AgentResult, BaseAgent
+from mindforge.agents.base import BaseAgent
 from mindforge.models.base import ChatMessage
 from mindforge.config import get_settings
 

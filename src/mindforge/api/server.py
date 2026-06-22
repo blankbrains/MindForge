@@ -86,7 +86,7 @@ async def startup():
     mcp_registry_ready = False
     if os.path.exists(mcp_cfg):
         try:
-            from mindforge.mcp.registry import MCPRegistry, get_mcp_registry
+            from mindforge.mcp.registry import get_mcp_registry
 
             reg = get_mcp_registry(config_path=mcp_cfg)
             reg.load_config(mcp_cfg)

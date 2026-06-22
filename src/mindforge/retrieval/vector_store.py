@@ -1,6 +1,6 @@
 """Qdrant 向量数据库封装 — 兼容 v1.8.x"""
 from __future__ import annotations
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 import logging
 
 from qdrant_client import QdrantClient, AsyncQdrantClient
@@ -44,7 +44,8 @@ class QdrantStore:
         return [(r.payload, r.score) for r in results]
 
     def _build_filter(self, filters: Optional[Dict]) -> Optional[Filter]:
-        if not filters: return None
+        if not filters:
+            return None
         conditions = []
         for key, value in filters.items():
             if isinstance(value, (str, int, float, bool)):

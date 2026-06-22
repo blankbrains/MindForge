@@ -78,6 +78,11 @@ class RAGTool(BaseTool):
             "Install mindforge with retrieval extras or provide a retriever instance."
         )
 
+    def execute(self, query: str, mode: str = "hybrid", top_k: int = 5, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
+        """Synchronous wrapper for execute_async."""
+        import asyncio
+        return asyncio.run(self.execute_async(query=query, mode=mode, top_k=top_k, threshold=threshold, **kwargs))
+
     async def execute_async(
         self,
         query: str,

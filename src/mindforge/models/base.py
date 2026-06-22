@@ -1,6 +1,6 @@
 """模型抽象接口 — 支持多种 LLM 和 Embedding 提供者"""
 from __future__ import annotations
-from typing import List, Optional, AsyncIterator, Union
+from typing import List, Optional
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 

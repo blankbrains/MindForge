@@ -6,11 +6,9 @@ DeepSeek 不提供原生 Embedding API，因此使用 sentence-transformers (all
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
 import asyncio
-import json
 import os
 
 import openai
-import numpy as np
 
 from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, StreamEvent
 

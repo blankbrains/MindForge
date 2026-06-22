@@ -1,8 +1,9 @@
 """RAPTOR 层次化索引 — 自底向上构建摘要树"""
 from __future__ import annotations
-from typing import List, Optional, Dict
+from typing import List, Optional
 from dataclasses import dataclass, field
-import hashlib, logging
+import hashlib
+import logging
 import numpy as np
 from mindforge.config import get_settings
 from mindforge.ingestion.chunker import DocumentChunk
@@ -70,7 +71,8 @@ class RAPTORIndexer:
         for i in range(len(nodes)):
             if i in used:
                 continue
-            cluster = [nodes[i]]; used.add(i)
+            cluster = [nodes[i]]
+            used.add(i)
             for j in range(i+1, len(nodes)):
                 if j in used:
                     continue
