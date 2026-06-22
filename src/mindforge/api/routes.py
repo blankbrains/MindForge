@@ -227,13 +227,22 @@ async def health():
 
 @router.get("/stats")
 async def stats():
-    """System statistics from Qdrant."""
+    """System statistics from Qdrant — counts unique documents, not chunks."""
     store = get_vector_store()
+    count = 0
     try:
-        info = await store.get_stats()
-        count = info.get("points", 0)
+        from qdrant_client import QdrantClient
+        client = QdrantClient(url=get_settings().vector_store.qdrant_url, timeout=5)
+        points, _ = client.scroll(
+            collection_name=store.collection_name,
+            limit=10000,
+            with_payload=True,
+            with_vectors=False,
+        )
+        doc_ids = {p.payload.get("doc_id") for p in points if p.payload}
+        count = len(doc_ids)
     except Exception:
-        count = 0
+        pass
     return {
         "documents_indexed": count,
         "qdrant_url": get_settings().vector_store.qdrant_url,
