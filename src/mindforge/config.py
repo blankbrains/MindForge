@@ -104,11 +104,6 @@ class AgentConfig(BaseSettings):
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
     max_refine_rounds: int = Field(default=2)
     subtask_timeout: int = Field(default=45, ge=10)
-    research_timeout: int = Field(
-        default=300, ge=30,
-        description="Total timeout (seconds) for the full research pipeline. "
-                    "Set via AGENT_RESEARCH_TIMEOUT env var."
-    )
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
 
