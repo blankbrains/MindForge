@@ -26,12 +26,9 @@ dependencies = [
     "bm25s>=0.1.10",
     "scikit-learn>=1.5.0",
 
-    # Web Framework
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.30.0",
+    # Config & Data Models
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
-    "sse-starlette>=2.1.0",
 
     # Async
     "aiohttp>=3.9.0",

@@ -3,6 +3,23 @@
 > **全栈 Multi-Agent RAG** · React 19 前端 · FastAPI 后端 · MCP 协议 · GraphRAG · SSE 流式
 
 [![CI](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml/badge.svg)](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![React](https://img.shields.io/badge/react-19-61dafb)](https://react.dev/)
+
+## 📖 目录
+
+- [项目概述](#项目概述)
+- [🖥️ 前端界面](#️-前端界面)
+- [🎯 核心能力](#-核心能力)
+- [🔄 工作流程](#-工作流程)
+- [🛠️ 技术栈](#️-技术栈)
+- [📁 项目结构](#-项目结构)
+- [🚀 快速启动](#-快速启动)
+- [🔌 MCP 协议集成](#-mcp-协议集成)
+- [🔄 CI/CD](#-cicd)
+- [✨ 技术亮点](#-技术亮点)
+- [📄 许可证](#-许可证)
 
 ## 项目概述
 
