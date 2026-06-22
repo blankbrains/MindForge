@@ -105,13 +105,23 @@ class MCPToolAdapter(BaseTool):
         )
 
     def execute(self, **kwargs: Any) -> ToolResult:
-        """Synchronous bridge for MCP calls.
+        """Synchronous bridge — uses thread pool when event loop is running.
 
-        Uses asyncio.run() to drive the async path.
+        Delegates to execute_async() via appropriate async driver.
         """
         import asyncio
-
-        return asyncio.run(self.execute_async(**kwargs))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.execute_async(**kwargs))
+        else:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self.execute_async(**kwargs)
+                )
+                return future.result()
 
     def _format_result(self, result: Any) -> str:
         """Format MCP tool result for display."""

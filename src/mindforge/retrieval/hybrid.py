@@ -104,8 +104,12 @@ class HybridRetriever:
             except Exception:
                 logger.exception("Multi-query BM25 retrieval failed.")
 
-        # --- Fuse with RRF ---
-        fused = self._rrf_fuse(all_results, top_k)
+        # --- Fuse with weighted RRF ---
+        fused = self._rrf_fuse(
+            all_results, top_k,
+            vector_weight=vector_weight,
+            bm25_weight=bm25_weight,
+        )
         return fused
 
     # ------------------------------------------------------------------
@@ -178,11 +182,16 @@ class HybridRetriever:
 
     @staticmethod
     def _rrf_fuse(
-        results: List[Dict[str, Any]], top_k: int
+        results: List[Dict[str, Any]],
+        top_k: int,
+        vector_weight: float = 0.5,
+        bm25_weight: float = 0.5,
     ) -> List[Dict[str, Any]]:
-        """Reciprocal Rank Fusion with constant k = 60.
+        """Weighted Reciprocal Rank Fusion with constant k = 60.
 
         Scores from different retrieval paths are combined per document.
+        ``vector_weight`` scales contributions from the vector and HyDE paths;
+        ``bm25_weight`` scales contributions from the BM25/multi-query path.
         """
         fused: Dict[str, Dict[str, Any]] = {}
         # Track which source each doc came from (use the best score source)
@@ -198,8 +207,17 @@ class HybridRetriever:
                 }
                 source_map[doc_id] = doc.get("source", "unknown")
 
-            # RRF contribution: 1 / (rank + k)
-            fused[doc_id]["score"] += 1.0 / (rank + _RRF_K)
+            # Determine path weight
+            src = doc.get("source", "unknown")
+            if src in ("vector", "hyde"):
+                w = vector_weight
+            elif src == "multi_query":
+                w = bm25_weight
+            else:
+                w = 0.5
+
+            # Weighted RRF contribution: w / (rank + k)
+            fused[doc_id]["score"] += w / (rank + _RRF_K)
 
         # Sort descending by fused score
         sorted_docs = sorted(

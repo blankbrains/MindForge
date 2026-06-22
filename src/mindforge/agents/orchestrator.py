@@ -344,7 +344,7 @@ class Orchestrator:
                     yield {"type": "done", "result": result}
                     return
             except Exception:
-                pass
+                logger.debug("Episodic memory recall failed; continuing with fresh research.")
 
         # --- Step 1: Plan ---
         plan: ResearchPlan = await self._planner.run(task)
@@ -462,13 +462,13 @@ class Orchestrator:
                     },
                 )
             except Exception:
-                pass
+                logger.debug("Episodic memory store skipped in stream_run.")
 
         if self._semantic_memory is not None:
             try:
                 await self._semantic_memory.store(task, current_draft)
             except Exception:
-                pass
+                logger.debug("Semantic memory store skipped in stream_run.")
 
         # --- Done ---
         elapsed_ms = (time.perf_counter() - start_time) * 1000

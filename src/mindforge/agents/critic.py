@@ -150,61 +150,67 @@ class CriticAgent(BaseAgent):
 
         # Use the critic-specific model from config
         critic_model = settings.llm.get_model("critic")
-        if hasattr(self, "_llm"):
+        _old_llm = getattr(self, "_llm", None)
+        if _old_llm is not None:
             from mindforge.models.base import LLMFactory
             self._llm = LLMFactory.create(
                 settings.llm.llm_provider, critic_model
             )
 
-        # Build the evaluation prompt
-        src_text = ""
-        if sources:
-            src_lines = ["Available sources:"]
-            for i, s in enumerate(sources, 1):
-                title = s.get("title", s.get("source", f"Source {i}"))
-                src_lines.append(f"  [{i}] {title}")
-            src_text = "\n".join(src_lines)
-
-        user_prompt = (
-            f"## Original Task\n\n{task}\n\n"
-            f"## Research Draft\n\n{draft}\n\n"
-            f"{src_text}\n\n"
-            "Evaluate the draft against the original task using the 5 dimensions. "
-            "Return JSON with scores, issues, and suggestions."
-        )
-
-        messages = [
-            ChatMessage(role="system", content=self.system_prompt),
-            ChatMessage(role="user", content=user_prompt),
-        ]
-
         try:
-            result = await self._chat(
-                messages,
-                response_format={"type": "json_object"},
-                temperature=0.2,
+            # Build the evaluation prompt
+            src_text = ""
+            if sources:
+                src_lines = ["Available sources:"]
+                for i, s in enumerate(sources, 1):
+                    title = s.get("title", s.get("source", f"Source {i}"))
+                    src_lines.append(f"  [{i}] {title}")
+                src_text = "\n".join(src_lines)
+
+            user_prompt = (
+                f"## Original Task\n\n{task}\n\n"
+                f"## Research Draft\n\n{draft}\n\n"
+                f"{src_text}\n\n"
+                "Evaluate the draft against the original task using the 5 dimensions. "
+                "Return JSON with scores, issues, and suggestions."
             )
 
-            raw = result.content.strip()
-            score_dict = json.loads(raw)
-            score = CriticScore.from_dict(score_dict)
+            messages = [
+                ChatMessage(role="system", content=self.system_prompt),
+                ChatMessage(role="user", content=user_prompt),
+            ]
 
-            # Apply threshold
-            if threshold is not None:
-                score.should_refine = score.overall < threshold
+            try:
+                result = await self._chat(
+                    messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                )
 
-            return score
+                raw = result.content.strip()
+                score_dict = json.loads(raw)
+                score = CriticScore.from_dict(score_dict)
 
-        except Exception as exc:
-            # Return a pass-through score on error
-            return CriticScore(
-                completeness=5.0,
-                accuracy=5.0,
-                depth=5.0,
-                clarity=5.0,
-                citations=5.0,
-                overall=5.0,
-                issues=[f"Critic evaluation failed: {exc}"],
-                suggestions=["Manual review recommended."],
-                should_refine=True,
-            )
+                # Apply threshold
+                if threshold is not None:
+                    score.should_refine = score.overall < threshold
+
+                return score
+
+            except Exception as exc:
+                # Return a pass-through score on error
+                return CriticScore(
+                    completeness=5.0,
+                    accuracy=5.0,
+                    depth=5.0,
+                    clarity=5.0,
+                    citations=5.0,
+                    overall=5.0,
+                    issues=[f"Critic evaluation failed: {exc}"],
+                    suggestions=["Manual review recommended."],
+                    should_refine=True,
+                )
+        finally:
+            # Restore original LLM to avoid permanent state mutation
+            if _old_llm is not None:
+                self._llm = _old_llm

@@ -10,7 +10,7 @@ from mindforge.retrieval.graphrag import GraphRAGEngine
 __all__ = [
     "QdrantStore", "get_vector_store",
     "BM25Retriever",
-    "HybridRetriever", "RRFResult",
+    "HybridRetriever",
     "CrossEncoderReranker",
     "AdaptiveRetriever", "QueryMode",
     "GraphRAGEngine",

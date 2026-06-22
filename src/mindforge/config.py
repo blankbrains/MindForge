@@ -58,7 +58,11 @@ class VectorStoreConfig(BaseSettings):
     qdrant_url: str = Field(default="http://localhost:6333")
     qdrant_api_key: Optional[str] = Field(default=None)
     collection_name: str = Field(default="mindforge_docs")
-    embedding_dim: int = Field(default=384)
+    embedding_dim: int = Field(
+        default=1536,
+        description="Must match the embedding model dimension. "
+                    "OpenAI text-embedding-3-small = 1536, all-MiniLM-L6-v2 = 384, BGE-M3 = 1024."
+    )
     model_config = SettingsConfigDict(env_prefix="VECTOR_", extra="ignore")
 
 

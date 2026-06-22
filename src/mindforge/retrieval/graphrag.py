@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Set, Tuple
 import logging
@@ -87,12 +88,16 @@ class GraphRAGEngine:
             logger.warning("No documents provided; graph will be empty.")
             return
 
+        tasks = []
         for doc in documents:
             text = doc.get("text", "")
             doc_id = doc.get("id", "")
             if not text:
                 continue
-            await self._extract_entities_and_relations(text, doc_id)
+            tasks.append(self._extract_entities_and_relations(text, doc_id))
+
+        if tasks:
+            await asyncio.gather(*tasks)
 
         self._build_adjacency()
         self._discover_communities()
@@ -104,6 +109,46 @@ class GraphRAGEngine:
             len(self.relations),
             len(self.communities),
         )
+
+    def save(self, path: str) -> None:
+        """Persist the graph to a JSON file."""
+        import json
+        payload = {
+            "entities": {eid: {"id": e.id, "name": e.name, "type": e.type}
+                         for eid, e in self.entities.items()},
+            "relations": [{"source": r.source, "target": r.target,
+                           "relation_type": r.relation_type, "weight": r.weight}
+                          for r in self.relations],
+            "communities": [{"id": c.id, "entity_ids": list(c.entity_ids),
+                             "summary": c.summary, "label": c.label}
+                            for c in self.communities],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info("GraphRAG state saved to %s", path)
+
+    def load(self, path: str) -> None:
+        """Restore the graph from a JSON file."""
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        self.entities = {
+            eid: Entity(id=e["id"], name=e["name"], type=e.get("type", ""))
+            for eid, e in payload.get("entities", {}).items()
+        }
+        self.relations = [
+            Relation(source=r["source"], target=r["target"],
+                     relation_type=r.get("relation_type", ""),
+                     weight=r.get("weight", 0.5))
+            for r in payload.get("relations", [])
+        ]
+        self.communities = [
+            Community(id=c["id"], entity_ids=set(c.get("entity_ids", [])),
+                      summary=c.get("summary", ""), label=c.get("label", ""))
+            for c in payload.get("communities", [])
+        ]
+        self._build_adjacency()
+        logger.info("GraphRAG state loaded from %s", path)
 
     async def _extract_entities_and_relations(
         self, text: str, doc_id: str
@@ -223,7 +268,7 @@ class GraphRAGEngine:
                 comm.summary = "Entities: " + ", ".join(names[:10])
             return
 
-        for comm in self.communities:
+        async def _summarize_one(comm):
             entity_lines = "\n".join(
                 f"- {e.name} ({e.type}): {e.description[:100]}"
                 for e in comm.entities[:20]
@@ -238,6 +283,8 @@ class GraphRAGEngine:
                 comm.summary = summary.strip()
             except Exception:
                 comm.summary = "Summary unavailable."
+
+        await asyncio.gather(*[_summarize_one(c) for c in self.communities])
 
     # ------------------------------------------------------------------
     # Query

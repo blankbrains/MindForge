@@ -171,6 +171,9 @@ class ResearcherAgent(BaseAgent):
                     latency_ms=elapsed_ms,
                     cost_usd=cost,
                 )
+                # Restore original LLM before returning
+                if _old_s_llm is not None:
+                    self._llm = _old_s_llm
                 yield {"type": "final_answer", "content": final_content, "result": agent_result}
                 return
 

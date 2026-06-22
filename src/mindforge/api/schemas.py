@@ -65,6 +65,18 @@ class IndexResponse(BaseModel):
     status: str = "indexed"
 
 
+class DocumentItem(BaseModel):
+    """A document visible in the knowledge-base listing."""
+
+    doc_id: str
+    filename: str
+    chunk_count: int
+    status: str = "indexed"
+
+
+DocumentsListResponse = list[DocumentItem]
+
+
 # ------------------------------------------------------------------
 # Health
 # ------------------------------------------------------------------
