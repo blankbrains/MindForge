@@ -36,6 +36,7 @@ node_modules/
 
 # Claude Code local config
 .claude/
+CLAUDE.md
 
 # MCP config with secrets (API keys)
 .mcp.json
