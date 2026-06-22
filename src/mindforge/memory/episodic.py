@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ class EpisodicMemory:
     def __init__(self, redis_client: Any = None) -> None:
         self._episodes: list[Episode] = []
         self._redis = redis_client
+        self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Public API

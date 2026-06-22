@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from mindforge.mcp.registry import (
@@ -9,6 +10,8 @@ from mindforge.mcp.registry import (
     MCPToolNotFoundError,
     get_mcp_registry,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MCPClient:
@@ -35,7 +38,7 @@ class MCPClient:
             try:
                 asyncio.run(self.initialize())
             except Exception:
-                pass
+                logger.debug("Sync MCP client init failed (async init will retry on demand).")
 
     # ------------------------------------------------------------------
     # Lifecycle

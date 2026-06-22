@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from mindforge.api.schemas import (
-    HealthResponse, IndexRequest, IndexResponse,
+    DocumentItem, HealthResponse, IndexRequest, IndexResponse,
     QueryRequest, QueryResponse,
 )
 from mindforge.agents.orchestrator import Orchestrator
@@ -125,11 +125,7 @@ async def index_document(body: IndexRequest):
 
     for i in range(0, len(points), 100):
         batch = points[i:i+100]
-        store._sync_client.upsert(
-            collection_name=store.collection_name,
-            points=batch,
-            wait=True,
-        )
+        await store.upsert(batch)
 
     # LLM for enrichment (shared by RAPTOR and GraphRAG)
     enrichment_llm = None
@@ -168,11 +164,7 @@ async def index_document(body: IndexRequest):
                     ))
             for i in range(0, len(raptor_points), 100):
                 batch = raptor_points[i:i+100]
-                store._sync_client.upsert(
-                    collection_name=store.collection_name,
-                    points=batch,
-                    wait=True,
-                )
+                await store.upsert(batch)
             logger.info(f"RAPTOR: {len(raptor_points)} summary nodes indexed")
         except Exception as e:
             logger.warning(f"RAPTOR indexing skipped: {e}")
@@ -202,18 +194,18 @@ async def health():
     """Health check with real Qdrant/Redis connectivity."""
     qdrant_ok = redis_ok = False
     try:
-        from qdrant_client import QdrantClient
-        qc = QdrantClient(url=get_settings().vector_store.qdrant_url, timeout=3)
-        qc.get_collections()
-        qdrant_ok = True
+        store = get_vector_store()
+        stats = await store.get_stats()
+        qdrant_ok = "points" in stats
     except Exception:
         pass
     try:
-        import redis as r
-        rc = r.from_url(get_settings().cache.redis_url or "redis://localhost:6380")
-        rc.ping()
+        import redis.asyncio as aioredis
+        redis_url = get_settings().cache.redis_url or "redis://localhost:6380"
+        rc = aioredis.from_url(redis_url)
+        await rc.ping()
         redis_ok = True
-        rc.close()
+        await rc.close()
     except Exception:
         pass
     # Check MCP registry
@@ -226,7 +218,7 @@ async def health():
 
     return HealthResponse(
         status="ok",
-        version="1.0.0",
+        version="0.1.0",
         qdrant_connected=qdrant_ok,
         redis_connected=redis_ok,
         mcp_tools_available=mcp_ok,
@@ -238,8 +230,8 @@ async def stats():
     """System statistics from Qdrant."""
     store = get_vector_store()
     try:
-        info = store._sync_client.get_collection(store.collection_name)
-        count = info.points_count
+        info = await store.get_stats()
+        count = info.get("points", 0)
     except Exception:
         count = 0
     return {
@@ -249,18 +241,41 @@ async def stats():
     }
 
 
+@router.get("/documents", response_model=list[DocumentItem])
+async def list_documents():
+    """List all indexed documents with metadata."""
+    from qdrant_client import QdrantClient
+    from collections import defaultdict
+    store = get_vector_store()
+    try:
+        client = QdrantClient(url=get_settings().vector_store.qdrant_url, timeout=5)
+        points, _ = client.scroll(
+            collection_name=store.collection_name,
+            limit=10000,
+            with_payload=True,
+            with_vectors=False,
+        )
+        docs: dict[str, dict] = defaultdict(
+            lambda: {"doc_id": "", "filename": "", "chunk_count": 0, "status": "indexed"}
+        )
+        for p in points:
+            pl = p.payload or {}
+            did = pl.get("doc_id", "unknown")
+            docs[did]["doc_id"] = did
+            docs[did]["filename"] = pl.get("source", docs[did]["filename"] or "")
+            docs[did]["chunk_count"] += 1
+        return list(docs.values())
+    except Exception:
+        logger.exception("Failed to list documents.")
+        return []
+
+
 @router.delete("/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str):
     """Delete a document from Qdrant."""
+    store = get_vector_store()
     try:
-        from qdrant_client.models import Filter as QdrantFilter, FieldCondition, MatchValue
-        store = get_vector_store()
-        store._sync_client.delete(
-            collection_name=store.collection_name,
-            points_selector=QdrantFilter(
-                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
-            ),
-        )
+        await store.delete(doc_id)
     except Exception as e:
         logger.warning(f"Delete failed for {doc_id}: {e}")
     return None

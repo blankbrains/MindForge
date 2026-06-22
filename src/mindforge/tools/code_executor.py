@@ -67,14 +67,15 @@ SAFE_BUILTINS: dict[str, Any] = {
     "float": float,
     "format": format,
     "frozenset": frozenset,
-    "getattr": getattr,
+    # NOTE: getattr, type, object, super, issubclass, __import__ are EXCLUDED
+    # — they enable Python object-model sandbox escapes.
     "hasattr": hasattr,
     "hash": hash,
     "hex": hex,
     "id": id,
     "int": int,
     "isinstance": isinstance,
-    "issubclass": issubclass,
+    # "issubclass": issubclass,  ← REMOVED — enables class hierarchy traversal
     "iter": iter,
     "len": len,
     "list": list,
@@ -82,7 +83,7 @@ SAFE_BUILTINS: dict[str, Any] = {
     "max": max,
     "min": min,
     "next": next,
-    "object": object,
+    # "object": object,  ← REMOVED — enables __class__ chain sandbox escape
     "oct": oct,
     "ord": ord,
     "pow": pow,
@@ -96,9 +97,9 @@ SAFE_BUILTINS: dict[str, Any] = {
     "sorted": sorted,
     "str": str,
     "sum": sum,
-    "super": super,
+    # "super": super,  ← REMOVED — enables parent-class access for sandbox escape
     "tuple": tuple,
-    "type": type,
+    # "type": type,  ← REMOVED — enables dynamic class creation for sandbox escape
     "zip": zip,
     "True": True,
     "False": False,
@@ -268,22 +269,38 @@ class CodeExecutor(BaseTool):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    # Compiled patterns for word-boundary matching (avoids false positives)
+    _FORBIDDEN_PATTERNS: list[Any] = None  # populated lazily
+
     def _check_forbidden(self, code: str) -> Optional[str]:
-        """Check code for forbidden keywords and imports."""
+        """Check code for forbidden keywords using word-boundary matching.
+
+        Uses ``\b`` regex anchors so that e.g. "eval" matches only the
+        standalone identifier, not "evaluate" or "eval_expression".
+        """
+        import re
+
+        # Lazy compilation of word-boundary patterns
+        if self._FORBIDDEN_PATTERNS is None:
+            self._FORBIDDEN_PATTERNS = []
+            for kw in FORBIDDEN_KEYWORDS:
+                self._FORBIDDEN_PATTERNS.append(
+                    (re.compile(r'\b' + re.escape(kw) + r'\b'), f"Forbidden keyword: {kw}")
+                )
+            for imp in FORBIDDEN_IMPORTS:
+                self._FORBIDDEN_PATTERNS.append(
+                    (re.compile(re.escape(imp)), f"Forbidden attribute access: {imp}")
+                )
+            for mod in FORBIDDEN_MODULES:
+                self._FORBIDDEN_PATTERNS.append(
+                    (re.compile(r'\bimport\s+' + re.escape(mod) + r'\b|from\s+' + re.escape(mod) + r'\b'),
+                     f"Forbidden module: {mod}")
+                )
+
         lower_code = code.lower()
-
-        for kw in self._forbidden_keywords:
-            if kw in lower_code:
-                return f"Use of forbidden keyword or function: {kw}"
-
-        for imp in FORBIDDEN_IMPORTS:
-            if imp in lower_code:
-                return f"Forbidden import or attribute access: {imp}"
-
-        for mod in FORBIDDEN_MODULES:
-            # import <mod> or from <mod> import ...
-            if f"import {mod}" in lower_code or f"from {mod}" in lower_code:
-                return f"Forbidden module: {mod}"
+        for pattern, msg in self._FORBIDDEN_PATTERNS:
+            if pattern.search(lower_code):
+                return msg
 
         return None
 

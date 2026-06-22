@@ -57,7 +57,12 @@ class DocumentParser:
             if para.text.strip():
                 content_parts.append(para.text)
                 if para.style.name.startswith("Heading"):
-                    level = int(para.style.name.replace("Heading ", "0"))
+                    try:
+                        # Extract heading level number: "Heading 1" → 1, "Heading 2" → 2
+                        level_str = para.style.name[len("Heading"):].strip()
+                        level = int(level_str.split()[0]) if level_str else 1
+                    except (ValueError, IndexError):
+                        level = 1  # default for non-standard heading styles
                     sections.append({"title": para.text, "content": para.text, "level": level})
         return "\n".join(content_parts), sections, {}
 

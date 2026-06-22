@@ -28,7 +28,7 @@ class MetricPoint:
 
     name: str
     value: float
-    timestamp: float = 0.0
+    timestamp: float = field(default_factory=time.time)
     labels: dict[str, str] = field(default_factory=dict)
 
 

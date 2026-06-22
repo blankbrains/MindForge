@@ -79,9 +79,22 @@ class RAGTool(BaseTool):
         )
 
     def execute(self, query: str, mode: str = "hybrid", top_k: int = 5, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
-        """Synchronous wrapper for execute_async."""
+        """Synchronous wrapper — uses thread pool when event loop is running."""
         import asyncio
-        return asyncio.run(self.execute_async(query=query, mode=mode, top_k=top_k, threshold=threshold, **kwargs))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running event loop — safe to use asyncio.run()
+            return asyncio.run(self.execute_async(query=query, mode=mode, top_k=top_k, threshold=threshold, **kwargs))
+        else:
+            # Event loop is running — use run_until_complete in a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self.execute_async(query=query, mode=mode, top_k=top_k, threshold=threshold, **kwargs)
+                )
+                return future.result()
 
     async def execute_async(
         self,
@@ -101,11 +114,11 @@ class RAGTool(BaseTool):
 
         retriever = self._get_retriever()
 
-        # Convert string mode to QueryMode enum
+        # Convert string mode to QueryMode enum with distinct strategy mappings
         mode_map = {
-            "semantic": QueryMode.FACTUAL,
-            "hybrid": QueryMode.FACTUAL,
-            "keyword": QueryMode.FACTUAL,
+            "semantic": QueryMode.CONCEPTUAL,  # vector-heavy
+            "hybrid": QueryMode.FACTUAL,       # balanced
+            "keyword": QueryMode.PROCEDURAL,   # keyword-heavy
         }
         qmode = mode_map.get(mode, QueryMode.FACTUAL)
 

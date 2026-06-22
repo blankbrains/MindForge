@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import logging
@@ -59,6 +60,7 @@ class SemanticMemory:
 
         self._facts: dict[str, Fact] = {}
         self._patterns: list[QueryPattern] = []
+        self._lock = asyncio.Lock()
 
         self._ensure_store()
         self._load()

@@ -79,7 +79,8 @@ class SynthesizerAgent(BaseAgent):
 
         # Use the synthesizer-specific model from config
         synthesizer_model = settings.llm.get_model("synthesizer")
-        if hasattr(self, "_llm"):
+        _old_llm = getattr(self, "_llm", None)
+        if _old_llm is not None:
             from mindforge.models.base import LLMFactory
             self._llm = LLMFactory.create(
                 settings.llm.llm_provider, synthesizer_model
@@ -96,69 +97,74 @@ class SynthesizerAgent(BaseAgent):
 
         findings_text = "\n".join(findings_lines)
 
-        # --- Build the sources block ---
-        sources_text = ""
-        if all_sources:
-            src_lines = ["Consolidated source list:"]
-            for s in all_sources:
-                idx = s.get("index", "")
-                title = s.get("title", s.get("source", "Untitled"))
-                url = s.get("url", "")
-                if url:
-                    src_lines.append(f"  [{idx}] {title} — {url}")
-                else:
-                    src_lines.append(f"  [{idx}] {title}")
-            sources_text = "\n".join(src_lines)
+        try:
+            # --- Build the sources block ---
+            sources_text = ""
+            if all_sources:
+                src_lines = ["Consolidated source list:"]
+                for s in all_sources:
+                    idx = s.get("index", "")
+                    title = s.get("title", s.get("source", "Untitled"))
+                    url = s.get("url", "")
+                    if url:
+                        src_lines.append(f"  [{idx}] {title} — {url}")
+                    else:
+                        src_lines.append(f"  [{idx}] {title}")
+                sources_text = "\n".join(src_lines)
 
-        # --- Build the feedback block ---
-        feedback_text = ""
-        if critic_feedback is not None:
-            fb_lines = [
-                "Critic feedback to address:",
-                f"  Overall score: {critic_feedback.overall}/10",
-                "  Issues:",
+            # --- Build the feedback block ---
+            feedback_text = ""
+            if critic_feedback is not None:
+                fb_lines = [
+                    "Critic feedback to address:",
+                    f"  Overall score: {critic_feedback.overall}/10",
+                    "  Issues:",
+                ]
+                for issue in critic_feedback.issues:
+                    fb_lines.append(f"    - {issue}")
+                fb_lines.append("  Suggestions:")
+                for suggestion in critic_feedback.suggestions:
+                    fb_lines.append(f"    - {suggestion}")
+                feedback_text = "\n".join(fb_lines)
+
+            # --- Assemble the user prompt ---
+            user_prompt_parts = [
+                f"## Original Research Task\n\n{task}\n",
+                f"## Subtask Findings\n\n{findings_text}\n",
             ]
-            for issue in critic_feedback.issues:
-                fb_lines.append(f"    - {issue}")
-            fb_lines.append("  Suggestions:")
-            for suggestion in critic_feedback.suggestions:
-                fb_lines.append(f"    - {suggestion}")
-            feedback_text = "\n".join(fb_lines)
+            if sources_text:
+                user_prompt_parts.append(f"## Sources\n\n{sources_text}\n")
+            if feedback_text:
+                user_prompt_parts.append(f"## Critic Feedback to Address\n\n{feedback_text}\n")
 
-        # --- Assemble the user prompt ---
-        user_prompt_parts = [
-            f"## Original Research Task\n\n{task}\n",
-            f"## Subtask Findings\n\n{findings_text}\n",
-        ]
-        if sources_text:
-            user_prompt_parts.append(f"## Sources\n\n{sources_text}\n")
-        if feedback_text:
-            user_prompt_parts.append(f"## Critic Feedback to Address\n\n{feedback_text}\n")
+            user_prompt_parts.append(
+                "Please synthesize these findings into a comprehensive, well-structured "
+                "final report following the required sections. Use [N] citation markers "
+                "for all factual claims referencing the provided sources."
+            )
 
-        user_prompt_parts.append(
-            "Please synthesize these findings into a comprehensive, well-structured "
-            "final report following the required sections. Use [N] citation markers "
-            "for all factual claims referencing the provided sources."
-        )
+            user_prompt = "\n".join(user_prompt_parts)
 
-        user_prompt = "\n".join(user_prompt_parts)
+            messages = [
+                ChatMessage(role="system", content=self.system_prompt),
+                ChatMessage(role="user", content=user_prompt),
+            ]
 
-        messages = [
-            ChatMessage(role="system", content=self.system_prompt),
-            ChatMessage(role="user", content=user_prompt),
-        ]
+            temp = temperature if temperature is not None else 0.4
+            result = await self._chat(messages, temperature=temp)
 
-        temp = temperature if temperature is not None else 0.4
-        result = await self._chat(messages, temperature=temp)
-
-        return AgentResult(
-            agent_name=self.name,
-            success=True,
-            output=result.content or "",
-            data={
-                "subtask_count": len(subtask_results),
-                "source_count": len(all_sources) if all_sources else 0,
-            },
-            token_usage=result.usage or {},
-            metadata={"model": self._model_name},
-        )
+            return AgentResult(
+                agent_name=self.name,
+                success=True,
+                output=result.content or "",
+                data={
+                    "subtask_count": len(subtask_results),
+                    "source_count": len(all_sources) if all_sources else 0,
+                },
+                token_usage=result.usage or {},
+                metadata={"model": self._model_name},
+            )
+        finally:
+            # Restore original LLM to avoid permanent state mutation
+            if _old_llm is not None:
+                self._llm = _old_llm
