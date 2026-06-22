@@ -337,3 +337,13 @@ GitHub Actions 自动运行：
 - **Zustand 选择器模式** — 精准订阅，避免不必要的重渲染
 - **单端口部署** — 前端构建后由 FastAPI 直接托管，无需 Nginx 反向代理
 - **CI/CD** — GitHub Actions 自动 ruff 检查 + pytest 40 个测试 + coverage 报告
+
+## 📄 许可证
+
+本项目基于 [MIT 协议](LICENSE) 开源，可自由使用、修改和分发。
+
+---
+
+<p align="center">
+  <sub>Built with ❤️ using React 19 · FastAPI · Qdrant · MCP</sub>
+</p>
