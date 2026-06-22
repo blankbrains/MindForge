@@ -1,13 +1,15 @@
-import { useHistoryStore, type HistoryEntry } from "@/store/history-store";
+import { useEffect, useState } from "react";
+import { useHistoryStore } from "@/store/history-store";
 import { EmptyState } from "@/components/shared/empty-state";
-import { Clock, Trash2, CheckCircle2, XCircle } from "lucide-react";
-import { cn, formatDate, formatDuration, formatCost } from "@/lib/utils";
-import { useState } from "react";
+import { Clock, Trash2, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export function HistoryPage() {
-  const { entries, removeEntry, clearAll } = useHistoryStore();
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const { entries, loadHistory, clearAll } = useHistoryStore();
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
 
   if (entries.length === 0) {
     return (
@@ -34,41 +36,31 @@ export function HistoryPage() {
       </div>
       <div className="space-y-3">
         {entries.map((entry) => (
-          <HistoryCard key={entry.id} entry={entry} isExpanded={expandedId === entry.id} onToggle={() => setExpandedId(expandedId === entry.id ? null : entry.id)} onDelete={() => removeEntry(entry.id)} />
+          <div key={entry.id} className="rounded-xl border border-border bg-surface transition-shadow hover:shadow-sm">
+            <button type="button" onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)} className="flex w-full items-center gap-4 px-5 py-4 text-left group">
+              <div className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-full", entry.quality_score != null && entry.quality_score >= 7 ? "bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400" : "bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400")}>
+                <CheckCircle2 className="h-4 w-4" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h4 className="font-medium truncate">{entry.task}</h4>
+                <div className="mt-0.5 flex flex-wrap items-center gap-3 text-xs text-text-muted">
+                  {entry.created_at && <span>{new Date(entry.created_at).toLocaleString()}</span>}
+                  {entry.quality_score != null && <span className={cn("rounded-full px-2 py-0.5 font-medium", entry.quality_score >= 7 ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300" : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300")}>质量 {entry.quality_score.toFixed(1)}</span>}
+                  {entry.model_used && <span>模型: {entry.model_used}</span>}
+                </div>
+              </div>
+              {expandedId === entry.id ? <ChevronUp className="h-4 w-4 text-text-muted" /> : <ChevronDown className="h-4 w-4 text-text-muted" />}
+            </button>
+            {expandedId === entry.id && (
+              <div className="border-t border-border px-5 py-4">
+                <pre className="whitespace-pre-wrap text-sm font-sans bg-surface-alt rounded-lg p-4 max-h-96 overflow-y-auto">
+                  {entry.report && entry.report.length > 3000 ? entry.report.slice(0, 3000) + "\n\n… (内容过长，此处截断)" : (entry.report || "（无内容）")}
+                </pre>
+              </div>
+            )}
+          </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function HistoryCard({ entry, isExpanded, onToggle, onDelete }: { entry: HistoryEntry; isExpanded: boolean; onToggle: () => void; onDelete: () => void }) {
-  const { task, result, createdAt } = entry;
-  const quality = result.metadata && typeof result.metadata.quality === "number" ? result.metadata.quality : null;
-
-  return (
-    <div className="rounded-xl border border-border bg-surface transition-shadow hover:shadow-sm">
-      <button type="button" onClick={onToggle} className="flex w-full items-center gap-4 px-5 py-4 text-left group">
-        <div className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-full", result.success ? "bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400" : "bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400")}>
-          {result.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-        </div>
-        <div className="flex-1 min-w-0">
-          <h4 className="font-medium truncate">{task}</h4>
-          <div className="mt-0.5 flex flex-wrap items-center gap-3 text-xs text-text-muted">
-            <span>{formatDate(new Date(createdAt).toISOString())}</span>
-            {result.latency_ms != null && <span>耗时 {formatDuration(result.latency_ms)}</span>}
-            {result.cost_usd != null && <span>费用 {formatCost(result.cost_usd)}</span>}
-            {quality != null && <span className={cn("rounded-full px-2 py-0.5 font-medium", quality >= 7 ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300" : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300")}>质量 {quality.toFixed(1)}</span>}
-          </div>
-        </div>
-        <Trash2 className="h-4 w-4 shrink-0 text-text-muted opacity-0 group-hover:opacity-100 hover:text-red-500 transition-opacity" onClick={(e) => { e.stopPropagation(); onDelete(); }} />
-      </button>
-      {isExpanded && (
-        <div className="border-t border-border px-5 py-4">
-          <pre className="whitespace-pre-wrap text-sm font-sans bg-surface-alt rounded-lg p-4 max-h-96 overflow-y-auto">
-            {result.output.length > 3000 ? result.output.slice(0, 3000) + "\n\n… (内容过长，此处截断)" : result.output}
-          </pre>
-        </div>
-      )}
     </div>
   );
 }

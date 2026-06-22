@@ -62,6 +62,14 @@ async def startup():
     from mindforge.api.routes import set_mcp_registry
     settings = get_settings()
 
+    # Database init
+    try:
+        from mindforge.db import init_db
+        init_db()
+        logger.info("Database initialized (SQLite)")
+    except Exception as e:
+        logger.warning("Database init skipped: %s", e)
+
     # Qdrant probe
     try:
         from qdrant_client import QdrantClient

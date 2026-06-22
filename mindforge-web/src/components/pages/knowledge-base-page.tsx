@@ -1,29 +1,55 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useDocuments } from "@/hooks/use-documents";
 import { useStats } from "@/hooks/use-stats";
 import { EmptyState } from "@/components/shared/empty-state";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
-import { FileText, Upload, X, Database, HardDrive } from "lucide-react";
+import { FileText, Upload, X, Database, HardDrive, Eye, Loader2 } from "lucide-react";
+import { API_BASE } from "@/lib/constants";
 
 export function KnowledgeBasePage() {
   const { data: stats, isLoading: statsLoading } = useStats();
   const { list: documents, upload } = useDocuments();
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [filePath, setFilePath] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [useRaptor, setUseRaptor] = useState(false);
   const [useGraphrag, setUseGraphrag] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // Document content modal
+  const [viewingDoc, setViewingDoc] = useState<{ doc_id: string; filename: string } | null>(null);
+  const [docContent, setDocContent] = useState<string>("");
+  const [docLoading, setDocLoading] = useState(false);
 
   const handleUpload = () => {
-    if (!filePath.trim()) return;
+    if (!selectedFile) return;
     setUploadError(null);
-    upload.mutate(
-      { file_path: filePath.trim(), use_raptor: useRaptor, use_graphrag: useGraphrag },
-      {
-        onSuccess: () => { setUploadOpen(false); setFilePath(""); setUseRaptor(false); setUseGraphrag(false); },
-        onError: (err) => setUploadError(err instanceof Error ? err.message : "上传失败"),
-      },
-    );
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+    formData.append("use_raptor", String(useRaptor));
+    formData.append("use_graphrag", String(useGraphrag));
+    upload.mutate(formData, {
+      onSuccess: () => { setUploadOpen(false); setSelectedFile(null); setUseRaptor(false); setUseGraphrag(false); },
+      onError: (err) => setUploadError(err instanceof Error ? err.message : "上传失败"),
+    });
+  };
+
+  const handleViewDocument = async (docId: string, filename: string) => {
+    setViewingDoc({ doc_id: docId, filename });
+    setDocLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}/content`);
+      if (res.ok) {
+        const data = await res.json();
+        setDocContent(data.content || "（无内容）");
+      } else {
+        setDocContent("加载失败");
+      }
+    } catch {
+      setDocContent("加载失败");
+    } finally {
+      setDocLoading(false);
+    }
   };
 
   return (
@@ -37,6 +63,7 @@ export function KnowledgeBasePage() {
           <Upload className="h-4 w-4" /> 上传文档
         </button>
       </div>
+
       {!statsLoading && stats && (
         <div className="grid grid-cols-2 gap-4">
           <div className="flex items-center gap-3 rounded-xl border border-border bg-surface p-4">
@@ -49,18 +76,27 @@ export function KnowledgeBasePage() {
           </div>
         </div>
       )}
+
       {documents.isLoading ? <LoadingSkeleton variant="card" count={4} /> : documents.data && documents.data.length > 0 ? (
         <div className="space-y-2">
           {documents.data.map((doc) => (
-            <div key={doc.doc_id} className="flex items-center gap-4 rounded-xl border border-border bg-surface px-5 py-4">
+            <button
+              key={doc.doc_id}
+              type="button"
+              onClick={() => handleViewDocument(doc.doc_id, doc.filename)}
+              className="flex w-full items-center gap-4 rounded-xl border border-border bg-surface px-5 py-4 text-left transition-colors hover:border-primary/30 hover:shadow-sm cursor-pointer"
+            >
               <FileText className="h-5 w-5 text-text-muted shrink-0" />
               <div className="flex-1 min-w-0"><p className="font-medium truncate">{doc.filename}</p><p className="text-xs text-text-muted">{doc.chunk_count} 块 · {doc.status}</p></div>
-            </div>
+              <Eye className="h-4 w-4 text-text-muted opacity-50" />
+            </button>
           ))}
         </div>
       ) : (
         <EmptyState icon={<FileText className="h-12 w-12" />} title="暂无文档" description="上传 PDF、DOCX、Markdown 等文件到知识库" action={<button type="button" onClick={() => setUploadOpen(true)} className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-dark transition-colors">上传第一篇文档</button>} />
       )}
+
+      {/* Upload Modal */}
       {uploadOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) setUploadOpen(false); }}>
           <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-2xl">
@@ -70,16 +106,35 @@ export function KnowledgeBasePage() {
             </div>
             <div className="mt-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-text mb-1.5">文件路径</label>
-                <input type="text" value={filePath} onChange={(e) => setFilePath(e.target.value)} placeholder="例如: data/my-report.pdf" className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/50 focus:outline-none" onKeyDown={(e) => { if (e.key === "Enter") handleUpload(); }} />
-                <p className="mt-1 text-xs text-text-muted">后端 data/ 目录下的文件路径</p>
+                <label className="block text-sm font-medium text-text mb-1.5">选择文件</label>
+                <input ref={fileRef} type="file" accept=".pdf,.docx,.md,.txt,.html" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-white hover:file:bg-primary-dark focus:ring-2 focus:ring-primary/20 focus:border-primary/50 focus:outline-none" />
+                {selectedFile && <p className="mt-1 text-xs text-text-muted">已选择: {selectedFile.name} ({(selectedFile.size / 1024).toFixed(1)} KB)</p>}
               </div>
               <div className="flex items-center gap-5">
                 <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={useRaptor} onChange={(e) => setUseRaptor(e.target.checked)} className="rounded border-border" /><span className="font-medium">RAPTOR</span><span className="text-xs text-text-muted">层次索引</span></label>
                 <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={useGraphrag} onChange={(e) => setUseGraphrag(e.target.checked)} className="rounded border-border" /><span className="font-medium">GraphRAG</span><span className="text-xs text-text-muted">图谱索引</span></label>
               </div>
               {uploadError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">{uploadError}</div>}
-              <button type="button" onClick={handleUpload} disabled={!filePath.trim() || upload.isPending} className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors">{upload.isPending ? "索引中…" : "开始索引"}</button>
+              <button type="button" onClick={handleUpload} disabled={!selectedFile || upload.isPending} className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors">{upload.isPending ? "索引中…" : "开始索引"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Document Content Modal */}
+      {viewingDoc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) { setViewingDoc(null); setDocContent(""); } }}>
+          <div className="w-full max-w-3xl max-h-[80vh] rounded-2xl border border-border bg-surface p-6 shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold truncate">{viewingDoc.filename}</h3>
+              <button type="button" onClick={() => { setViewingDoc(null); setDocContent(""); }} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {docLoading ? (
+                <div className="flex items-center justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-text-muted" /></div>
+              ) : (
+                <pre className="whitespace-pre-wrap text-sm leading-relaxed font-sans">{docContent}</pre>
+              )}
             </div>
           </div>
         </div>
