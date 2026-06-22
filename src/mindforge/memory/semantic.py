@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import json
 import time
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
 
@@ -168,7 +167,7 @@ class SemanticMemory:
 
     async def store(self, task: str, output: str) -> None:
         """Async alias for ``add_fact`` — used by Orchestrator."""
-        self.add_fact(fact_key=hash(task) % 10**7, content=output, category="research", confidence=0.8)
+        self.add_fact(content=output, sources=[f"task: {task[:100]}"], confidence=0.8)
 
     def search_facts(self, query: str, top_k: int = 5) -> list[Fact]:
         """Simple keyword-based fact retrieval.

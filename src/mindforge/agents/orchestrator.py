@@ -8,8 +8,6 @@ import time
 import traceback
 from typing import Any, AsyncIterator, Optional
 
-logger = logging.getLogger(__name__)
-
 from mindforge.agents.base import AgentResult
 from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
 from mindforge.agents.researcher import ResearcherAgent
@@ -19,6 +17,8 @@ from mindforge.tools.rag_tool import RAGTool
 from mindforge.tools.web_search import WebSearchTool
 from mindforge.tools.mcp_adapter import MCPToolAdapter
 from mindforge.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Optional memory / observability imports (graceful fallback when not yet

@@ -33,7 +33,6 @@ class EmbeddingManager:
         return self._rng
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        proj = self._get_proj()
         results = []
         for text in texts:
             words = text.lower().split()

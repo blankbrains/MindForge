@@ -87,10 +87,6 @@ class ResearcherAgent(BaseAgent):
         finally:
             if _old_llm is not None:
                 self._llm = _old_llm
-            task,
-            context=context,
-            max_rounds=max_rounds,
-        )
 
     # ------------------------------------------------------------------
     async def stream_run(

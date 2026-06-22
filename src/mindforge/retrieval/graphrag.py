@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Set, Tuple
+from typing import List, Dict, Any, Set, Tuple
 import logging
 from collections import deque
 
