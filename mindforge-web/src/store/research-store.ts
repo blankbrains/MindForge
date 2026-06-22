@@ -28,7 +28,7 @@ interface ResearchState {
   setStatus: (status: ResearchState["status"], error?: string) => void;
 }
 
-export const useResearchStore = create<ResearchState>((set, get) => ({
+export const useResearchStore = create<ResearchState>((set) => ({
   status: "idle",
   error: null,
   task: "",

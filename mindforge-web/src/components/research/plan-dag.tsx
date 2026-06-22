@@ -81,11 +81,7 @@ export function PlanDAG({ plan }: Props) {
         <Background />
         <Controls />
         <MiniMap
-          nodeColor={(n) => {
-            const label = n.data?.label as React.ReactElement | undefined;
-            // Simple heuristic: check if the label element hints at a status
-            return "#a29bfe";
-          }}
+          nodeColor={() => "#a29bfe"}
         />
       </ReactFlow>
     </div>

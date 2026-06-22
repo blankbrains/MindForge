@@ -190,23 +190,57 @@ class MCPServerProcess:
             self._process.stdin.write(request_line.encode("utf-8"))
             await self._process.stdin.drain()
 
-            # Read response (one line per JSON-RPC message)
             if self._process.stdout is None:
                 raise MCPConnectionError("stdout is None")
 
-            response_line = await asyncio.wait_for(
-                self._process.stdout.readline(), timeout=30.0
-            )
+            # Read lines in a loop: skip non-JSON and notifications,
+            # return the first valid JSON-RPC response (with "id").
+            deadline = asyncio.get_event_loop().time() + 30.0
+            last_error: str | None = None
 
-        resp = _parse_response(response_line)
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    if last_error:
+                        raise MCPError(
+                            f"Timeout waiting for JSON-RPC response from "
+                            f"'{self.config.name}' (last error: {last_error})"
+                        )
+                    raise MCPError(
+                        f"Timeout waiting for JSON-RPC response from "
+                        f"'{self.config.name}'"
+                    )
 
-        if "error" in resp:
-            err = resp["error"]
-            raise MCPError(
-                f"JSON-RPC error ({err.get('code', -1)}): {err.get('message', 'Unknown')}"
-            )
+                try:
+                    raw_line = await asyncio.wait_for(
+                        self._process.stdout.readline(), timeout=min(remaining, 10.0)
+                    )
+                except asyncio.TimeoutError:
+                    continue  # keep trying until the full deadline
 
-        return resp.get("result", resp)
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+
+                # Try to parse as JSON
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    # Non-JSON line (e.g. npx startup output) — skip
+                    continue
+
+                # Notifications have no "id"; skip them
+                if "id" not in msg:
+                    continue
+
+                if "error" in msg:
+                    err = msg["error"]
+                    raise MCPError(
+                        f"JSON-RPC error ({err.get('code', -1)}): "
+                        f"{err.get('message', 'Unknown')}"
+                    )
+
+                return msg.get("result", msg)
 
     async def stop(self) -> None:
         """Gracefully shut down the subprocess."""
@@ -287,7 +321,7 @@ class MCPRegistry:
         for server in self._servers.values():
             try:
                 await server.start()
-            except MCPConnectionError as exc:
+            except Exception as exc:
                 print(f"Warning: Failed to start MCP server '{server.config.name}': {exc}",
                       file=sys.stderr)
 
@@ -301,8 +335,15 @@ class MCPRegistry:
         all_tools: list[MCPToolDefinition] = []
         for server in self._servers.values():
             if server.is_running:
-                tools = await server.discover_tools()
-                all_tools.extend(tools)
+                try:
+                    tools = await server.discover_tools()
+                    all_tools.extend(tools)
+                except Exception as exc:
+                    print(
+                        f"Warning: Failed to discover tools from "
+                        f"'{server.config.name}': {exc}",
+                        file=sys.stderr,
+                    )
 
         # Build name index (last server wins on name collision)
         self._tool_index = {}
