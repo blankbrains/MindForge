@@ -1,14 +1,14 @@
-import { useState, type FormEvent } from "react";
+import { type FormEvent } from "react";
 import { Send, Loader2 } from "lucide-react";
 
 interface QueryInputProps {
+  value: string;
+  onChange: (v: string) => void;
   onSubmit: (task: string) => void;
   disabled: boolean;
 }
 
-export function QueryInput({ onSubmit, disabled }: QueryInputProps) {
-  const [value, setValue] = useState("");
-
+export function QueryInput({ value, onChange, onSubmit, disabled }: QueryInputProps) {
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (value.trim() && !disabled) {
@@ -21,7 +21,7 @@ export function QueryInput({ onSubmit, disabled }: QueryInputProps) {
       <div className="relative rounded-xl border border-border bg-surface shadow-sm transition-shadow focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50">
         <textarea
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => onChange(e.target.value)}
           placeholder="输入你的研究问题… 例如：量子计算在药物研发中的应用前景如何？"
           rows={3}
           disabled={disabled}

@@ -7,12 +7,15 @@ import uuid
 import logging
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+import os as _os
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from mindforge.api.schemas import (
-    DocumentItem, HealthResponse, IndexRequest, IndexResponse,
+    DocumentContentResponse, DocumentItem, HealthResponse,
+    HistoryItem, IndexRequest, IndexResponse,
     QueryRequest, QueryResponse,
+    SettingsResponse, SettingsUpdateRequest,
 )
 from mindforge.agents.orchestrator import Orchestrator
 from mindforge.ingestion.parsers import DocumentParser
@@ -288,6 +291,208 @@ async def delete_document(doc_id: str):
     except Exception as e:
         logger.warning(f"Delete failed for {doc_id}: {e}")
     return None
+
+
+# ------------------------------------------------------------------
+# Document content
+# ------------------------------------------------------------------
+
+@router.get("/documents/{doc_id}/content", response_model=DocumentContentResponse)
+async def get_document_content(doc_id: str):
+    """Return full content of an indexed document (all chunks)."""
+    from qdrant_client import QdrantClient
+    store = get_vector_store()
+    client = QdrantClient(url=get_settings().vector_store.qdrant_url, timeout=5)
+    points, _ = client.scroll(
+        collection_name=store.collection_name,
+        limit=10000,
+        with_payload=True,
+        with_vectors=False,
+    )
+    chunks = []
+    filename = ""
+    for p in points:
+        pl = p.payload or {}
+        if pl.get("doc_id") == doc_id:
+            chunks.append({
+                "chunk_id": pl.get("chunk_id", ""),
+                "content": pl.get("content", ""),
+                "raptor_level": pl.get("raptor_level", 0),
+            })
+            if not filename:
+                filename = pl.get("source", "")
+    if not chunks:
+        raise HTTPException(status_code=404, detail="Document not found")
+    full_content = "\n\n".join(c["content"] for c in chunks)
+    return DocumentContentResponse(
+        doc_id=doc_id,
+        filename=filename,
+        content=full_content,
+        chunk_count=len(chunks),
+        chunks=chunks,
+    )
+
+
+# ------------------------------------------------------------------
+# File upload
+# ------------------------------------------------------------------
+
+@router.post("/upload", response_model=IndexResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    use_raptor: bool = Form(False),
+    use_graphrag: bool = Form(False),
+):
+    """Upload a document file for indexing into the knowledge base."""
+    # Save uploaded file to data/ directory
+    upload_dir = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "data")
+    _os.makedirs(upload_dir, exist_ok=True)
+    file_path = _os.path.join(upload_dir, file.filename or "uploaded_doc")
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Parse and index
+    parser = DocumentParser()
+    parsed = parser.parse(file_path)
+    splitter = TextSplitter()
+    chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
+
+    from mindforge.ingestion.embedder import get_embedder
+    embedder = get_embedder()
+    store = get_vector_store()
+    store.ensure_collection()
+
+    from qdrant_client.models import PointStruct
+    points = []
+    for ch in chunks:
+        vec = embedder.embed_single(ch.content)
+        points.append(PointStruct(
+            id=abs(hash(ch.chunk_id)) % (2**63),
+            vector=vec,
+            payload={
+                "chunk_id": ch.chunk_id,
+                "doc_id": parsed.doc_id,
+                "content": ch.content[:2000],
+                "source": file.filename or parsed.filename,
+            },
+        ))
+    for i in range(0, len(points), 100):
+        await store.upsert(points[i:i+100])
+
+    return IndexResponse(
+        doc_id=parsed.doc_id,
+        filename=file.filename or parsed.filename,
+        chunk_count=len(chunks),
+        status="indexed",
+    )
+
+
+# ------------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------------
+
+@router.get("/settings", response_model=SettingsResponse)
+def get_settings_api():
+    """Return current user settings (API keys masked)."""
+    from mindforge.db import SessionLocal, ApiKey
+    db = SessionLocal()
+    try:
+        keys = {k.provider: k for k in db.query(ApiKey).filter(ApiKey.is_active).all()}
+        return SettingsResponse(
+            llm_provider=get_settings().llm.llm_provider,
+            deepseek_api_key="***" + keys["deepseek"].key_encrypted[-4:] if "deepseek" in keys else "",
+            openai_api_key="***" + keys["openai"].key_encrypted[-4:] if "openai" in keys else "",
+            embedding_provider=_os.getenv("LLM_EMBEDDING_PROVIDER", "openai"),
+        )
+    finally:
+        db.close()
+
+
+@router.put("/settings")
+def update_settings_api(body: SettingsUpdateRequest):
+    """Save user settings (API keys encrypted in DB)."""
+    from mindforge.db import SessionLocal, ApiKey, decrypt_api_key, encrypt_api_key
+    db = SessionLocal()
+    try:
+        user = db.query(ApiKey).first()  # single-user for now
+        for provider, key_val in [
+            ("deepseek", body.deepseek_api_key),
+            ("openai", body.openai_api_key),
+        ]:
+            if key_val:
+                existing = db.query(ApiKey).filter(
+                    ApiKey.provider == provider
+                ).first()
+                if existing:
+                    existing.key_encrypted = encrypt_api_key(key_val)
+                else:
+                    db.add(ApiKey(provider=provider, key_encrypted=encrypt_api_key(key_val), user_id=1))
+        # Update env for current session
+        if body.llm_provider:
+            _os.environ["LLM_LLM_PROVIDER"] = body.llm_provider
+        if body.embedding_provider:
+            _os.environ["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
+        db.commit()
+        return {"status": "saved"}
+    finally:
+        db.close()
+
+
+# ------------------------------------------------------------------
+# History
+# ------------------------------------------------------------------
+
+@router.get("/history")
+def list_history():
+    """Return research history entries."""
+    from mindforge.db import SessionLocal, ResearchHistory
+    db = SessionLocal()
+    try:
+        entries = (
+            db.query(ResearchHistory)
+            .order_by(ResearchHistory.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        return {
+            "entries": [
+                HistoryItem(
+                    id=e.id,
+                    task=e.task,
+                    report=e.report[:500] if e.report else None,
+                    quality_score=e.quality_score,
+                    model_used=e.model_used,
+                    created_at=e.created_at.isoformat() if e.created_at else None,
+                ).model_dump()
+                for e in entries
+            ],
+            "total": len(entries),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/history")
+def save_history(body: dict):
+    """Save a research result to history."""
+    from mindforge.db import SessionLocal, ResearchHistory
+    import json as _json
+    db = SessionLocal()
+    try:
+        entry = ResearchHistory(
+            user_id=1,  # single-user
+            task=body.get("task", ""),
+            report=body.get("report", ""),
+            quality_score=body.get("quality_score"),
+            model_used=body.get("model_used"),
+            token_usage=_json.dumps(body.get("token_usage", {})),
+        )
+        db.add(entry)
+        db.commit()
+        return {"id": entry.id, "status": "saved"}
+    finally:
+        db.close()
 
 
 @router.post("/mcp")

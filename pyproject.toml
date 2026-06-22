@@ -40,6 +40,9 @@ dependencies = [
     # Cache
     "redis>=5.0.0",
 
+    # Database
+    "sqlalchemy>=2.0.0",
+
     # Observability (optional - graceful fallback if not installed)
 
     # Tools

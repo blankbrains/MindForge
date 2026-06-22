@@ -1,22 +1,32 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import type { DocumentItem, IndexResponse } from "@/types/document";
+import { API_BASE } from "@/lib/constants";
+import type { DocumentItem } from "@/types/document";
 
 export function useDocuments() {
   const qc = useQueryClient();
 
   const list = useQuery<DocumentItem[]>({
     queryKey: ["documents"],
-    queryFn: () => api.get<DocumentItem[]>("/documents"),
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/documents`);
+      if (!res.ok) throw new Error("Failed to fetch documents");
+      return res.json();
+    },
   });
 
   const upload = useMutation({
-    mutationFn: (data: {
-      file_path?: string;
-      file_url?: string;
-      use_raptor?: boolean;
-      use_graphrag?: boolean;
-    }) => api.post<IndexResponse>("/index", data),
+    mutationFn: async (data: FormData) => {
+      const res = await fetch(`${API_BASE}/upload`, {
+        method: "POST",
+        body: data,
+        // Don't set Content-Type — browser sets multipart/form-data with boundary
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || "Upload failed");
+      }
+      return res.json();
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["stats"] });
       qc.invalidateQueries({ queryKey: ["documents"] });
@@ -24,7 +34,10 @@ export function useDocuments() {
   });
 
   const remove = useMutation({
-    mutationFn: (docId: string) => api.delete(`/documents/${docId}`),
+    mutationFn: async (docId: string) => {
+      const res = await fetch(`${API_BASE}/documents/${docId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["stats"] });
       qc.invalidateQueries({ queryKey: ["documents"] });

@@ -1,4 +1,5 @@
 import { useResearchSession } from "@/hooks/use-research-session";
+import { useResearchStore } from "@/store/research-store";
 import { QueryInput } from "@/components/research/query-input";
 import { PlanDAG } from "@/components/research/plan-dag";
 import { SubtaskProgressList } from "@/components/research/subtask-progress-list";
@@ -9,6 +10,8 @@ import { Search, Loader2, XCircle } from "lucide-react";
 
 export function ResearchPage() {
   const session = useResearchSession();
+  const task = useResearchStore((s) => s.task);
+  const setTask = useResearchStore((s) => s.setTask);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -16,7 +19,7 @@ export function ResearchPage() {
         <h1 className="text-3xl font-bold tracking-tight">研究工作台</h1>
         <p className="mt-1 text-text-muted">输入研究问题，观察 Multi-Agent 系统实时协作</p>
       </div>
-      <QueryInput onSubmit={session.startResearch} disabled={session.isStreaming} />
+      <QueryInput value={task} onChange={setTask} onSubmit={session.startResearch} disabled={session.isStreaming} />
       {session.isError && (
         <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
           <XCircle className="h-5 w-5 shrink-0" />

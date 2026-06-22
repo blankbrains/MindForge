@@ -81,6 +81,52 @@ DocumentsListResponse = list[DocumentItem]
 # Health
 # ------------------------------------------------------------------
 
+class DocumentContentResponse(BaseModel):
+    """Full content of a document (all chunks combined)."""
+
+    doc_id: str
+    filename: str
+    content: str
+    chunk_count: int
+    chunks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SettingsResponse(BaseModel):
+    """User settings (API keys masked)."""
+
+    llm_provider: str = "deepseek"
+    deepseek_api_key: str = ""
+    openai_api_key: str = ""
+    embedding_provider: str = "openai"
+
+
+class SettingsUpdateRequest(BaseModel):
+    """Payload for updating user settings."""
+
+    llm_provider: str | None = None
+    deepseek_api_key: str | None = None
+    openai_api_key: str | None = None
+    embedding_provider: str | None = None
+
+
+class HistoryItem(BaseModel):
+    """A single research history entry."""
+
+    id: int
+    task: str
+    report: str | None = None
+    quality_score: float | None = None
+    model_used: str | None = None
+    created_at: str | None = None
+
+
+class HistoryListResponse(BaseModel):
+    """Paginated history list."""
+
+    entries: list[HistoryItem] = Field(default_factory=list)
+    total: int = 0
+
+
 class HealthResponse(BaseModel):
     """Service health information."""
 
