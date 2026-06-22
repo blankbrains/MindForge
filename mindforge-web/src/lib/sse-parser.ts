@@ -50,7 +50,10 @@ export function createSSEConnection<T>(
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          onComplete();
+          break;
+        }
         parser.feed(decoder.decode(value, { stream: !done }));
       }
     } catch (err) {

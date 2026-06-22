@@ -1,6 +1,6 @@
 import { API_BASE } from "./constants";
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
@@ -11,9 +11,13 @@ class ApiError extends Error {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
+  const { headers: optHeaders, ...restOpts } = options ?? {};
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    ...options,
+    ...restOpts,
+    headers: {
+      "Content-Type": "application/json",
+      ...optHeaders,
+    },
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "Unknown error");

@@ -35,7 +35,7 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
+      <nav aria-label="主导航" className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive =
             to === "/" ? pathname === "/" : pathname.startsWith(to);
@@ -43,6 +43,7 @@ export function Sidebar() {
             <Link
               key={to}
               to={to}
+              search={{}}
               className={cn(
                 "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
                 isActive
@@ -50,7 +51,7 @@ export function Sidebar() {
                   : "text-text-muted hover:bg-surface-alt hover:text-text",
               )}
             >
-              <Icon className="h-4.5 w-4.5" />
+              <Icon className="h-4 w-4" />
               {label}
             </Link>
           );

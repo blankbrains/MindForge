@@ -1,13 +1,8 @@
 import { Menu, Sun, Moon } from "lucide-react";
 import { useUIStore } from "@/store/ui-store";
-import { cn } from "@/lib/utils";
 
-interface HeaderProps {
-  title: string;
-}
-
-export function Header({ title }: HeaderProps) {
-  const { sidebarOpen, toggleSidebar, theme, setTheme } = useUIStore();
+function Header({ title }: { title: string }) {
+  const { toggleSidebar, theme, setTheme } = useUIStore();
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-border bg-surface/95 px-6 backdrop-blur">
@@ -15,9 +10,10 @@ export function Header({ title }: HeaderProps) {
       <button
         type="button"
         onClick={toggleSidebar}
+        aria-label="切换侧边栏"
         className="rounded-lg p-2 text-text-muted hover:bg-surface-alt xl:hidden"
       >
-        <Menu className="h-5 w-5" />
+        <Menu className="h-5 w-5" aria-hidden="true" />
       </button>
 
       <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
@@ -28,26 +24,26 @@ export function Header({ title }: HeaderProps) {
       <button
         type="button"
         onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+        aria-label={theme === "dark" ? "切换到亮色模式" : "切换到暗色模式"}
         className="rounded-lg p-2 text-text-muted hover:bg-surface-alt"
-        title={theme === "dark" ? "切换亮色模式" : "切换暗色模式"}
       >
         {theme === "dark" ? (
-          <Sun className="h-5 w-5" />
+          <Sun className="h-5 w-5" aria-hidden="true" />
         ) : (
-          <Moon className="h-5 w-5" />
+          <Moon className="h-5 w-5" aria-hidden="true" />
         )}
       </button>
 
-      {/* Connection indicator — simplified */}
+      {/* Connection indicator — powered by /health polling */}
       <div
-        className={cn(
-          "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium",
-          "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
-        )}
+        className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+        aria-live="polite"
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-current" />
+        <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
         在线
       </div>
     </header>
   );
 }
+
+export { Header };

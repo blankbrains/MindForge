@@ -43,7 +43,7 @@ export function StatusCardsGrid() {
         >
           <div className="flex items-center justify-between">
             <span className="text-sm text-text-muted">{label}</span>
-            <Icon className="h-4.5 w-4.5 text-text-muted opacity-60" />
+            <Icon className="h-4 w-4 text-text-muted opacity-60" />
           </div>
           <div className="mt-3 flex items-center gap-2">
             {isLoading ? (

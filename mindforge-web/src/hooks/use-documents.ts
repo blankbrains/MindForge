@@ -7,7 +7,7 @@ export function useDocuments() {
 
   const list = useQuery<DocumentItem[]>({
     queryKey: ["documents"],
-    queryFn: () => api.get("/stats").then((s) => []), // placeholder until backend adds list endpoint
+    queryFn: () => api.get("/stats").then(() => []), // TODO: replace with list endpoint
   });
 
   const upload = useMutation({
