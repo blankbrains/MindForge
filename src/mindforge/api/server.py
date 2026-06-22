@@ -65,8 +65,10 @@ async def startup():
     # Database init
     try:
         from mindforge.db import init_db
+        from mindforge.db import _DB_URL
         init_db()
-        logger.info("Database initialized (SQLite)")
+        backend = "PostgreSQL" if "postgresql" in _DB_URL else "SQLite"
+        logger.info("Database initialized (%s)", backend)
     except Exception as e:
         logger.warning("Database init skipped: %s", e)
 

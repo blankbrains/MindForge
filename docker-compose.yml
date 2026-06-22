@@ -25,6 +25,24 @@ services:
       --maxmemory-policy allkeys-lru
     restart: unless-stopped
 
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: mindforge
+      POSTGRES_PASSWORD: mindforge
+      POSTGRES_DB: mindforge
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "mindforge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   qdrant_data:
   redis_data:
+  postgres_data:
