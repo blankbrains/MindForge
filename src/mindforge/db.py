@@ -17,20 +17,32 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 # ---------------------------------------------------------------------------
-# Engine — SQLite by default, PostgreSQL when DATABASE_URL is set
+# Engine — PostgreSQL preferred, SQLite fallback
 # ---------------------------------------------------------------------------
 
-_DB_URL = os.getenv(
-    "DATABASE_URL",
-    f"sqlite+aiosqlite:///{Path(__file__).resolve().parent.parent.parent / 'data' / 'mindforge.db'}",
+_DEFAULT_PG_URL = "postgresql://mindforge:mindforge@localhost:5432/mindforge"
+_DEFAULT_SQLITE_URL = (
+    f"sqlite:///{Path(__file__).resolve().parent.parent.parent / 'data' / 'mindforge.db'}"
 )
 
-# Use sync engine for simplicity (FastAPI is async but SQLAlchemy sessions
-# work fine with sync in route handlers since we're not at extreme scale).
+_DB_URL = os.getenv("DATABASE_URL", "")
+
+if not _DB_URL:
+    # Try PostgreSQL first (Docker), fall back to SQLite
+    try:
+        import psycopg2  # noqa: F401 — probe driver availability
+        _test_engine = create_engine(_DEFAULT_PG_URL, echo=False)
+        _test_engine.connect().close()
+        _DB_URL = _DEFAULT_PG_URL
+    except Exception:
+        _DB_URL = _DEFAULT_SQLITE_URL
+
 _engine = create_engine(
-    _DB_URL.replace("+aiosqlite", ""),  # sync driver for create_engine
+    _DB_URL,
     connect_args={"check_same_thread": False} if "sqlite" in _DB_URL else {},
     echo=False,
+    pool_pre_ping=True if "postgresql" in _DB_URL else False,
+    pool_size=5 if "postgresql" in _DB_URL else 0,
 )
 
 SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
