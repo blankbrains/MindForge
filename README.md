@@ -27,7 +27,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 | 🎯 **自适应检索策略** | 根据问题类型（事实/概念/比较/流程/分析/关系）自动选择最优检索策略 |
 | 🔄 **自我批评优化** | Critic Agent 从 5 个维度评分，低于阈值自动触发精炼循环 |
 | 🔌 **标准化工具接入** | 通过 MCP 协议动态发现和调用外部工具，支持热插拔 |
-| ⚡ **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，DeepSeek 成本降低 90% |
+| ⚡ **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，适配 OpenAI 与 DeepSeek 全系模型 |
 | 📡 **SSE 流式输出** | 实时推送 Agent 思考过程、工具调用、合成进度 |
 | 🎨 **React 19 前端** | 暗色模式、响应式布局、React Flow DAG 可视化、Recharts 雷达图 |
 
@@ -78,7 +78,7 @@ flowchart TD
 | 🏗️ **层次化检索** | RAPTOR Tree（自底向上摘要树） |
 | 🕸️ **图谱检索** | GraphRAG（跨文档实体关系发现） |
 | 🔌 **工具协议** | MCP（Model Context Protocol）— 标准化工具接入 |
-| 🧩 **模型** | OpenAI GPT-4o / DeepSeek-v4 一键切换 |
+| 🧩 **模型** | OpenAI GPT-4o / DeepSeek（deepseek-chat / deepseek-reasoner）一键切换 |
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
 | ⚡ **API** | FastAPI + SSE 流式 + Pydantic v2 |
 | 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
@@ -224,9 +224,9 @@ cd ../src && uvicorn mindforge.api.server:app --host 0.0.0.0 --port 8000
 
 MindForge 实现了**双向 MCP**：既可以作为 MCP Client 调用外部工具，也可以作为 MCP Server 暴露自身能力。
 
-### 作为 MCP Server（给 Claude Code / VS Code 使用）
+### 作为 MCP Server（给 MCP Host 使用）
 
-在客户端的 `mcp.json` 中添加：
+在支持 MCP 协议的客户端（Claude Code、Cline、Cursor、Continue 等）的 `mcp.json` 中添加：
 
 ```json
 {
@@ -293,7 +293,7 @@ GitHub Actions 自动运行：
 
 ### 📡 MCP 双向协议
 
-- **Server 端** — 将 MindForge 的检索和研究能力暴露为 4 个标准 MCP 工具，Claude Code / VS Code 可直接调用
+- **Server 端** — 将 MindForge 的检索和研究能力暴露为 4 个标准 MCP 工具，支持 MCP 协议的客户端（Claude Code、Cline、Cursor 等）可直接调用
 - **Client 端** — Researcher Agent 可动态发现并调用外部 MCP Server（如 GitHub、Context7），支持热插拔
 
 ### 🔍 自适应混合检索
