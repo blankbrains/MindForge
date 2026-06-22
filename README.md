@@ -1,10 +1,22 @@
 # MindForge — 自适应研究助理系统
 
-> Multi-Agent RAG + MCP 协议 + GraphRAG
+> **全栈 Multi-Agent RAG** · React 19 前端 · FastAPI 后端 · MCP 协议 · GraphRAG · SSE 流式
+
+[![CI](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml/badge.svg)](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml)
 
 ## 项目概述
 
-MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统。它能够接收用户提出的复杂研究问题，自动将问题分解为多步子任务，并行检索知识库和互联网信息，综合多源信息生成结构化的研究报告，并通过自我批评机制迭代优化输出质量。
+MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由 **Python 后端**（FastAPI + Multi-Agent RAG）和 **React 前端**（TypeScript + Tailwind CSS + shadcn/ui）构成。它能够接收用户提出的复杂研究问题，自动将问题分解为 DAG 子任务，并行检索知识库和互联网信息，综合多源信息生成结构化的研究报告，并通过自我批评机制迭代优化输出质量。
+
+### 🖥️ 前端界面
+
+| 页面 | 功能 |
+|------|------|
+| **概览 Dashboard** | 服务状态（Qdrant/Redis/MCP）+ 快捷操作入口 |
+| **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
+| **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
+| **研究历史** | 自动捕获研究结果、可展开预览、删除 / 清空管理 |
+| **系统配置** | LLM 供应商切换、检索参数、Agent 参数管理 |
 
 ### 核心能力
 
@@ -16,7 +28,8 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统。它
 | **自我批评优化** | Critic Agent 从 5 个维度评分，低于阈值自动触发精炼循环 |
 | **标准化工具接入** | 通过 MCP 协议动态发现和调用外部工具，支持热插拔 |
 | **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，DeepSeek 成本降低 90% |
-| **流式输出** | 支持 SSE 流式推送，前端可实时展示 Agent 思考过程和中间结果 |
+| **SSE 流式输出** | 实时推送 Agent 思考过程、工具调用、合成进度 |
+| **React 19 前端** | 暗色模式、响应式布局、React Flow DAG 可视化、Recharts 雷达图 |
 
 ### 工作流程
 
@@ -29,7 +42,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统。它
 └──────────────────┬─────────────────────────┘
                    ↓
 ┌─ Researcher Agent ──────────────────────────┐
-│  并行执行子任务                               │
+│  并行执行子任务（ReAct 循环）                 │
 │  ├── RAGTool（知识库检索）                    │
 │  ├── WebSearchTool（互联网搜索）              │
 │  ├── CodeExecutor（代码执行/数据分析）         │
@@ -44,7 +57,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统。它
                    ↓
 ┌─ Critic Agent ──────────────────────────────┐
 │  5 维度评分（完整性/准确性/深度/清晰度/引用质量）│
-│  < 7.0 分 → 返回 Synthesizer 精炼            │
+│  < 7.0 分 → 返回 Synthesizer 精炼（最多 2 轮） │
 │  ≥ 7.0 分 → 输出最终报告                     │
 └─────────────────────────────────────────────┘
 ```
@@ -53,280 +66,205 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统。它
 
 | 层 | 技术 |
 |---|------|
-| Agent 框架 | LangGraph Multi-Agent (Planner→Researcher→Critic→Synthesizer) |
-| 检索引擎 | Qdrant（向量库）+ BM25（稀疏检索）+ RRF 融合 + CrossEncoder 精排 |
-| 层次化检索 | RAPTOR Tree（自底向上摘要树） |
-| 图谱检索 | GraphRAG（跨文档实体关系发现） |
-| 工具协议 | MCP (Model Context Protocol) — 标准化工具接入 |
-| 模型 | OpenAI GPT-4o / DeepSeek-v4 一键切换 |
-| 记忆系统 | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
-| 质量保障 | Critic Agent 自评分 + Self-Refine 精炼循环 |
-| 防幻觉 | 引用验证工具 + 多源交叉验证 |
-| 服务 | FastAPI + SSE 流式输出 |
-| 可观测 | LangFuse + 本地 JSONL 追踪 |
-| 部署 | Docker Compose（Qdrant + Redis + API） |
+| **前端** | React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Vite |
+| **前端状态** | TanStack Router · TanStack Query · Zustand |
+| **前端可视化** | React Flow (DAG) · Recharts (雷达图) · react-markdown |
+| **Agent 框架** | Multi-Agent (Planner → Researcher → Synthesizer → Critic) |
+| **检索引擎** | Qdrant（向量库）+ BM25（稀疏检索）+ RRF 融合 + CrossEncoder 精排 |
+| **层次化检索** | RAPTOR Tree（自底向上摘要树） |
+| **图谱检索** | GraphRAG（跨文档实体关系发现） |
+| **工具协议** | MCP (Model Context Protocol) — 标准化工具接入 |
+| **模型** | OpenAI GPT-4o / DeepSeek-v4 一键切换 |
+| **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
+| **API** | FastAPI + SSE 流式 + Pydantic v2 |
+| **可观测** | LangFuse + 本地 JSONL 追踪 |
+| **部署** | Docker Compose（Qdrant + Redis + API）· 前端构建后由 FastAPI 托管 |
 
 ## 项目结构
 
 ```
-mindforge/
-├── pyproject.toml                 # 项目依赖管理
-├── docker-compose.yml             # Docker 编排（Qdrant + Redis + API）
-├── Dockerfile                     # 容器构建
-├── .env.example                   # 环境变量模板
+MindForge/
+├── pyproject.toml                  # 后端依赖管理（Python）
+├── docker-compose.yml              # Docker 编排（Qdrant + Redis）
+├── Dockerfile                      # 容器构建
+├── .env.example                    # 环境变量模板
+├── .github/workflows/ci.yml        # CI/CD（ruff + pytest）
 │
-├── scripts/
-│   ├── run_research.py            # 研究任务执行脚本
-│   └── mcp_discover.py            # MCP 工具发现脚本
+├── mindforge-web/                  # 🆕 React 前端
+│   ├── package.json                # 前端依赖（npm）
+│   ├── vite.config.ts              # Vite 构建配置 + API 代理
+│   ├── tsconfig.json               # TypeScript 严格模式
+│   ├── index.html                  # SPA 入口
+│   └── src/
+│       ├── main.tsx                # React 根组件（ErrorBoundary 包裹）
+│       ├── index.css               # Tailwind + CSS 变量主题
+│       ├── routeTree.ts            # 路由树
+│       ├── types/                  # TypeScript 类型定义
+│       │   ├── api.ts              # API 响应类型
+│       │   ├── research.ts         # Agent / SSE / 研究类型
+│       │   └── document.ts         # 文档类型
+│       ├── lib/                    # 工具函数
+│       │   ├── api.ts              # HTTP 客户端（统一错误处理）
+│       │   ├── sse-parser.ts       # SSE 流式解析器
+│       │   ├── constants.ts        # API 路径常量
+│       │   └── utils.ts            # cn() / 格式化 / 日期
+│       ├── store/                  # Zustand 状态管理
+│       │   ├── research-store.ts   # 研究会话状态（SSE 事件 handler）
+│       │   ├── ui-store.ts         # UI 状态（主题/侧边栏）
+│       │   ├── history-store.ts    # 研究历史（自动捕获，上限 100）
+│       │   └── settings-store.ts   # LLM/检索/Agent 配置
+│       ├── hooks/                  # 自定义 Hooks
+│       │   ├── use-research-session.ts  # 研究会话生命周期（SSE + 历史）
+│       │   ├── use-health.ts       # /health 轮询
+│       │   ├── use-stats.ts        # /stats 轮询
+│       │   ├── use-documents.ts    # 文档 CRUD
+│       │   └── use-media-query.ts  # 响应式断点
+│       ├── components/
+│       │   ├── layout/             # AppShell / Sidebar / Header
+│       │   ├── research/           # QueryInput / PlanDAG / ReportViewer / CriticPanel
+│       │   ├── dashboard/          # StatusCardsGrid
+│       │   ├── pages/              # 页面组件（5 个）
+│       │   └── shared/             # EmptyState / ErrorBoundary / LoadingSkeleton
+│       └── routes/                 # 路由定义（薄壳，每个文件只 export Route）
 │
-├── src/mindforge/
-│   ├── config.py                  # 统一配置管理（Pydantic Settings）
-│   │
-│   ├── ingestion/                 # 文档处理流水线
-│   │   ├── parsers.py             # 多格式解析（PDF/DOCX/HTML/MD/TXT）
-│   │   ├── chunker.py             # 文本分块（递归分割 + 语义分割）
-│   │   ├── embedder.py            # Embedding 生成（OpenAI / BGE 双模式）
-│   │   └── raptor.py              # RAPTOR 层次化索引
-│   │
-│   ├── retrieval/                 # 检索系统
-│   │   ├── vector_store.py        # Qdrant 向量库封装
-│   │   ├── bm25.py                # BM25 稀疏检索
-│   │   ├── hybrid.py              # 混合检索 + RRF 融合
-│   │   ├── reranker.py            # CrossEncoder 精排
-│   │   ├── adaptive.py            # 自适应检索策略路由
-│   │   └── graphrag.py            # GraphRAG 引擎
-│   │
-│   ├── agents/                    # Multi-Agent 系统
-│   │   ├── base.py                # Agent 基类（工具循环框架）
-│   │   ├── planner.py             # Planner Agent（DAG 任务分解）
-│   │   ├── researcher.py          # Researcher Agent（ReAct 研究执行）
-│   │   ├── critic.py              # Critic Agent（5 维质量评估）
-│   │   ├── synthesizer.py         # Synthesizer Agent（报告生成）
-│   │   └── orchestrator.py        # 编排器（多 Agent 调度）
-│   │
-│   ├── memory/                    # 记忆系统
-│   │   ├── working.py             # 工作记忆（任务内上下文）
-│   │   ├── episodic.py            # 情节记忆（跨会话历史）
-│   │   └── semantic.py            # 语义记忆（持久化事实）
-│   │
-│   ├── tools/                     # Agent 工具
-│   │   ├── base.py                # 工具基类
-│   │   ├── rag_tool.py            # 知识库检索工具
-│   │   ├── web_search.py          # 网络搜索工具
-│   │   ├── code_executor.py       # 代码执行工具
-│   │   ├── citation_verifier.py   # 引用验证工具
-│   │   └── mcp_adapter.py         # MCP 协议适配器
-│   │
-│   ├── mcp/                       # MCP 协议层
-│   │   ├── registry.py            # MCP 工具注册表
-│   │   ├── client.py              # MCP 客户端（调用外部工具）
-│   │   └── server.py              # MCP 服务端（暴露 Agent 能力）
-│   │
-│   ├── models/                    # 模型层
-│   │   ├── base.py                # 模型抽象接口
-│   │   ├── openai_adapter.py      # OpenAI 适配器
-│   │   └── deepseek_adapter.py    # DeepSeek 适配器
-│   │
-│   ├── observability/             # 可观测性
-│   │   ├── tracer.py              # 链路追踪（LangFuse + 本地）
-│   │   └── metrics.py             # 指标收集
-│   │
-│   └── api/                       # API 服务层
-│       ├── schemas.py             # 请求/响应模型
-│       ├── routes.py              # REST 路由
-│       └── server.py              # FastAPI 应用
+├── src/mindforge/                  # Python 后端
+│   ├── config.py                   # 统一配置管理（Pydantic Settings）
+│   ├── ingestion/                  # 文档处理流水线
+│   │   ├── parsers.py              # 多格式解析（PDF/DOCX/HTML/MD/TXT）
+│   │   ├── chunker.py              # 文本分块（递归分割 + 语义分割）
+│   │   ├── embedder.py             # Embedding（SentenceTransformer / OpenAI / fallback）
+│   │   └── raptor.py               # RAPTOR 层次化索引
+│   ├── retrieval/                  # 检索系统
+│   │   ├── vector_store.py         # Qdrant 向量库封装
+│   │   ├── bm25.py                 # BM25 稀疏检索
+│   │   ├── hybrid.py               # 混合检索 + RRF 融合
+│   │   ├── reranker.py             # CrossEncoder 精排
+│   │   ├── adaptive.py             # 自适应检索策略路由
+│   │   └── graphrag.py             # GraphRAG 引擎
+│   ├── agents/                     # Multi-Agent 系统
+│   │   ├── base.py                 # Agent 基类
+│   │   ├── planner.py              # Planner Agent（DAG 任务分解）
+│   │   ├── researcher.py           # Researcher Agent（ReAct 循环）
+│   │   ├── critic.py               # Critic Agent（5 维质量评估）
+│   │   ├── synthesizer.py          # Synthesizer Agent（报告生成）
+│   │   └── orchestrator.py         # 编排器（多 Agent 调度 + SSE 事件）
+│   ├── memory/                     # 三层记忆系统
+│   ├── tools/                      # Agent 工具集（RAG/Web/Code/Citation/MCP）
+│   ├── mcp/                        # MCP 协议（Server + Client 双端）
+│   ├── models/                     # LLM 适配器（OpenAI / DeepSeek）
+│   ├── observability/              # 追踪 & 指标（LangFuse + JSONL）
+│   └── api/                        # FastAPI 路由 + 静态文件托管
+│       ├── schemas.py              # Pydantic 请求/响应模型
+│       ├── routes.py               # REST + SSE 路由
+│       └── server.py               # 应用入口（启动时构建前端后托管）
 │
-└── tests/
-    ├── test_retrieval.py
-    ├── test_mcp_adapter.py
-    └── test_models.py
+├── tests/                          # Python 测试（pytest + pytest-cov）
+│   ├── test_retrieval.py           # 检索系统测试（40 个）
+│   ├── test_mcp_adapter.py         # MCP 适配器测试
+│   └── test_models.py              # 模型适配器测试
+│
+├── scripts/                        # CLI 辅助脚本
+└── data/                           # 文档存放目录
 ```
 
-### 架构分层
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                      API 服务层                           │
-│        FastAPI + SSE 流式 + LangFuse 可观测性              │
-├──────────────────────────────────────────────────────────┤
-│                   Agent 推理层                             │
-│   Planner → Researcher → Synthesizer → Critic（循环精炼）  │
-├──────────────────────────────────────────────────────────┤
-│                    工具层                                  │
-│   RAG / Web Search / Code Exec / Citation / MCP Adapter   │
-├──────────────────────────────────────────────────────────┤
-│                    检索层                                  │
-│   Qdrant + BM25 + RAPTOR + GraphRAG + CrossEncoder        │
-├──────────────────────────────────────────────────────────┤
-│                  模型 + 记忆 + MCP                          │
-│   OpenAI/DeepSeek  │  三层记忆  │  MCP 协议生态             │
-└──────────────────────────────────────────────────────────┘
-```
-
-## 开始使用
+## 快速启动
 
 ### 环境要求
 
-- Python 3.10+
-- Docker（可选，用于 Qdrant 和 Redis）
+- **后端**: Python 3.10+ · Docker（Qdrant + Redis）
+- **前端**: Node.js 18+ · npm 9+
 
-### 快速启动（本地开发）
+### 1. 启动后端
 
 ```bash
-# 1. 克隆项目
-git clone <repo-url> && cd mindforge
+git clone <repo-url> && cd MindForge
 
-# 2. 创建虚拟环境
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. 安装依赖
+# 安装依赖
 pip install -e ".[dev]"
 
-# 4. 配置环境变量
+# 配置环境变量
 cp .env.example .env
-# 编辑 .env，设置 LLM_PROVIDER=deepseek 或 openai，并填入对应 API Key
+# 编辑 .env，设置 LLM 供应商和 API Key
 
-# 5. 启动基础设施（需要 Docker）
-docker-compose up -d qdrant redis
+# 启动基础设施（Qdrant + Redis）
+docker compose up -d
 
-# 6. 验证 API 连通性
-python scripts/run_research.py
-
-# 7. 启动 API 服务
-uvicorn mindforge.api.server:app --reload --port 8000
-
-# 8. 访问 API 文档
-open http://localhost:8000/docs
+# 启动 API 服务
+cd src && uvicorn mindforge.api.server:app --reload --port 8000
 ```
 
-### 快速启动（无 Docker）
+### 2. 启动前端
 
 ```bash
-# 不启动 Qdrant/Redis，仅测试 API 和 Agent 核心逻辑
-python scripts/run_research.py
-uvicorn mindforge.api.server:app --reload --port 8000
-# 注意：无 Qdrant 时检索功能不可用，但 Agent 推理和 LLM 调用可正常运行
+cd mindforge-web
+npm install
+npm run dev     # 开发模式 → http://localhost:5173
 ```
 
-### API 接口
+开发模式下 Vite 自动将 `/api/*` 代理到 `http://localhost:8000`，前后端分离开发。
+
+### 3. 生产部署（单端口）
+
+```bash
+cd mindforge-web && npm run build   # 构建前端到 dist/
+cd ../src && uvicorn mindforge.api.server:app --host 0.0.0.0 --port 8000
+```
+
+打开 **`http://localhost:8000`** — FastAPI 同时托管 API 和前端静态文件，一个端口搞定。
+
+## API 接口
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/query` | 提交研究任务（支持 sync / SSE stream） |
+| POST | `/api/v1/query` | 提交研究任务（支持 `stream: true` SSE 流式） |
 | POST | `/api/v1/index` | 索引文档到知识库 |
-| GET | `/api/v1/health` | 健康检查 |
-| GET | `/api/v1/stats` | 系统统计 |
+| GET | `/api/v1/health` | 健康检查（Qdrant / Redis / MCP 连通性） |
+| GET | `/api/v1/stats` | 系统统计（文档数 / 数据库状态） |
 | DELETE | `/api/v1/documents/{doc_id}` | 删除文档 |
 | GET | `/api/v1/mcp` | MCP 端点元信息 |
-| POST | `/api/v1/mcp` | MCP JSON-RPC 消息入口 |
-| GET | `/` | 服务信息 |
+| POST | `/api/v1/mcp` | MCP JSON-RPC 入口 |
 
 ### 调用示例
 
 ```bash
-# 提交研究任务
+# 提交研究任务（同步）
 curl -X POST http://localhost:8000/api/v1/query \
   -H 'Content-Type: application/json' \
-  -d '{
-    "task": "解释Transformer中的自注意力机制",
-    "stream": false
-  }'
+  -d '{"task": "解释 Transformer 中的自注意力机制", "stream": false}'
 
 # 流式调用
 curl -X POST http://localhost:8000/api/v1/query \
   -H 'Content-Type: application/json' \
-  -d '{
-    "task": "比较RAG和微调两种方法的优劣",
-    "stream": true
-  }'
+  -d '{"task": "比较 RAG 和微调两种方法的优劣", "stream": true}'
 
 # 索引文档
 curl -X POST http://localhost:8000/api/v1/index \
   -H 'Content-Type: application/json' \
-  -d '{
-    "file_path": "data/docs/transformer_intro.md",
-    "use_raptor": true,
-    "use_graphrag": true
-  }'
+  -d '{"file_path": "data/transformer_intro.md", "use_raptor": true}'
 ```
+
+## SSE 事件协议
+
+流式查询（`stream: true`）返回以下 SSE 事件序列：
+
+| 事件类型 | 数据 | 说明 |
+|----------|------|------|
+| `plan_ready` | `{ type, plan: ResearchPlan }` | Planner 完成 DAG 分解 |
+| `subtask_start` | `{ type, task_id, description }` | 子任务开始执行 |
+| `subtask_result` | `{ type, task_id, result: AgentResult }` | 子任务执行完毕 |
+| `synthesizing` | `{ type, status: "start" \| "done" }` | 报告合成进度 |
+| `critic_feedback` | `{ type, score: CriticScore, round }` | Critic 评分反馈 |
+| `refining` | `{ type, round }` | 报告精炼中 |
+| `done` | `{ type, result: AgentResult }` | 研究完成 |
+| `[DONE]` | — | 流终止标记 |
 
 ## MCP 协议集成
 
-MindForge 实现了**双向 MCP**：既可以作为 MCP Client 调用外部 MCP Server 的工具，也可以作为 MCP Server 将自己的能力暴露给其它 MCP Host（如 Claude Code、VS Code、Cursor 等）。
+MindForge 实现了**双向 MCP**：既可以作为 MCP Client 调用外部工具，也可以作为 MCP Server 暴露自身能力。
 
-### 架构概览
+### 作为 MCP Server（给 Claude Code / VS Code 使用）
 
-```
-┌─ 作为 MCP Client ─────────────────────────────────────────┐
-│                                                             │
-│  Researcher Agent                                           │
-│    └── MCPToolAdapter ──→ MCPRegistry ──→ mcp.json          │
-│                                              │              │
-│                   ┌──────────────────────────┼──────────┐   │
-│                   ▼                          ▼          ▼   │
-│              context7 MCP               GitHub MCP   Qdrant  │
-│              (库文档查询)               (代码搜索)   (向量库) │
-│                                                             │
-├─ 作为 MCP Server ───────────────────────────────────────────┤
-│                                                             │
-│  外部 MCP Host                                               │
-│  (Claude Code/VS Code/自定义客户端)                          │
-│    │  MCP 协议 (stdio 或 HTTP/SSE)                          │
-│    ▼                                                         │
-│  MindForgeMCPServer                                         │
-│    ├── search_knowledge_base(query)    → 检索知识库         │
-│    ├── run_research_task(topic)        → 执行完整研究       │
-│    ├── verify_citation(text, sources)  → 验证引用           │
-│    └── system_status()                 → 系统状态查询       │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 方式一：将 MindForge 注册为 MCP Server（推荐）
-
-在 **Claude Code / VS Code / Cursor** 等支持 MCP 的客户端的 `mcp.json` 中添加如下配置，即可让这些工具直接调用 MindForge 的 Agent 能力。
-
-#### stdio 模式（本地运行）
-
-`uvx` / `npx` 能直接运行 `mcp-server-qdrant` 是因为它已发布到 PyPI/npm。MindForge 目前是本地项目，需要用以下方式之一安装后才能注册：
-
-**方式 A：通过 pip 安装到虚拟环境**
-
-```bash
-# 在项目目录下执行（激活虚拟环境后）
-cd /path/to/mindforge
-pip install -e .
-```
-
-安装后 `mindforge-mcp-server` 命令可用，`mcp.json` 配置如下：
-
-```json
-{
-  "mcpServers": {
-    "mindforge": {
-      "command": "mindforge-mcp-server",
-      "args": [],
-      "env": {
-        "LLM_LLM_PROVIDER": "deepseek",
-        "LLM_DEEPSEEK_API_KEY": "sk-xxx"
-      }
-    }
-  }
-}
-```
-
-> 提示：`env` 中可配置 LLM 提供商和 API Key，未设置时会读 `.env` 文件或环境变量默认值。
-
-**方式 B：通过 uv tool 安装到全局**
-
-```bash
-uv tool install /path/to/mindforge --editable
-```
-
-安装后同样是 `"command": "mindforge-mcp-server"`，无需激活虚拟环境。
-
-**方式 C：直接用 python -m（零安装，适合快速测试）**
+在客户端的 `mcp.json` 中添加：
 
 ```json
 {
@@ -343,33 +281,7 @@ uv tool install /path/to/mindforge --editable
 }
 ```
 
-> 注意：`python` 必须在能 import `mindforge` 的虚拟环境中运行，或用绝对路径如 `D:/dev/python/python3.12.4/python.exe`。
-
-**未来发布到 PyPI 后，就可以像 qdrant 一样简洁：**
-
-```json
-{
-  "mcpServers": {
-    "mindforge": {
-      "command": "uvx",
-      "args": ["mindforge-mcp-server"]
-    }
-  }
-}
-```
-
-配置后，你的 MCP Host 中会出现 4 个工具：
-
-| 工具名 | 说明 |
-|--------|------|
-| `search_knowledge_base` | 搜索 MindForge 知识库（支持 semantic / hybrid / keyword 模式） |
-| `run_research_task` | 执行完整的多步研究任务（支持 quick / standard / deep 深度） |
-| `verify_citation` | 验证报告中 `[N]` 标记的引用是否对应有效来源 |
-| `system_status` | 查询 MindForge 系统状态、可用工具和内存使用 |
-
-#### HTTP / SSE 模式（远程访问）
-
-适用于 MindForge 部署在远程服务器的情况：
+或通过 HTTP 远程访问：
 
 ```json
 {
@@ -382,92 +294,32 @@ uv tool install /path/to/mindforge --editable
 }
 ```
 
-### 方式二：直接调用 MCP HTTP 端点
+暴露的工具：`search_knowledge_base` · `run_research_task` · `verify_citation` · `system_status`
 
-如果不想通过 mcp.json 配置，也可以直接对 MindForge 的 MCP 端点发 POST 请求：
+### 作为 MCP Client（接入外部工具）
 
-```bash
-# 列出可用工具
-curl -X POST http://localhost:8000/api/v1/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/list"
-  }'
-
-# 调用搜索知识库工具
-curl -X POST http://localhost:8000/api/v1/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "tools/call",
-    "params": {
-      "name": "search_knowledge_base",
-      "arguments": {
-        "query": "Transformer 自注意力机制",
-        "mode": "hybrid",
-        "top_k": 5
-      }
-    }
-  }'
-
-# 执行完整研究任务
-curl -X POST http://localhost:8000/api/v1/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "run_research_task",
-      "arguments": {
-        "topic": "2025年最值得关注的AI Agent框架",
-        "depth": "standard",
-        "max_sources": 8
-      }
-    }
-  }'
-```
-
-### 方式三：为 MindForge 接入外部 MCP 工具
-
-MindForge 的 Researcher Agent 可以通过 MCP 协议调用外部工具来增强能力。在项目根目录的 `mcp.json` 中添加配置即可：
+在项目根目录的 `mcp.json` 中配置外部 MCP Server，Researcher Agent 的 ReAct 循环会自动发现并调用：
 
 ```json
 {
   "mcpServers": {
-    "context7": {
-      "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"]
-    },
+    "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp"] },
     "github": {
       "command": "npx",
       "args": ["-y", "@github/github-mcp-server"],
-      "env": {
-        "GITHUB_TOKEN": "ghp_xxx"
-      }
-    },
-    "qdrant": {
-      "command": "uvx",
-      "args": ["mcp-server-qdrant"],
-      "env": {
-        "QDRANT_URL": "http://localhost:6333",
-        "COLLECTION_NAME": "mindforge_docs"
-      }
+      "env": { "GITHUB_TOKEN": "ghp_xxx" }
     }
   }
 }
 ```
 
-配置后，Researcher Agent 在执行 ReAct 循环时会自动发现并使用这些 MCP 工具。系统启动时会预加载 MCP 配置，工具调用经 `MCPRegistry` → `MCPToolAdapter` 链路由到对应外部服务。
+## CI/CD
 
-#### MCP 端点元信息
+GitHub Actions 自动运行：
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/v1/mcp` | 获取 MCP 端点信息和可用工具列表 |
-| `POST` | `/api/v1/mcp` | MCP JSON-RPC 消息入口（tools/list / tools/call） |
+- **ruff check** — Python 代码风格 + import 顺序
+- **pytest + coverage** — 40 个单元测试（跳过 `integration` 标记的测试）
+- Qdrant + Redis 作为 Service Container 提供基础设施
 
 ## 技术亮点
+
