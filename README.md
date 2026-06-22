@@ -12,11 +12,11 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 
 | 页面 | 功能 |
 |------|------|
-| **概览 Dashboard** | 服务状态（Qdrant/Redis/MCP）+ 快捷操作入口 |
-| **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
-| **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
-| **研究历史** | 自动捕获研究结果、可展开预览、删除 / 清空管理 |
-| **系统配置** | LLM 供应商切换、检索参数、Agent 参数管理 |
+| 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / MCP）+ 快捷操作入口 |
+| 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
+| 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
+| 🕐 **研究历史** | 自动捕获研究结果、可展开预览、删除 / 清空管理 |
+| ⚙️ **系统配置** | LLM 供应商切换、检索参数、Agent 参数管理 |
 
 ### 核心能力
 
@@ -33,33 +33,37 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 
 ### 工作流程
 
-```
-用户输入问题
-    ↓
-┌─ Planner Agent ─────────────────────────────┐
-│  任务分解：将问题拆解为 DAG 子任务            │
-│  识别依赖：分析子任务间的先后关系              │
-└──────────────────┬─────────────────────────┘
-                   ↓
-┌─ Researcher Agent ──────────────────────────┐
-│  并行执行子任务（ReAct 循环）                 │
-│  ├── RAGTool（知识库检索）                    │
-│  ├── WebSearchTool（互联网搜索）              │
-│  ├── CodeExecutor（代码执行/数据分析）         │
-│  ├── CitationVerifier（引用验证）             │
-│  └── MCPToolAdapter（外部 MCP 工具）          │
-└──────────────────┬─────────────────────────┘
-                   ↓
-┌─ Synthesizer Agent ─────────────────────────┐
-│  综合所有子任务结果                            │
-│  生成结构化研究报告（摘要→分析→结论→引用）      │
-└──────────────────┬─────────────────────────┘
-                   ↓
-┌─ Critic Agent ──────────────────────────────┐
-│  5 维度评分（完整性/准确性/深度/清晰度/引用质量）│
-│  < 7.0 分 → 返回 Synthesizer 精炼（最多 2 轮） │
-│  ≥ 7.0 分 → 输出最终报告                     │
-└─────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[🙋 用户输入问题] --> B
+    subgraph B[🧠 Planner Agent]
+        B1[任务分解为 DAG 子任务]
+        B2[识别子任务依赖关系]
+    end
+    B --> C
+    subgraph C[🔬 Researcher Agent · 并行执行]
+        C1[📚 RAGTool · 知识库检索]
+        C2[🌐 WebSearch · 互联网搜索]
+        C3[💻 CodeExecutor · 数据分析]
+        C4[✅ CitationVerifier · 引用验证]
+        C5[🔌 MCPToolAdapter · 外部工具]
+    end
+    C --> D
+    subgraph D[📝 Synthesizer Agent]
+        D1[综合子任务结果]
+        D2[生成结构化报告]
+    end
+    D --> E
+    subgraph E[🎯 Critic Agent]
+        E1[5 维度评分]
+        E2{"≥ 7.0 分?"}
+        E3[✅ 输出最终报告]
+        E4[🔄 返回精炼 · 最多 2 轮]
+    end
+    E1 --> E2
+    E2 -- 是 --> E3
+    E2 -- 否 --> E4
+    E4 --> D
 ```
 
 ### 技术栈
@@ -171,8 +175,12 @@ MindForge/
 
 ### 环境要求
 
-- **后端**: Python 3.10+ · Docker（Qdrant + Redis）
-- **前端**: Node.js 18+ · npm 9+
+| 组件 | 要求 | 说明 |
+|------|------|------|
+| 🐍 Python | `>= 3.9` | 推荐 3.11+ |
+| 🐳 Docker | 可选 | 用于 Qdrant + Redis 基础设施，无 Docker 时可跳过检索功能运行 |
+| 🟢 Node.js | `>= 18` | 前端构建 / 开发 |
+| 📦 npm | `>= 9` | 随 Node.js 18+ 附带
 
 ### 1. 启动后端
 
@@ -323,3 +331,34 @@ GitHub Actions 自动运行：
 
 ## 技术亮点
 
+### 🧠 自适应 Agent 编排
+
+- **DAG 任务分解** — 复杂问题自动拆解为有依赖关系的子任务，识别哪些可并行、哪些需串行
+- **ReAct 工具循环** — Researcher Agent 遵循 Thought → Action → Observation 模式，逐步收集证据
+- **Self-Refine 精炼** — Critic 从完整性、准确性、深度、清晰度、引用质量 5 维度评分，不合格自动打回重写
+
+### 📡 MCP 双向协议
+
+- **Server 端** — 将 MindForge 的检索和研究能力暴露为 4 个标准 MCP 工具，Claude Code / VS Code 可直接调用
+- **Client 端** — Researcher Agent 可动态发现并调用外部 MCP Server（如 GitHub、Context7），支持热插拔
+
+### 🔍 自适应混合检索
+
+- **6 种查询意图分类** — 事实 / 概念 / 比较 / 流程 / 分析 / 关系，每种自动选择最优检索策略
+- **HyDE + Multi-Query** — 概念类查询生成假设文档再检索，比较类查询多角度改写
+- **RRF 融合 + CrossEncoder** — 稠密向量 + 稀疏 BM25 倒数秩融合，再经交叉编码器精排
+- **RAPTOR + GraphRAG** — 文档层次化摘要树 + 跨文档实体关系图双重索引
+
+### 🎨 现代化前端体验
+
+- **实时可视化** — React Flow 渲染 DAG 执行图，Recharts 雷达图展示 Critic 评分，Markdown 渲染报告
+- **暗色模式** — CSS 变量驱动，一键切换，自动跟随系统偏好
+- **SSE 流式渲染** — 后端事件逐条推送，前端实时更新 Agent 思考过程、工具调用、合成进度
+- **响应式布局** — 桌面侧边栏 + 移动端底部导航，Tailwind CSS 断点适配
+
+### 🔧 工程化
+
+- **TypeScript 严格模式** — `noUnusedLocals` + `noUnusedParameters` 全开，零类型错误
+- **Zustand 选择器模式** — 精准订阅，避免不必要的重渲染
+- **单端口部署** — 前端构建后由 FastAPI 直接托管，无需 Nginx 反向代理
+- **CI/CD** — GitHub Actions 自动 ruff 检查 + pytest 40 个测试 + coverage 报告
