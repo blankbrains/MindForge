@@ -344,7 +344,7 @@ class MindForgeMCPServer:
         """
         parts: list[str] = [
             f"# Research: {topic}\n",
-            f"> Generated without LLM — retrieval-only mode.\n",
+            "> Generated without LLM — retrieval-only mode.\n",
             "",
             "## 📚 Knowledge Base Results\n",
         ]
