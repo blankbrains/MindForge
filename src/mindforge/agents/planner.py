@@ -156,8 +156,9 @@ class PlannerAgent(BaseAgent):
         settings = get_settings()
         # Use the planner-specific model from config
         planner_model = settings.llm.get_model("planner")
-        # Re-create LLM with the planner model if available
-        if hasattr(self, "_llm"):
+        # Temporarily switch LLM to planner-specific model (restore after)
+        _old_llm = getattr(self, "_llm", None)
+        if _old_llm is not None:
             from mindforge.models.base import LLMFactory
             self._llm = LLMFactory.create(
                 settings.llm.llm_provider, planner_model
@@ -213,3 +214,7 @@ class PlannerAgent(BaseAgent):
                     "Could not decompose into multiple subtasks."
                 ),
             )
+        finally:
+            # Restore original LLM to avoid mutating shared instance
+            if _old_llm is not None:
+                self._llm = _old_llm

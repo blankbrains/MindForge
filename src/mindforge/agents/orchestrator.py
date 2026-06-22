@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import traceback
 from typing import Any, AsyncIterator, Optional
+
+logger = logging.getLogger(__name__)
 
 from mindforge.agents.base import AgentResult
 from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
 from mindforge.agents.researcher import ResearcherAgent
 from mindforge.agents.critic import CriticAgent, CriticScore
 from mindforge.agents.synthesizer import SynthesizerAgent
+from mindforge.tools.rag_tool import RAGTool
+from mindforge.tools.web_search import WebSearchTool
+from mindforge.tools.mcp_adapter import MCPToolAdapter
 from mindforge.config import get_settings
 
 # ---------------------------------------------------------------------------
@@ -74,7 +80,16 @@ class Orchestrator:
         self._settings = get_settings()
 
         self._planner = planner or PlannerAgent()
-        self._researcher = researcher or ResearcherAgent()
+
+        # Build default tool set for ResearcherAgent
+        _tools: list = [RAGTool(), WebSearchTool()]
+        try:
+            _tools.append(MCPToolAdapter())
+        except Exception:
+            pass  # MCP not available — non-fatal
+        _researcher_tools = _tools
+
+        self._researcher = researcher or ResearcherAgent(tools=_researcher_tools)
         self._critic = critic or CriticAgent()
         self._synthesizer = synthesizer or SynthesizerAgent()
 
@@ -112,8 +127,8 @@ class Orchestrator:
                         data={"from_cache": True, "pipeline": pipeline_log},
                         latency_ms=elapsed,
                     )
-            except Exception:
-                pass  # Memory lookup failure is non-fatal
+            except Exception as exc:
+                logger.warning("Episodic memory recall failed: %s", exc)
 
         # ------------------------------------------------------------------
         # Step 1: Plan — decompose into DAG
@@ -256,14 +271,14 @@ class Orchestrator:
                         ),
                     },
                 )
-            except Exception:
-                pass  # Memory write failure is non-fatal
+            except Exception as exc:
+                logger.warning("Episodic memory store failed: %s", exc)
 
         if self._semantic_memory is not None:
             try:
                 await self._semantic_memory.store(task, current_draft)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Semantic memory store failed: %s", exc)
 
         # ------------------------------------------------------------------
         # Done
@@ -281,6 +296,13 @@ class Orchestrator:
                 "subtask_outputs": subtask_outputs,
                 "critic_score": final_critic.to_dict() if final_critic else None,
                 "refine_rounds": refine_count,
+            },
+            metadata={
+                "quality": final_critic.overall if final_critic else 0.0,
+                "cost": total_cost,
+                "subtask_count": len(plan.subtasks),
+                "refine_rounds": refine_count,
+                "model": self._settings.llm.llm_provider,
             },
             token_usage=total_usage,
             latency_ms=elapsed_ms,

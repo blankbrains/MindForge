@@ -1,7 +1,7 @@
 """DeepSeek 适配器 — 通过 OpenAI 兼容接口调用 DeepSeek 模型。
 
 DeepSeek 的 chat API 与 OpenAI 完全兼容，但价格约为 OpenAI 的 1/10。
-DeepSeek 不提供原生 Embedding API，因此使用 sentence-transformers (BGE-m3) 本地计算嵌入向量。
+DeepSeek 不提供原生 Embedding API，因此使用 sentence-transformers (all-MiniLM-L6-v2) 本地计算嵌入向量（384维）。
 """
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
@@ -15,7 +15,7 @@ import numpy as np
 from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, StreamEvent
 
 
-# 延迟加载 BGE-m3 模型（单例）
+# 延迟加载 embedding 模型（单例，384维）
 _EMBEDDER = None
 
 
@@ -24,7 +24,7 @@ def _get_embedder():
     if _EMBEDDER is None:
         from sentence_transformers import SentenceTransformer
         _EMBEDDER = SentenceTransformer(
-            "BAAI/bge-m3",
+            "sentence-transformers/all-MiniLM-L6-v2",
             device=os.getenv("SENTENCE_TRANSFORMERS_DEVICE", "cpu"),
         )
     return _EMBEDDER

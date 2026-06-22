@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 import logging
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -48,8 +48,17 @@ def get_orchestrator() -> Orchestrator:
 def get_retriever() -> AdaptiveRetriever:
     global _adaptive_retriever
     if _adaptive_retriever is None:
+        from mindforge.retrieval.vector_store import get_vector_store
+        from mindforge.ingestion.embedder import get_embedder
+
+        _embed_fn = get_embedder().embed_single
+        _store = get_vector_store()
+
         _adaptive_retriever = AdaptiveRetriever(
-            hybrid_retriever=HybridRetriever(),
+            hybrid_retriever=HybridRetriever(
+                vector_store=_store,
+                embedding_fn=_embed_fn,
+            ),
             reranker=CrossEncoderReranker(),
         )
     return _adaptive_retriever
@@ -208,12 +217,20 @@ async def health():
         rc.close()
     except Exception:
         pass
+    # Check MCP registry
+    mcp_ok = False
+    try:
+        _reg = get_mcp_registry()
+        mcp_ok = _reg is not None and _reg.is_any_running
+    except Exception:
+        pass
+
     return HealthResponse(
         status="ok",
         version="1.0.0",
         qdrant_connected=qdrant_ok,
         redis_connected=redis_ok,
-        mcp_tools_available=False,
+        mcp_tools_available=mcp_ok,
     )
 
 
@@ -248,6 +265,59 @@ async def delete_document(doc_id: str):
     except Exception as e:
         logger.warning(f"Delete failed for {doc_id}: {e}")
     return None
+
+
+@router.post("/mcp")
+async def mcp_endpoint(request: dict):
+    """MCP JSON-RPC endpoint — exposes MindForce tools via MCP over HTTP.
+
+    Accepts standard MCP JSON-RPC messages (initialize, tools/list, tools/call)
+    and delegates to MindForgeMCPServer. Enables external MCP clients to
+    call Agent capabilities over HTTP.
+    """
+    try:
+        from mindforge.mcp.server import MindForgeMCPServer
+        mcp_server = MindForgeMCPServer()
+        result = await mcp_server.handle_request(request)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/mcp")
+async def mcp_info():
+    """Return MCP endpoint metadata."""
+    return {
+        "protocol": "Model Context Protocol",
+        "version": "2025-03-26",
+        "endpoint": "/api/v1/mcp",
+        "transport": "HTTP POST (JSON-RPC)",
+        "tools": [
+            {"name": "search_knowledge_base", "description": "Search the knowledge base"},
+            {"name": "run_research_task", "description": "Run a multi-step research task"},
+            {"name": "verify_citation", "description": "Verify citation markers"},
+            {"name": "system_status", "description": "Get MindForge system status"},
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Module-level MCP registry for preloading (set by server startup)
+# ---------------------------------------------------------------------------
+
+_mcp_registry: Any = None
+
+
+def get_mcp_registry() -> Any:
+    """Get the preloaded MCP registry singleton."""
+    global _mcp_registry
+    return _mcp_registry
+
+
+def set_mcp_registry(registry: Any) -> None:
+    """Set the preloaded MCP registry (called at startup)."""
+    global _mcp_registry
+    _mcp_registry = registry
 
 
 async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[bytes, None]:

@@ -218,6 +218,8 @@ uvicorn mindforge.api.server:app --reload --port 8000
 | GET | `/api/v1/health` | 健康检查 |
 | GET | `/api/v1/stats` | 系统统计 |
 | DELETE | `/api/v1/documents/{doc_id}` | 删除文档 |
+| GET | `/api/v1/mcp` | MCP 端点元信息 |
+| POST | `/api/v1/mcp` | MCP JSON-RPC 消息入口 |
 | GET | `/` | 服务信息 |
 
 ### 调用示例
@@ -249,17 +251,223 @@ curl -X POST http://localhost:8000/api/v1/index \
   }'
 ```
 
-## 技术亮点
+## MCP 协议集成
 
-| 特性 | 说明 |
-|------|------|
-| Multi-Agent 流水线 | Planner→Researcher→Synthesizer→Critic，职责单一、可独立优化 |
-| DAG 任务分解 | 复杂问题自动拆解为有向无环图，支持并行执行 |
-| MCP 协议集成 | 工具通过 Model Context Protocol 标准化接入，支持动态发现 |
-| 双引擎检索 | RAPTOR 层次化索引 + GraphRAG 实体图谱，适配不同查询类型 |
-| 自适应策略 | 根据 6 种查询类型自动路由到最优检索策略 |
-| 多模型支持 | OpenAI / DeepSeek 一键切换，对上层 Agent 完全透明 |
-| 自我批评 | Critic Agent 5 维度评分 + Self-Refine 迭代精炼 |
-| 三层记忆 | 工作记忆（任务内）+ 情节记忆（跨会话）+ 语义记忆（持久化） |
-| 引用验证 | 自动验证报告中的引用是否能在源文档中找到 |
-| 全链路可观测 | LangFuse + 本地 JSONL 双写追踪 |
+MindForge 实现了**双向 MCP**：既可以作为 MCP Client 调用外部 MCP Server 的工具，也可以作为 MCP Server 将自己的能力暴露给其它 MCP Host（如 Claude Code、VS Code、Cursor 等）。
+
+### 架构概览
+
+```
+┌─ 作为 MCP Client ─────────────────────────────────────────┐
+│                                                             │
+│  Researcher Agent                                           │
+│    └── MCPToolAdapter ──→ MCPRegistry ──→ mcp.json          │
+│                                              │              │
+│                   ┌──────────────────────────┼──────────┐   │
+│                   ▼                          ▼          ▼   │
+│              context7 MCP               GitHub MCP   Qdrant  │
+│              (库文档查询)               (代码搜索)   (向量库) │
+│                                                             │
+├─ 作为 MCP Server ───────────────────────────────────────────┤
+│                                                             │
+│  外部 MCP Host                                               │
+│  (Claude Code/VS Code/自定义客户端)                          │
+│    │  MCP 协议 (stdio 或 HTTP/SSE)                          │
+│    ▼                                                         │
+│  MindForgeMCPServer                                         │
+│    ├── search_knowledge_base(query)    → 检索知识库         │
+│    ├── run_research_task(topic)        → 执行完整研究       │
+│    ├── verify_citation(text, sources)  → 验证引用           │
+│    └── system_status()                 → 系统状态查询       │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 方式一：将 MindForge 注册为 MCP Server（推荐）
+
+在 **Claude Code / VS Code / Cursor** 等支持 MCP 的客户端的 `mcp.json` 中添加如下配置，即可让这些工具直接调用 MindForge 的 Agent 能力。
+
+#### stdio 模式（本地运行）
+
+`uvx` / `npx` 能直接运行 `mcp-server-qdrant` 是因为它已发布到 PyPI/npm。MindForge 目前是本地项目，需要用以下方式之一安装后才能注册：
+
+**方式 A：通过 pip 安装到虚拟环境**
+
+```bash
+# 在项目目录下执行（激活虚拟环境后）
+cd /path/to/mindforge
+pip install -e .
+```
+
+安装后 `mindforge-mcp-server` 命令可用，`mcp.json` 配置如下：
+
+```json
+{
+  "mcpServers": {
+    "mindforge": {
+      "command": "mindforge-mcp-server",
+      "args": [],
+      "env": {
+        "LLM_LLM_PROVIDER": "deepseek",
+        "LLM_DEEPSEEK_API_KEY": "sk-xxx"
+      }
+    }
+  }
+}
+```
+
+> 提示：`env` 中可配置 LLM 提供商和 API Key，未设置时会读 `.env` 文件或环境变量默认值。
+
+**方式 B：通过 uv tool 安装到全局**
+
+```bash
+uv tool install /path/to/mindforge --editable
+```
+
+安装后同样是 `"command": "mindforge-mcp-server"`，无需激活虚拟环境。
+
+**方式 C：直接用 python -m（零安装，适合快速测试）**
+
+```json
+{
+  "mcpServers": {
+    "mindforge": {
+      "command": "python",
+      "args": ["-m", "mindforge.mcp.server"],
+      "env": {
+        "LLM_LLM_PROVIDER": "deepseek",
+        "LLM_DEEPSEEK_API_KEY": "sk-xxx"
+      }
+    }
+  }
+}
+```
+
+> 注意：`python` 必须在能 import `mindforge` 的虚拟环境中运行，或用绝对路径如 `D:/dev/python/python3.12.4/python.exe`。
+
+**未来发布到 PyPI 后，就可以像 qdrant 一样简洁：**
+
+```json
+{
+  "mcpServers": {
+    "mindforge": {
+      "command": "uvx",
+      "args": ["mindforge-mcp-server"]
+    }
+  }
+}
+```
+
+配置后，你的 MCP Host 中会出现 4 个工具：
+
+| 工具名 | 说明 |
+|--------|------|
+| `search_knowledge_base` | 搜索 MindForge 知识库（支持 semantic / hybrid / keyword 模式） |
+| `run_research_task` | 执行完整的多步研究任务（支持 quick / standard / deep 深度） |
+| `verify_citation` | 验证报告中 `[N]` 标记的引用是否对应有效来源 |
+| `system_status` | 查询 MindForge 系统状态、可用工具和内存使用 |
+
+#### HTTP / SSE 模式（远程访问）
+
+适用于 MindForge 部署在远程服务器的情况：
+
+```json
+{
+  "mcpServers": {
+    "mindforge": {
+      "url": "http://your-server:8000/api/v1/mcp",
+      "transport": "sse"
+    }
+  }
+}
+```
+
+### 方式二：直接调用 MCP HTTP 端点
+
+如果不想通过 mcp.json 配置，也可以直接对 MindForge 的 MCP 端点发 POST 请求：
+
+```bash
+# 列出可用工具
+curl -X POST http://localhost:8000/api/v1/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/list"
+  }'
+
+# 调用搜索知识库工具
+curl -X POST http://localhost:8000/api/v1/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "search_knowledge_base",
+      "arguments": {
+        "query": "Transformer 自注意力机制",
+        "mode": "hybrid",
+        "top_k": 5
+      }
+    }
+  }'
+
+# 执行完整研究任务
+curl -X POST http://localhost:8000/api/v1/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "run_research_task",
+      "arguments": {
+        "topic": "2025年最值得关注的AI Agent框架",
+        "depth": "standard",
+        "max_sources": 8
+      }
+    }
+  }'
+```
+
+### 方式三：为 MindForge 接入外部 MCP 工具
+
+MindForge 的 Researcher Agent 可以通过 MCP 协议调用外部工具来增强能力。在项目根目录的 `mcp.json` 中添加配置即可：
+
+```json
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@github/github-mcp-server"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxx"
+      }
+    },
+    "qdrant": {
+      "command": "uvx",
+      "args": ["mcp-server-qdrant"],
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "COLLECTION_NAME": "mindforge_docs"
+      }
+    }
+  }
+}
+```
+
+配置后，Researcher Agent 在执行 ReAct 循环时会自动发现并使用这些 MCP 工具。系统启动时会预加载 MCP 配置，工具调用经 `MCPRegistry` → `MCPToolAdapter` 链路由到对应外部服务。
+
+#### MCP 端点元信息
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/mcp` | 获取 MCP 端点信息和可用工具列表 |
+| `POST` | `/api/v1/mcp` | MCP JSON-RPC 消息入口（tools/list / tools/call） |
+
+## 技术亮点

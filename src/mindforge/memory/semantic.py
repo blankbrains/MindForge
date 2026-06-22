@@ -162,6 +162,14 @@ class SemanticMemory:
 
         return result
 
+    # ------------------------------------------------------------------
+    # Alias used by Orchestrator
+    # ------------------------------------------------------------------
+
+    async def store(self, task: str, output: str) -> None:
+        """Async alias for ``add_fact`` — used by Orchestrator."""
+        self.add_fact(fact_key=hash(task) % 10**7, content=output, category="research", confidence=0.8)
+
     def search_facts(self, query: str, top_k: int = 5) -> list[Fact]:
         """Simple keyword-based fact retrieval.
 

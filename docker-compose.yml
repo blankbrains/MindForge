@@ -1,8 +1,6 @@
-version: "3.8"
-
 services:
   qdrant:
-    image: qdrant/qdrant:v1.9.0
+    image: docker.m.daocloud.io/qdrant/qdrant:v1.10.0
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -16,9 +14,9 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: docker.m.daocloud.io/library/redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -26,31 +24,6 @@ services:
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
     restart: unless-stopped
-
-  mindforge:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    env_file: .env
-    environment:
-      - VECTOR_QDRANT_URL=http://qdrant:6333
-      - CACHE_REDIS_URL=redis://redis:6379
-    volumes:
-      - ./data:/app/data
-      - ./.embedding_cache:/app/.embedding_cache
-      - ./.bm25_index:/app/.bm25_index
-      - ./.semantic_memory:/app/.semantic_memory
-      - ./.traces:/app/.traces
-      - ~/.claude/mcp.json:/root/.claude/mcp.json:ro
-    depends_on:
-      qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    command: uvicorn mindforge.api.server:app --host 0.0.0.0 --port 8000 --workers 2
 
 volumes:
   qdrant_data:

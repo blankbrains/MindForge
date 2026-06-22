@@ -1,33 +1,53 @@
-"""Embedding 生成引擎 — sentence-transformers 语义向量"""
+"""Embedding 生成引擎 — 轻量哈希 embedding（零模型加载，适合快速部署后替换）"""
+
 from __future__ import annotations
+import hashlib
+import math
 from typing import List, Optional
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
-# 使用国内镜像（服务器无法直连 huggingface.co）
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
 
 class EmbeddingManager:
-    def __init__(self):
-        self._model = None
-        self._dim = 384
+    """Zero-dependency embedding via deterministic hash projection.
 
-    def _load_model(self):
-        if self._model is not None:
-            return
-        from sentence_transformers import SentenceTransformer
-        logger.info("Loading sentence-transformers/all-MiniLM-L6-v2...")
-        self._model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-        self._dim = self._model.get_embedding_dimension()
-        logger.info(f"Model loaded. Dimension: {self._dim}")
+    Uses a fixed random seed to project token hashes into a 384-dim space.
+    Intended as a bootstrap / demo replacement — swap with a real model
+    (sentence-transformers, fastembed, API) for production.
+    """
+
+    def __init__(self, dim: Optional[int] = None):
+        if dim is None:
+            from mindforge.config import get_settings
+            dim = get_settings().vector_store.embedding_dim
+        self._dim = dim
+        self._rng = None
+
+    def _get_proj(self) -> List[float]:
+        """Deterministic pseudo-random projection vector (cached)."""
+        if self._rng is None:
+            import random
+            rng = random.Random(42)
+            self._rng = [rng.gauss(0, 1) for _ in range(self._dim)]
+        return self._rng
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        self._load_model()
-        embeddings = self._model.encode(texts, show_progress_bar=False)
-        return embeddings.tolist()
+        proj = self._get_proj()
+        results = []
+        for text in texts:
+            words = text.lower().split()
+            vec = [0.0] * self._dim
+            for word in words:
+                h = int(hashlib.md5(word.encode()).hexdigest(), 16)
+                idx = h % self._dim
+                vec[idx] += 1.0
+            # Normalise
+            norm = math.sqrt(sum(x * x for x in vec))
+            if norm > 0:
+                vec = [x / norm for x in vec]
+            results.append(vec)
+        return results
 
     def embed_single(self, text: str) -> List[float]:
         return self.embed([text])[0]
