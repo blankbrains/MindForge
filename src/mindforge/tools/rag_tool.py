@@ -82,7 +82,7 @@ class RAGTool(BaseTool):
         """Synchronous wrapper — uses thread pool when event loop is running."""
         import asyncio
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()  # probe: raises RuntimeError if no loop
         except RuntimeError:
             # No running event loop — safe to use asyncio.run()
             return asyncio.run(self.execute_async(query=query, mode=mode, top_k=top_k, threshold=threshold, **kwargs))

@@ -412,10 +412,10 @@ def get_settings_api():
 @router.put("/settings")
 def update_settings_api(body: SettingsUpdateRequest):
     """Save user settings (API keys encrypted in DB)."""
-    from mindforge.db import SessionLocal, ApiKey, decrypt_api_key, encrypt_api_key
+    from mindforge.db import SessionLocal, ApiKey, encrypt_api_key
     db = SessionLocal()
     try:
-        user = db.query(ApiKey).first()  # single-user for now
+        db.query(ApiKey).first()  # ensure table exists for single-user mode
         for provider, key_val in [
             ("deepseek", body.deepseek_api_key),
             ("openai", body.openai_api_key),

@@ -111,7 +111,7 @@ class MCPToolAdapter(BaseTool):
         """
         import asyncio
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()  # probe: raises RuntimeError if no loop
         except RuntimeError:
             return asyncio.run(self.execute_async(**kwargs))
         else:
