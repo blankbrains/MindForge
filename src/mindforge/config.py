@@ -58,7 +58,7 @@ class VectorStoreConfig(BaseSettings):
     qdrant_url: str = Field(default="http://localhost:6333")
     qdrant_api_key: Optional[str] = Field(default=None)
     collection_name: str = Field(default="mindforge_docs")
-    embedding_dim: int = Field(default=1536)
+    embedding_dim: int = Field(default=384)
     model_config = SettingsConfigDict(env_prefix="VECTOR_", extra="ignore")
 
 

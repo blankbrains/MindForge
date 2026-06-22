@@ -135,6 +135,29 @@ class EpisodicMemory:
 
         return scored[:top_k]
 
+    # ------------------------------------------------------------------
+    # Aliases used by Orchestrator
+    # ------------------------------------------------------------------
+
+    async def store(self, task: str, result: dict) -> None:
+        """Async alias for ``add_episode`` — used by Orchestrator.
+
+        Accepts a result dict (with an ``output`` key) and delegates to the
+        synchronous ``add_episode``.
+        """
+        output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
+        self.add_episode(task=task, result=output, sources=[])
+
+    async def recall(self, task: str) -> dict | None:
+        """Async alias for ``search_similar`` — used by Orchestrator.
+
+        Returns the top episode's result dict, or ``None`` if no match.
+        """
+        matches = self.search_similar(query=task, top_k=1)
+        if matches:
+            return {"output": matches[0].result, "episode": matches[0]}
+        return None
+
     def get_user_profile(self) -> dict[str, float]:
         """Return the distribution of task types across stored episodes.
 

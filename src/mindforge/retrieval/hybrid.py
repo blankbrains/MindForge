@@ -53,12 +53,12 @@ class HybridRetriever:
                 vector_hits = await self.vector_store.search(
                     vector=dense_vec, top_k=top_k
                 )
-                for hit in vector_hits:
+                for payload, score in vector_hits:
                     all_results.append(
                         {
-                            "id": getattr(hit, "id", ""),
-                            "text": getattr(hit, "payload", {}).get("text", ""),
-                            "score": float(getattr(hit, "score", 0.0)),
+                            "id": payload.get("chunk_id", ""),
+                            "text": payload.get("content", ""),
+                            "score": float(score),
                             "source": "vector",
                         }
                     )
@@ -74,12 +74,12 @@ class HybridRetriever:
                     hyde_hits = await self.vector_store.search(
                         vector=hyp_vec, top_k=top_k
                     )
-                    for hit in hyde_hits:
+                    for payload, score in hyde_hits:
                         all_results.append(
                             {
-                                "id": getattr(hit, "id", ""),
-                                "text": getattr(hit, "payload", {}).get("text", ""),
-                                "score": float(getattr(hit, "score", 0.0)),
+                                "id": payload.get("chunk_id", ""),
+                                "text": payload.get("content", ""),
+                                "score": float(score),
                                 "source": "hyde",
                             }
                         )

@@ -53,6 +53,9 @@ dependencies = [
     "loguru>=0.7.0",
 ]
 
+[project.scripts]
+mindforge-mcp-server = "mindforge.mcp.server:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",

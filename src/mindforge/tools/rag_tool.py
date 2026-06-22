@@ -8,7 +8,7 @@ from typing import Any, Optional
 from mindforge.tools.base import BaseTool, ToolResult
 
 try:
-    from mindforge.retrieval.adaptive_retriever import AdaptiveRetriever
+    from mindforge.retrieval.adaptive import AdaptiveRetriever, QueryMode
 except ImportError:
     AdaptiveRetriever = None  # type: ignore[assignment]
 
@@ -78,7 +78,7 @@ class RAGTool(BaseTool):
             "Install mindforge with retrieval extras or provide a retriever instance."
         )
 
-    def execute(
+    async def execute_async(
         self,
         query: str,
         mode: str = "hybrid",
@@ -96,13 +96,19 @@ class RAGTool(BaseTool):
 
         retriever = self._get_retriever()
 
+        # Convert string mode to QueryMode enum
+        mode_map = {
+            "semantic": QueryMode.FACTUAL,
+            "hybrid": QueryMode.FACTUAL,
+            "keyword": QueryMode.FACTUAL,
+        }
+        qmode = mode_map.get(mode, QueryMode.FACTUAL)
+
         try:
-            results = retriever.retrieve(
+            result_dict = await retriever.retrieve(
                 query=query,
-                mode=mode,
+                mode=qmode,
                 top_k=top_k,
-                threshold=threshold,
-                **kwargs,
             )
         except Exception as exc:
             elapsed = (time.perf_counter() - start) * 1000
@@ -113,6 +119,7 @@ class RAGTool(BaseTool):
             )
 
         elapsed = (time.perf_counter() - start) * 1000
+        results = result_dict.get("results", []) if isinstance(result_dict, dict) else result_dict
 
         if not results:
             return ToolResult(

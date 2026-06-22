@@ -72,13 +72,21 @@ class ResearcherAgent(BaseAgent):
         """
         settings = get_settings()
         researcher_model = settings.llm.get_model("researcher")
-        if hasattr(self, "_llm"):
+        _old_llm = getattr(self, "_llm", None)
+        if _old_llm is not None:
             from mindforge.models.base import LLMFactory
             self._llm = LLMFactory.create(
                 settings.llm.llm_provider, researcher_model
             )
-
-        return await self._run_tool_loop(
+        try:
+            return await self._run_tool_loop(
+                task,
+                context=context,
+                max_rounds=max_rounds,
+            )
+        finally:
+            if _old_llm is not None:
+                self._llm = _old_llm
             task,
             context=context,
             max_rounds=max_rounds,
@@ -113,9 +121,10 @@ class ResearcherAgent(BaseAgent):
         max_rounds = max_rounds or settings.agent.max_iterations
         start_time = time.perf_counter()
 
-        # Resolve model
+        # Resolve model (save and restore to avoid mutating shared instance)
         researcher_model = settings.llm.get_model("researcher")
-        if hasattr(self, "_llm"):
+        _old_s_llm = getattr(self, "_llm", None)
+        if _old_s_llm is not None:
             from mindforge.models.base import LLMFactory
             self._llm = LLMFactory.create(
                 settings.llm.llm_provider, researcher_model
@@ -243,3 +252,7 @@ class ResearcherAgent(BaseAgent):
             cost_usd=cost,
         )
         yield {"type": "final_answer", "content": final_content, "result": agent_result}
+
+        # Restore original LLM after stream ends
+        if _old_s_llm is not None:
+            self._llm = _old_s_llm

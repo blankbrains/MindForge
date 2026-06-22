@@ -30,3 +30,16 @@ build/
 
 # Docker
 .docker/
+
+# Node / Frontend
+node_modules/
+
+# Claude Code local config
+.claude/
+
+# MCP config with secrets (API keys)
+.mcp.json
+
+# Plan files
+*_plan.md
+*_方案.md

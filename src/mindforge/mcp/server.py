@@ -19,7 +19,7 @@ except ImportError:
     WebSearchTool = None  # type: ignore[assignment]
 
 try:
-    from mindforge.agent.research_agent import ResearchAgent
+    from mindforge.agents.orchestrator import Orchestrator as ResearchAgent
 except ImportError:
     ResearchAgent = None  # type: ignore[assignment]
 
@@ -447,4 +447,9 @@ class MindForgeMCPServer:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    MindForgeMCPServer.run()
+
+
+def main() -> None:
+    """Console-script entry point for ``mindforge-mcp-server``."""
     MindForgeMCPServer.run()

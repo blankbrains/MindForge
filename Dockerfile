@@ -2,6 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# ── 统一 UTF-8 编码（防止中文乱码）──
+ENV PYTHONIOENCODING=utf-8
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
 # 系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential \
