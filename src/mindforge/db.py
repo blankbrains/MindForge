@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import json
 import hashlib
 import secrets
 from datetime import datetime, timezone
@@ -11,8 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Float, DateTime, ForeignKey,
-    create_engine, event,
+    String, Text, Float, DateTime, ForeignKey,
+    create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 

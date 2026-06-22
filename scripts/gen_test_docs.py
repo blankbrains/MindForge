@@ -8,17 +8,20 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.stdout.reconfigure(encoding="utf-8")
 
-os.environ["LLM_LLM_PROVIDER"] = "deepseek"
-os.environ["LLM_DEEPSEEK_API_KEY"] = "sk-83763f65837f415193a260e74fd2bcf8"
-os.environ["LLM_DEEPSEEK_BASE_URL"] = "https://api.deepseek.com"
-
+from mindforge.config import get_settings
 from mindforge.models.deepseek_adapter import DeepSeekAdapter
 from mindforge.models.base import ChatMessage
+
+_settings = get_settings()
+_api_key = _settings.llm.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+if not _api_key:
+    print("❌ 请设置环境变量 LLM_DEEPSEEK_API_KEY 或 DEEPSEEK_API_KEY")
+    sys.exit(1)
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "docs")
 os.makedirs(DOCS_DIR, exist_ok=True)
 
-llm = DeepSeekAdapter(model="deepseek-chat", api_key="sk-83763f65837f415193a260e74fd2bcf8")
+llm = DeepSeekAdapter(model="deepseek-chat", api_key=_api_key)
 
 
 async def gen_doc(filename, title, prompt):
