@@ -88,8 +88,7 @@ class TestAdaptiveRetrieverRouting:
 
     def classify_query(self, query: str) -> str:
         q = query.lower()
-        if any(w in q for w in ["what is", "define", "explain", "什么是"]):
-            return "factual"
+        # Check specific intent patterns first, broad patterns last
         if any(w in q for w in ["concept", "theory", "idea", "概念"]):
             return "conceptual"
         if any(w in q for w in ["compare", "difference", "vs", "versus", "区别", "比较"]):
@@ -100,6 +99,8 @@ class TestAdaptiveRetrieverRouting:
             return "analytical"
         if any(w in q for w in ["relation", "connection", "link", "关系", "联系"]):
             return "graph"
+        if any(w in q for w in ["what is", "define", "explain", "什么是"]):
+            return "factual"
         return "factual"
 
     def test_classify_factual(self):
