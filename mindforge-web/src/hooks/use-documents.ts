@@ -15,11 +15,11 @@ export function useDocuments() {
   });
 
   const upload = useMutation({
-    mutationFn: async (data: FormData) => {
+    mutationFn: async ({ formData, signal }: { formData: FormData; signal?: AbortSignal }) => {
       const res = await fetch(`${API_BASE}/upload`, {
         method: "POST",
-        body: data,
-        // Don't set Content-Type — browser sets multipart/form-data with boundary
+        body: formData,
+        signal,
       });
       if (!res.ok) {
         const text = await res.text();

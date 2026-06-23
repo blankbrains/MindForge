@@ -8,6 +8,7 @@ import { CriticFeedbackPanel } from "@/components/research/critic-feedback-panel
 import { ReportViewer } from "@/components/research/report-viewer";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Search, Loader2, XCircle, AlertTriangle, KeyRound, FileSearch } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 
 export function ResearchPage() {
   const session = useResearchSession();
@@ -85,7 +86,7 @@ export function ResearchPage() {
             <span>文档检索结果（未使用 LLM，如需 AI 分析请配置 API Key）</span>
           </div>
           <div className="prose prose-sm dark:prose-invert max-w-none">
-            <pre className="whitespace-pre-wrap text-sm font-sans">{session.docOnlyResult.output}</pre>
+            <ReactMarkdown>{session.docOnlyResult.output}</ReactMarkdown>
           </div>
         </div>
       )}

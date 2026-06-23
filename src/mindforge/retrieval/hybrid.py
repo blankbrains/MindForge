@@ -189,16 +189,17 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         """Weighted Reciprocal Rank Fusion with constant k = 60.
 
-        Scores from different retrieval paths are combined per document.
-        ``vector_weight`` scales contributions from the vector and HyDE paths;
-        ``bm25_weight`` scales contributions from the BM25/multi-query path.
+        RRF scores are scaled by 60 to produce values in [0, 1] range,
+        then multiplied by the raw cosine similarity score to preserve
+        semantic information from the embedding model.
         """
         fused: Dict[str, Dict[str, Any]] = {}
-        # Track which source each doc came from (use the best score source)
         source_map: Dict[str, str] = {}
 
         for rank, doc in enumerate(results):
             doc_id = doc["id"]
+            raw_score = doc.get("score", 0.0)
+
             if doc_id not in fused:
                 fused[doc_id] = {
                     "id": doc_id,
@@ -216,14 +217,21 @@ class HybridRetriever:
             else:
                 w = 0.5
 
-            # Weighted RRF contribution: w / (rank + k)
-            fused[doc_id]["score"] += w / (rank + _RRF_K)
+            # Weighted RRF contribution, scaled and mixed with raw score
+            # RRF: 1/(k+rank) ≈ 0.016 → scale by 60 → ~1.0 for top result
+            rrf = w * _RRF_K / (rank + _RRF_K)
+            # Blend RRF rank signal with raw semantic score (60:40)
+            fused[doc_id]["score"] += 0.6 * rrf + 0.4 * raw_score
 
-        # Sort descending by fused score
+        # Normalize scores to [0, 1]
+        max_score = max((d["score"] for d in fused.values()), default=0.0)
+        if max_score > 0:
+            for d in fused.values():
+                d["score"] = d["score"] / max_score
+
         sorted_docs = sorted(
             fused.values(), key=lambda x: x["score"], reverse=True
         )
-
         for doc in sorted_docs:
             doc["source"] = source_map.get(doc["id"], "unknown")
 

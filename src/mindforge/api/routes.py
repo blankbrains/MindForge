@@ -570,11 +570,31 @@ def set_mcp_registry(registry: Any) -> None:
 
 
 async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[bytes, None]:
-    """SSE streaming from real orchestrator."""
-    async for event in orch.stream_run(task):
+    """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
+    try:
+        async for event in orch.stream_run(task):
+            try:
+                payload = json.dumps(event, ensure_ascii=False)
+            except TypeError:
+                payload = json.dumps({"event": "info", "content": str(event)[:200]}, ensure_ascii=False)
+            yield f"data: {payload}\n\n".encode("utf-8")
+    except Exception as exc:
+        logger.warning("Agent SSE stream failed: %s — falling back to retrieval-only", exc)
+        from mindforge.tools.rag_tool import RAGTool
         try:
-            payload = json.dumps(event, ensure_ascii=False)
-        except TypeError:
-            payload = json.dumps({"event": "info", "content": str(event)[:200]}, ensure_ascii=False)
-        yield f"data: {payload}\n\n".encode("utf-8")
+            rag = RAGTool()
+            result = rag.safe_execute(query=task, mode="hybrid", top_k=5)
+            fallback = {
+                "type": "done",
+                "result": {
+                    "agent_name": "orchestrator",
+                    "success": True,
+                    "output": result.output if result.success else f"检索失败: {result.error}",
+                    "data": {"fallback": True},
+                    "metadata": {"quality": 0.0, "cost": 0.0, "subtask_count": 0, "model": "fallback-retrieval"},
+                },
+            }
+            yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n".encode("utf-8")
+        except Exception:
+            yield f"data: {json.dumps({'type': 'error', 'content': f'研究失败: {exc}'}, ensure_ascii=False)}\n\n".encode("utf-8")
     yield b"data: [DONE]\n\n"

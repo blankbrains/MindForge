@@ -13,9 +13,14 @@ const tabs: { id: TabId; label: string }[] = [
 export function SettingsPage() {
   const [tab, setTab] = useState<TabId>("llm");
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const saveSettings = useSettingsStore((s) => s.saveSettings);
 
-  const handleSave = () => {
-    setSaved(true);
+  const handleSave = async () => {
+    setSaving(true);
+    const ok = await saveSettings();
+    setSaving(false);
+    setSaved(ok);
     setTimeout(() => setSaved(false), 2000);
   };
 
@@ -40,8 +45,8 @@ export function SettingsPage() {
           <button type="button" onClick={handleReset} className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">
             <RotateCcw className="h-4 w-4" aria-hidden="true" />重置
           </button>
-          <button type="button" onClick={handleSave} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-dark transition-colors">
-            <Save className="h-4 w-4" aria-hidden="true" />{saved ? "已保存" : "保存配置"}
+          <button type="button" onClick={handleSave} disabled={saving} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-dark transition-colors disabled:opacity-50">
+            <Save className="h-4 w-4" aria-hidden="true" />{saving ? "保存中…" : saved ? "已保存 ✓" : "保存配置"}
           </button>
         </div>
       </div>
