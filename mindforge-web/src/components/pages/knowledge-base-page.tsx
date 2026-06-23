@@ -3,7 +3,7 @@ import { useDocuments } from "@/hooks/use-documents";
 import { useStats } from "@/hooks/use-stats";
 import { EmptyState } from "@/components/shared/empty-state";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
-import { FileText, Upload, X, Database, HardDrive, Eye, Loader2, Trash2 } from "lucide-react";
+import { FileText, Upload, X, XCircle, Database, HardDrive, Eye, Loader2, Trash2 } from "lucide-react";
 import { API_BASE } from "@/lib/constants";
 
 export function KnowledgeBasePage() {

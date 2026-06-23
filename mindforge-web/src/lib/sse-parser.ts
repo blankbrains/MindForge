@@ -10,8 +10,10 @@ export function createSSEConnection<T>(
   onError: (err: Error) => void,
 ): { abort: () => void } {
   const controller = new AbortController();
+  let completed = false; // 防重复触发 onComplete
 
   (async () => {
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     try {
       const response = await fetch(url, {
         method: "POST",
@@ -30,13 +32,15 @@ export function createSSEConnection<T>(
         throw new Error("Response has no body stream");
       }
 
-      const reader = response.body.getReader();
+      reader = response.body.getReader();
       const decoder = new TextDecoder();
 
       const parser = createParser({
         onEvent: (event: EventSourceMessage) => {
-          if (event.data === "[DONE]") {
-            onComplete();
+          // 兼容尾部空白：trim 后比较
+          if (!event.data || event.data.trim() === "[DONE]") {
+            if (!completed) { completed = true; onComplete(); }
+            reader?.cancel().catch(() => {});
             return;
           }
           try {
@@ -51,7 +55,7 @@ export function createSSEConnection<T>(
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          onComplete();
+          if (!completed) { completed = true; onComplete(); }
           break;
         }
         parser.feed(decoder.decode(value, { stream: !done }));
@@ -60,6 +64,9 @@ export function createSSEConnection<T>(
       if ((err as Error).name !== "AbortError") {
         onError(err as Error);
       }
+    } finally {
+      // 确保 reader 锁被释放
+      try { reader?.releaseLock(); } catch { /* already released */ }
     }
   })();
 

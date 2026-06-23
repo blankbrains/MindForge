@@ -16,11 +16,11 @@ export function CriticFeedbackPanel({ score }: Props) {
   if (!score) return null;
 
   const data = [
-    { dimension: "完整性", value: score.completeness },
-    { dimension: "准确性", value: score.accuracy },
-    { dimension: "深度", value: score.depth },
-    { dimension: "清晰度", value: score.clarity },
-    { dimension: "引用质量", value: score.citation_quality },
+    { dimension: "完整性", value: score.completeness ?? 0 },
+    { dimension: "准确性", value: score.accuracy ?? 0 },
+    { dimension: "深度", value: score.depth ?? 0 },
+    { dimension: "清晰度", value: score.clarity ?? 0 },
+    { dimension: "引用质量", value: score.citations ?? 0 },
   ];
 
   return (
@@ -61,10 +61,12 @@ export function CriticFeedbackPanel({ score }: Props) {
         </ResponsiveContainer>
       </div>
 
-      {score.feedback && (
-        <p className="mt-3 text-xs text-text-muted leading-relaxed border-t border-border pt-3">
-          {score.feedback}
-        </p>
+      {score.issues && score.issues.length > 0 && (
+        <div className="mt-3 text-xs text-text-muted leading-relaxed border-t border-border pt-3">
+          {score.issues.slice(0, 3).map((issue, i) => (
+            <p key={i} className="mb-1">• {issue}</p>
+          ))}
+        </div>
       )}
     </div>
   );

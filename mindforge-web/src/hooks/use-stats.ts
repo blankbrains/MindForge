@@ -6,6 +6,6 @@ export function useStats() {
   return useQuery<StatsResponse>({
     queryKey: ["stats"],
     queryFn: () => api.get("/stats"),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => (query.state.error ? 120_000 : 30_000),
   });
 }

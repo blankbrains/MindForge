@@ -11,12 +11,16 @@ export function formatDuration(ms: number): string {
 }
 
 export function formatCost(usd: number): string {
+  if (!Number.isFinite(usd)) return "—";
+  if (usd < 0) return `-$${Math.abs(usd).toFixed(3)}`;
   if (usd < 0.01) return `$${usd.toFixed(6)}`;
   return `$${usd.toFixed(3)}`;
 }
 
 export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("zh-CN", {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("zh-CN", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

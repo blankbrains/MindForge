@@ -1,8 +1,11 @@
 import { Menu, Sun, Moon } from "lucide-react";
 import { useUIStore } from "@/store/ui-store";
+import { useHealth } from "@/hooks/use-health";
 
 function Header({ title }: { title: string }) {
   const { toggleSidebar, theme, setTheme } = useUIStore();
+  const { data: health } = useHealth();
+  const isOnline = health?.status === "ok";
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-border bg-surface/95 px-6 backdrop-blur">
@@ -34,13 +37,15 @@ function Header({ title }: { title: string }) {
         )}
       </button>
 
-      {/* Connection indicator — powered by /health polling */}
+      {/* Connection indicator — driven by /health polling */}
       <div
-        className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+        className={isOnline
+          ? "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+          : "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"}
         aria-live="polite"
       >
         <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
-        在线
+        {isOnline ? "在线" : "离线"}
       </div>
     </header>
   );
