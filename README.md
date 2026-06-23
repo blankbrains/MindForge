@@ -77,14 +77,16 @@ flowchart TD
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
 | ⚡ **配置** | pydantic-settings + .env 环境变量 |
 | 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
-| 🐳 **部署** | Docker Compose（Qdrant + Redis） |
+| 🔤 **Embedding** | BGE-M3 (1024维) / BGE-small-zh (512维) / OpenAI / hash fallback |
+| 🗄️ **数据库** | PostgreSQL 16 优先 · SQLite 回退 · SQLAlchemy ORM |
+| 🐳 **部署** | Docker Compose（Qdrant + Redis + PostgreSQL） |
 
 ## 📁 项目结构
 
 ```
 MindForge/
 ├── pyproject.toml                  # Python 依赖管理
-├── docker-compose.yml              # Docker 编排（Qdrant + Redis）
+├── docker-compose.yml              # Docker 编排（Qdrant + Redis + PostgreSQL）
 ├── Dockerfile                      # 容器构建
 ├── .env.example                    # 环境变量模板
 ├── .github/workflows/ci.yml        # CI/CD（ruff + pytest）
@@ -144,7 +146,7 @@ MindForge/
 | 组件 | 要求 | 说明 |
 |------|------|------|
 | 🐍 Python | `>= 3.9` | 推荐 3.11+ |
-| 🐳 Docker | 可选 | 用于 Qdrant + Redis 基础设施 |
+| 🐳 Docker | 可选 | Qdrant + Redis + PostgreSQL 基础设施 |
 
 ### 安装与配置
 
@@ -159,7 +161,7 @@ pip install -e .
 cp .env.example .env
 # 编辑 .env，设置 LLM 供应商和 API Key
 
-# 启动基础设施（Qdrant + Redis）
+# 启动基础设施（Qdrant + Redis + PostgreSQL）
 docker compose up -d
 
 # 索引文档
