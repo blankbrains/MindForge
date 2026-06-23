@@ -86,7 +86,10 @@ class EmbeddingManager:
         model_name = self._model_name or os.getenv("EMBEDDING_ST_MODEL", "all-MiniLM-L6-v2")
         self._model = SentenceTransformer(model_name)
         if self._dim is None:
-            self._dim = self._model.get_sentence_embedding_dimension()
+            try:
+                self._dim = self._model.get_embedding_dimension()
+            except AttributeError:
+                self._dim = self._model.get_sentence_embedding_dimension()
         self._provider = "sentence-transformers"
         logger.info("Embedding: sentence-transformers/%s (dim=%d)", model_name, self._dim)
 

@@ -23,6 +23,9 @@ export function KnowledgeBasePage() {
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<{ doc_id: string; filename: string } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Upload cancel confirmation
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+  const [uploadAbortController, setUploadAbortController] = useState<AbortController | null>(null);
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
@@ -46,10 +49,32 @@ export function KnowledgeBasePage() {
     formData.append("file", selectedFile);
     formData.append("use_raptor", String(useRaptor));
     formData.append("use_graphrag", String(useGraphrag));
-    upload.mutate(formData, {
-      onSuccess: () => { setUploadOpen(false); setSelectedFile(null); setUseRaptor(false); setUseGraphrag(false); },
-      onError: (err) => setUploadError(err instanceof Error ? err.message : "上传失败"),
-    });
+    const controller = new AbortController();
+    setUploadAbortController(controller);
+    upload.mutate(
+      { formData, signal: controller.signal },
+      {
+        onSuccess: () => { setUploadOpen(false); setSelectedFile(null); setUseRaptor(false); setUseGraphrag(false); setUploadAbortController(null); },
+        onError: (err) => { if (err instanceof Error && err.name !== "AbortError") setUploadError(err.message || "上传失败"); setUploadAbortController(null); },
+      },
+    );
+  };
+
+  const handleCancelUpload = () => {
+    if (upload.isPending) {
+      setCancelConfirmOpen(true);
+    } else {
+      setUploadOpen(false);
+      setSelectedFile(null);
+    }
+  };
+
+  const confirmCancelUpload = () => {
+    uploadAbortController?.abort();
+    setCancelConfirmOpen(false);
+    setUploadOpen(false);
+    setSelectedFile(null);
+    setUploadAbortController(null);
   };
 
   const handleViewDocument = async (docId: string, filename: string) => {
@@ -146,13 +171,27 @@ export function KnowledgeBasePage() {
         </div>
       )}
 
+      {/* Cancel Upload Confirmation */}
+      {cancelConfirmOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setCancelConfirmOpen(false)}>
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-2">确认停止上传</h3>
+            <p className="text-sm text-text-muted mb-4">文档正在索引中，停止后已上传的部分可能不完整。确定要停止吗？</p>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setCancelConfirmOpen(false)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">继续上传</button>
+              <button type="button" onClick={confirmCancelUpload} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 transition-colors">停止上传</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Upload Modal */}
       {uploadOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) setUploadOpen(false); }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget && !upload.isPending) handleCancelUpload(); }}>
           <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-2xl">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">上传文档</h3>
-              <button type="button" onClick={() => setUploadOpen(false)} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
+              <button type="button" onClick={handleCancelUpload} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
             </div>
             <div className="mt-5 space-y-4">
               <div>
