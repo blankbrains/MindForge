@@ -27,9 +27,9 @@ class RAPTORIndexer:
         self.num_levels = cfg.raptor_levels
         self.threshold = cfg.raptor_threshold
         self.embedder = embedder
-        self.llm = llm
+        self.llm = llm  # 应为 BaseLLM 实例或兼容的 async callable
 
-    def build_tree(self, chunks: List[DocumentChunk]) -> List[RAPTORNode]:
+    async def build_tree(self, chunks: List[DocumentChunk]) -> List[RAPTORNode]:
         if not chunks:
             return []
         leaves = [RAPTORNode(node_id=ch.chunk_id, content=ch.content, level=0, embedding=ch.embedding) for ch in chunks]
@@ -41,18 +41,25 @@ class RAPTORIndexer:
             clusters = self._cluster_nodes(current_level)
             next_level = []
             for i, cluster in enumerate(clusters):
-                summary = self._summarize_cluster(cluster, level)
+                summary = await self._summarize_cluster(cluster, level)
                 node = RAPTORNode(
                     node_id=f"raptor_l{level}_c{i}_{hashlib.md5(summary.encode()).hexdigest()[:8]}",
                     content=summary, summary=summary, level=level, children=cluster,
                 )
+                # 立即为摘要节点生成 embedding，保证上层聚类时可复用
+                if self.embedder:
+                    try:
+                        node.embedding = self.embedder.embed_single(summary[:512])
+                    except Exception:
+                        pass
                 next_level.append(node)
             if not next_level:
                 break
             all_nodes.append(next_level)
             current_level = next_level
-        logger.info(f"RAPTOR 树: {sum(len(n) for n in all_nodes)} 节点, {len(all_nodes)} 层")
-        return [n for level in all_nodes for n in level]
+        nodes = [n for level in all_nodes for n in level]
+        logger.info(f"RAPTOR 树: {len(nodes)} 节点, {len(all_nodes)} 层")
+        return nodes
 
     def _cluster_nodes(self, nodes: List[RAPTORNode]) -> List[List[RAPTORNode]]:
         if len(nodes) <= 3:
@@ -60,7 +67,10 @@ class RAPTORIndexer:
         embeddings = []
         for node in nodes:
             if node.embedding is None and self.embedder:
-                node.embedding = self.embedder.embed_single(node.content[:512])
+                try:
+                    node.embedding = self.embedder.embed_single(node.content[:512])
+                except Exception:
+                    pass
             if node.embedding is not None:
                 embeddings.append(node.embedding)
         if not embeddings:
@@ -83,13 +93,24 @@ class RAPTORIndexer:
             clusters.append(cluster)
         return clusters
 
-    def _summarize_cluster(self, cluster: List[RAPTORNode], level: int) -> str:
+    async def _summarize_cluster(self, cluster: List[RAPTORNode], level: int) -> str:
         if self.llm is None:
             return "\n".join(n.content[:200] for n in cluster[:5])
         texts = "\n\n".join(f"[{i+1}] {n.content[:500]}" for i, n in enumerate(cluster[:10]))
         prompt = f"请为以下 {len(cluster)} 个相关文本片段生成摘要（RAPTOR 第{level}层）：\n{texts}\n摘要："
         try:
-            response = self.llm.invoke(prompt)
-            return response.content[:1000]
+            # 兼容 BaseLLM.chat() 接口
+            if hasattr(self.llm, "chat"):
+                from mindforge.models.base import ChatMessage
+                result = await self.llm.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    temperature=0.3,
+                )
+                return (result.content or "").strip()[:1000]
+            else:
+                # callable fallback: async llm_fn
+                result = await self.llm(prompt)
+                return str(result).strip()[:1000]
         except Exception:
+            logger.exception("RAPTOR summarization failed for level %d", level)
             return "\n".join(n.content[:200] for n in cluster[:3])

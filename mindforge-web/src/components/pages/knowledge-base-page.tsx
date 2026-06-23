@@ -120,7 +120,9 @@ export function KnowledgeBasePage() {
         </div>
       )}
 
-      {documents.isLoading ? <LoadingSkeleton variant="card" count={4} /> : documents.data && documents.data.length > 0 ? (
+      {documents.isLoading ? <LoadingSkeleton variant="card" count={4} /> : documents.isError ? (
+        <EmptyState icon={<XCircle className="h-12 w-12" />} title="加载失败" description="无法获取文档列表，请检查后端服务是否运行" />
+      ) : documents.data && documents.data.length > 0 ? (
         <div className="space-y-2">
           {documents.data.map((doc) => (
             <div
@@ -196,7 +198,7 @@ export function KnowledgeBasePage() {
             <div className="mt-5 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-text mb-1.5">选择文件</label>
-                <input ref={fileRef} type="file" accept=".pdf,.docx,.md,.txt,.html" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-white hover:file:bg-primary-dark focus:ring-2 focus:ring-primary/20 focus:border-primary/50 focus:outline-none" />
+                <input ref={fileRef} type="file" accept=".pdf,.docx,.md,.txt,.html" disabled={upload.isPending} onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-white hover:file:bg-primary-dark focus:ring-2 focus:ring-primary/20 focus:border-primary/50 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed" />
                 {selectedFile && <p className="mt-1 text-xs text-text-muted">已选择: {selectedFile.name} ({(selectedFile.size / 1024).toFixed(1)} KB)</p>}
               </div>
               <div className="flex items-center gap-5">

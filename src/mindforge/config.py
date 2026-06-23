@@ -31,10 +31,10 @@ class LLMConfig(BaseSettings):
     critic_model: str = "gpt-4o"
     synthesizer_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
-    deepseek_planner: str = "deepseek-v4-flash"
-    deepseek_researcher: str = "deepseek-v4-flash"
-    deepseek_critic: str = "deepseek-v4-flash"
-    deepseek_synthesizer: str = "deepseek-v4-flash"
+    deepseek_planner: str = "deepseek-chat"
+    deepseek_researcher: str = "deepseek-chat"
+    deepseek_critic: str = "deepseek-chat"
+    deepseek_synthesizer: str = "deepseek-chat"
     deepseek_embedding: str = "BAAI/bge-m3"
     embedding_dim: int = 1536
     local_embedding_model: str = "BAAI/bge-m3"
@@ -164,3 +164,13 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
+
+
+def reload_settings() -> Settings:
+    """清除缓存的 Settings 并重新加载。
+
+    在运行时通过 ``update_settings_api`` 修改 ``os.environ`` 后必须调用，
+    否则 ``lru_cache`` 仍返回旧实例，配置切换不生效。
+    """
+    get_settings.cache_clear()
+    return get_settings()

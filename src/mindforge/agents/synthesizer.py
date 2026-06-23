@@ -93,6 +93,8 @@ class SynthesizerAgent(BaseAgent):
             output = sr.get("output", sr.get("result", ""))
             if isinstance(output, AgentResult):
                 output = output.output
+            elif not isinstance(output, str):
+                output = str(output)
             findings_lines.append(f"### Subtask {i}: {desc}\n\n{output}\n")
 
         findings_text = "\n".join(findings_lines)

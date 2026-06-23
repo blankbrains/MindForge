@@ -1,11 +1,11 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { API_BASE } from "@/lib/constants";
 import type { SSEEvent } from "@/types/research";
 import { useResearchStore } from "@/store/research-store";
 import { useHistoryStore } from "@/store/history-store";
 import { createSSEConnection } from "@/lib/sse-parser";
 
-const RESEARCH_TIMEOUT_MS = 5 * 60 * 1000;
+const RESEARCH_TIMEOUT_MS = 15 * 60 * 1000; // 15 分钟，适配多轮精炼
 
 export function useResearchSession() {
   const abortRef = useRef<{ abort: () => void } | null>(null);
@@ -13,20 +13,33 @@ export function useResearchSession() {
   const store = useResearchStore();
   const addFromResearch = useHistoryStore((s) => s.addFromResearch);
 
+  // 组件卸载时清理 SSE 连接和超时
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      if (researchTimeoutRef.current) {
+        clearTimeout(researchTimeoutRef.current);
+        researchTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const startResearch = useCallback(
     (task: string) => {
       if (researchTimeoutRef.current) { clearTimeout(researchTimeoutRef.current); researchTimeoutRef.current = null; }
       abortRef.current?.abort();
 
-      // Only reset progress, keep task and finalResult visible
+      // 使用 getState 确保拿到最新 setState action，避免闭包陈旧引用
       useResearchStore.setState({
         status: "streaming", error: null, plan: null, subtasks: {},
         synthesizing: false, criticScore: null, refineRound: 0,
       });
-      store.setTask(task);
+      useResearchStore.getState().setTask(task);
 
       const timeoutId = setTimeout(() => {
-        store.setStatus("error", "研究超时（5 分钟），请尝试简化问题或检查 API Key");
+        useResearchStore.getState().setStatus(
+          "error", "研究超时（15 分钟），请尝试简化问题"
+        );
         abortRef.current?.abort();
       }, RESEARCH_TIMEOUT_MS);
       researchTimeoutRef.current = timeoutId;
@@ -44,10 +57,24 @@ export function useResearchSession() {
             addFromResearch(task, report, quality);
           }
         },
-        () => { clearTimeout(timeoutId); store.setStatus("completed"); },
+        () => {
+          clearTimeout(timeoutId);
+          // 仅当 done 事件已将 finalResult 写入后才置 completed，
+          // 避免 [DONE] 标记先于 done 事件到达时出现"已完成但无报告"白屏
+          if (useResearchStore.getState().finalResult) {
+            useResearchStore.getState().setStatus("completed");
+          }
+        },
         (err) => {
           clearTimeout(timeoutId);
           const msg = err.message || "";
+          if (err instanceof Error && "status" in err) {
+            const status = (err as unknown as Record<string, unknown>).status as number;
+            if (status === 401 || status === 403) {
+              store.setStatus("error", "API Key 无效或已过期，请在设置中更新。");
+              return;
+            }
+          }
           if (msg.includes("401") || msg.includes("403") || msg.includes("auth")) {
             store.setStatus("error", "API Key 无效或已过期，请在设置中更新。");
           } else if (msg.includes("timeout") || msg.includes("abort")) {
@@ -64,8 +91,8 @@ export function useResearchSession() {
   const cancelResearch = useCallback(() => {
     abortRef.current?.abort();
     if (researchTimeoutRef.current) { clearTimeout(researchTimeoutRef.current); researchTimeoutRef.current = null; }
-    store.setStatus("idle");
-  }, [store]);
+    useResearchStore.getState().setStatus("idle");
+  }, []);
 
   return {
     ...store,

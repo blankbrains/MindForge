@@ -54,5 +54,5 @@ class LLMFactory:
         else:
             from mindforge.models.openai_adapter import OpenAIAdapter
             api_key = kwargs.pop("api_key", s.llm.openai_api_key) or s.llm.openai_api_key
-            base_url = kwargs.pop("base_url", None)
+            base_url = kwargs.pop("base_url", None) or s.llm.openai_base_url
             return OpenAIAdapter(model=model, api_key=api_key, base_url=base_url)

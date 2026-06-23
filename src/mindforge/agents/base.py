@@ -148,6 +148,9 @@ class BaseAgent(ABC):
                 )
             except Exception as exc:
                 last_exc = exc
+                # 401/400/403 等客户端错误不重试；仅 429/5xx/超时等可恢复错误重试
+                if getattr(exc, "status_code", None) in (400, 401, 403):
+                    raise
                 if attempt < 2:
                     wait = 2.0 ** attempt * 1.0
                     await asyncio.sleep(wait)
@@ -252,6 +255,8 @@ class BaseAgent(ABC):
         AgentResult with the final assistant output and aggregated metadata.
         """
         max_rounds = max_rounds or self._settings.agent.max_iterations
+        if max_rounds < 1:
+            max_rounds = 1  # 防御非正配置
         start_time = time.perf_counter()
 
         # --- Build message list ---
@@ -313,14 +318,15 @@ class BaseAgent(ABC):
                 return_exceptions=True,
             )
 
-            # 3. Feed tool results back
-            for exec_result in tool_results:
+            # 3. Feed tool results back (pair with original tool_call for id)
+            for tc, exec_result in zip(result.tool_calls, tool_results):
+                tc_id = tc.get("id", "")
                 if isinstance(exec_result, BaseException):
                     conv.append(
                         ChatMessage(
                             role="tool",
                             content=f"Tool execution error: {exec_result}",
-                            tool_call_id="",
+                            tool_call_id=tc_id,
                         )
                     )
                 else:
@@ -333,11 +339,31 @@ class BaseAgent(ABC):
                     )
 
         # --- Determine final output ---
-        # If we exited because of max rounds, grab the last assistant content
+        # If we exited because of max rounds, force one final non-tool call
+        # so the LLM can produce a closing answer from accumulated tool results.
+        if not final_content and use_tools and tool_calls_made > 0:
+            try:
+                final_result = await self._chat(
+                    conv,
+                    tools=None,  # no tools allowed – force text answer
+                    _llm_override=_llm_override,
+                )
+                final_content = final_result.content or ""
+                if final_content:
+                    conv.append(
+                        ChatMessage(role="assistant", content=final_content)
+                    )
+                if final_result.usage:
+                    for k, v in final_result.usage.items():
+                        aggregated_usage[k] = aggregated_usage.get(k, 0) + (v or 0)
+            except Exception:
+                pass  # best-effort; fall through to backward scan
+
+        # Fallback: scan backwards for the last assistant message with content
         if not final_content:
             for msg in reversed(conv):
-                if msg.role == "assistant":
-                    final_content = msg.content or ""
+                if msg.role == "assistant" and msg.content:
+                    final_content = msg.content
                     break
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000

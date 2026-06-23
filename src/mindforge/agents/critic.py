@@ -31,13 +31,17 @@ class CriticScore:
     should_refine: bool = False
 
     @classmethod
-    def from_dict(cls, data: dict) -> CriticScore:
+    def from_dict(cls, data: dict, *, threshold: float | None = None) -> CriticScore:
+        """从 dict 构造 CriticScore。
+
+        ``should_refine`` 由外部 ``evaluate()`` 根据 ``threshold`` 统一判定，
+        ``from_dict`` 不参与阈值逻辑 — 这里仅保留 LLM JSON 中显式声明的值。
+        """
         scores = data.get("scores", data)
         issues = data.get("issues", data.get("weaknesses", []))
         suggestions = data.get("suggestions", data.get("improvements", []))
 
         overall = float(scores.get("overall", 0))
-        should_refine = overall < 7.0 or data.get("should_refine", overall < 7.0)
 
         return cls(
             completeness=float(scores.get("completeness", 0)),
@@ -48,7 +52,7 @@ class CriticScore:
             overall=overall,
             issues=issues if isinstance(issues, list) else [],
             suggestions=suggestions if isinstance(suggestions, list) else [],
-            should_refine=should_refine,
+            should_refine=bool(data.get("should_refine", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,69 +152,64 @@ class CriticAgent(BaseAgent):
         settings = get_settings()
         threshold = threshold if threshold is not None else settings.agent.critic_threshold
 
-        # Use the critic-specific model from config
+        # Use the critic-specific model from config (via _llm_override 保证协程安全)
         critic_model = settings.llm.get_model("critic")
-        _old_llm = getattr(self, "_llm", None)
-        if _old_llm is not None:
-            from mindforge.models.base import LLMFactory
-            self._llm = LLMFactory.create(
-                settings.llm.llm_provider, critic_model
-            )
+        from mindforge.models.base import LLMFactory
+        _llm_override = LLMFactory.create(
+            settings.llm.llm_provider, critic_model
+        )
+
+        # Build the evaluation prompt
+        src_text = ""
+        if sources:
+            src_lines = ["Available sources:"]
+            for i, s in enumerate(sources, 1):
+                title = s.get("title", s.get("source", f"Source {i}"))
+                src_lines.append(f"  [{i}] {title}")
+            src_text = "\n".join(src_lines)
+
+        user_prompt = (
+            f"## Original Task\n\n{task}\n\n"
+            f"## Research Draft\n\n{draft}\n\n"
+            f"{src_text}\n\n"
+            "Evaluate the draft against the original task using the 5 dimensions. "
+            "Return JSON with scores, issues, and suggestions."
+        )
+
+        messages = [
+            ChatMessage(role="system", content=self.system_prompt),
+            ChatMessage(role="user", content=user_prompt),
+        ]
 
         try:
-            # Build the evaluation prompt
-            src_text = ""
-            if sources:
-                src_lines = ["Available sources:"]
-                for i, s in enumerate(sources, 1):
-                    title = s.get("title", s.get("source", f"Source {i}"))
-                    src_lines.append(f"  [{i}] {title}")
-                src_text = "\n".join(src_lines)
-
-            user_prompt = (
-                f"## Original Task\n\n{task}\n\n"
-                f"## Research Draft\n\n{draft}\n\n"
-                f"{src_text}\n\n"
-                "Evaluate the draft against the original task using the 5 dimensions. "
-                "Return JSON with scores, issues, and suggestions."
+            result = await self._chat(
+                messages,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                _llm_override=_llm_override,
             )
 
-            messages = [
-                ChatMessage(role="system", content=self.system_prompt),
-                ChatMessage(role="user", content=user_prompt),
-            ]
+            raw = result.content.strip()
+            score_dict = json.loads(raw)
+            score = CriticScore.from_dict(score_dict)
 
-            try:
-                result = await self._chat(
-                    messages,
-                    response_format={"type": "json_object"},
-                    temperature=0.2,
-                )
+            # Apply threshold
+            if threshold is not None:
+                score.should_refine = score.overall < threshold
 
-                raw = result.content.strip()
-                score_dict = json.loads(raw)
-                score = CriticScore.from_dict(score_dict)
+            return score
 
-                # Apply threshold
-                if threshold is not None:
-                    score.should_refine = score.overall < threshold
-
-                return score
-
-            except Exception as exc:
-                # Return a pass-through score on error
-                return CriticScore(
-                    completeness=5.0,
-                    accuracy=5.0,
-                    depth=5.0,
-                    clarity=5.0,
-                    citations=5.0,
-                    overall=5.0,
-                    issues=[f"Critic evaluation failed: {exc}"],
-                    suggestions=["Manual review recommended."],
-                    should_refine=True,
-                )
-        finally:
-            # Restore original LLM to avoid permanent state mutation
-            if _old_llm is not None:
-                self._llm = _old_llm
+        except Exception as exc:
+            # 评估失败时返回中性分数，should_refine=False
+            # 避免 critic 自身故障触发无意义的精炼循环
+            return CriticScore(
+                completeness=5.0,
+                accuracy=5.0,
+                depth=5.0,
+                clarity=5.0,
+                citations=5.0,
+                overall=5.0,
+                issues=[f"Critic evaluation failed: {exc}"],
+                suggestions=["Manual review recommended."],
+                should_refine=False,
+            )

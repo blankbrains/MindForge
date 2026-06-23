@@ -176,12 +176,16 @@ class RAGTool(BaseTool):
             if s >= min_score:
                 qualified.append(r)
 
-        # Quality: percentage of results above meaningful threshold (0.3 for real embeddings)
-        good_count = sum(
-            1 for r in qualified
-            if (r.get("score", 0.0) if isinstance(r, dict) else getattr(r, "score", 0.0)) >= 0.3
+        # Quality: average of all result scores, scaled to 0-10.
+        # RRF fusion blends rank signal (0.6) with raw cosine similarity (0.4),
+        # so relevant results score ~0.3-0.6 and noise scores ~0.01.
+        total_score = sum(
+            r.get("score", 0.0) if isinstance(r, dict) else getattr(r, "score", 0.0)
+            for r in qualified
         )
-        quality = round(min(good_count / max(len(qualified), 1) * 10, 10.0), 1)
+        avg = total_score / max(len(qualified), 1)
+        # Scale: 0.5 avg → 8.0, 0.3 → 5.0, 0.1 → 2.0
+        quality = round(min(avg * 16, 10.0), 1)
 
         if not qualified:
             return ToolResult(
@@ -205,8 +209,8 @@ class RAGTool(BaseTool):
     def _format_results(self, results: list[Any], query: str) -> str:
         """Format results as clean Markdown ready for ReactMarkdown rendering.
 
-        Preserves headers, bold, lists. Removes code blocks, pipes, prompt artifacts,
-        and other garbage that shouldn't appear in user-facing output.
+        Preserves headers, bold, lists. Removes garbage artifacts.
+        Adds proper spacing between sections for readability.
         """
         import re as _re
 
@@ -222,23 +226,22 @@ class RAGTool(BaseTool):
 
             text = str(content).strip()
 
-            # Remove garbage artifacts — code blocks, inline code, pipes, prompt templates
-            text = _re.sub(r'```[\s\S]*?```', '', text)
-            text = _re.sub(r'`{1,3}[^`]+`{1,3}', '', text)
-            text = _re.sub(r'^[^\n]{0,3}\s*\|\s*\n+', '', text)
-            text = _re.sub(r'\|', ' ', text)
+            # 清理不必要的空白/噪声，保留正常文档内容
+            # 注意：不再删除 `|` 字符（避免破坏 Markdown 表格）
+            # 注意：不再删除 `class Foo:` 类声明（避免破坏代码/文档内容）
             text = _re.sub(r'_{3,}', '', text)
-            # Remove prompt template artifacts
-            text = _re.sub(r'prompt\s*=\s*f"[^"]*"', '', text)
-            text = _re.sub(r'QueryMode\.\w+\s*[=:]\s*\[[^\]]*\]', '', text)
-            text = _re.sub(r'STRATEGY_MAP\s*=\s*\{[^}]*\}', '', text)
-            text = _re.sub(r'class\s+\w+.*?:', '', text)
-            # Clean up newlines
-            text = _re.sub(r'\n{3,}', '\n\n', text)
+            # Collapse whitespace but keep paragraph structure
+            text = _re.sub(r'\n{4,}', '\n\n\n', text)
             text = text.strip()
 
-            if len(text) > 1200:
-                text = text[:1200] + "\n\n…"
+            # Truncate at 20000 chars, but prefer sentence boundaries
+            if len(text) > 20000:
+                truncated = text[:20000]
+                last_period = max(truncated.rfind('。'), truncated.rfind('. '), truncated.rfind('\n\n'))
+                if last_period > 10000:
+                    text = truncated[:last_period+1] + "\n\n…"
+                else:
+                    text = truncated + "\n\n…"
 
             if text:
                 lines.append(text)
@@ -247,4 +250,5 @@ class RAGTool(BaseTool):
         if len(lines) <= 2:
             return f"## {query}\n\n当前知识库中暂无高度相关的资料。\n\n建议更换关键词或上传更多文档到知识库。"
 
-        return "\n".join(lines)
+        # Join with double newlines for clear paragraph separation
+        return "\n\n".join(lines)

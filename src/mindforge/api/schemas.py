@@ -107,6 +107,10 @@ class SettingsUpdateRequest(BaseModel):
     deepseek_api_key: str | None = None
     openai_api_key: str | None = None
     embedding_provider: str | None = None
+    retrieval_top_k: int | None = None
+    rerank_top_k: int | None = None
+    max_iterations: int | None = None
+    critic_threshold: float | None = None
 
 
 class HistoryItem(BaseModel):

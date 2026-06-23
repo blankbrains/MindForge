@@ -32,8 +32,9 @@ export const useHistoryStore = create<HistoryState>()(
         set((s) => ({ entries: [entry, ...s.entries].slice(0, 100) })),
 
       addFromResearch: async (task, report, quality, model) => {
+        let serverId: number | null = null;
         try {
-          await fetch(`${API_BASE}/history`, {
+          const res = await fetch(`${API_BASE}/history`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -43,11 +44,15 @@ export const useHistoryStore = create<HistoryState>()(
               model_used: model ?? null,
             }),
           });
+          if (res.ok) {
+            const data = await res.json() as { id?: number };
+            serverId = data.id ?? null;
+          }
         } catch {
           // Best-effort: network may be down
         }
         const entry: HistoryEntry = {
-          id: Date.now() + Math.random(), // composite ID to avoid same-ms collisions
+          id: serverId ?? Math.floor(Date.now() * 1000 + Math.random() * 1000),
           task,
           report: report.slice(0, 500),
           quality_score: quality ?? null,

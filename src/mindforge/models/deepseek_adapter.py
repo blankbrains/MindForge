@@ -1,7 +1,8 @@
 """DeepSeek 适配器 — 通过 OpenAI 兼容接口调用 DeepSeek 模型。
 
 DeepSeek 的 chat API 与 OpenAI 完全兼容，但价格约为 OpenAI 的 1/10。
-DeepSeek 不提供原生 Embedding API，因此使用 sentence-transformers (all-MiniLM-L6-v2) 本地计算嵌入向量（384维）。
+DeepSeek 不提供原生 Embedding API，因此使用本地 sentence-transformers 模型
+（默认 BAAI/bge-m3，1024 维，由 LLM_LOCAL_EMBEDDING_MODEL / LLM_LOCAL_EMBEDDING_DIM 配置）。
 """
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
@@ -13,16 +14,18 @@ import openai
 from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, StreamEvent
 
 
-# 延迟加载 embedding 模型（单例，384维）
+# 延迟加载 embedding 模型（单例）
 _EMBEDDER = None
 
 
 def _get_embedder():
     global _EMBEDDER
     if _EMBEDDER is None:
+        from mindforge.config import get_settings
         from sentence_transformers import SentenceTransformer
+        model_name = get_settings().llm.local_embedding_model or "BAAI/bge-m3"
         _EMBEDDER = SentenceTransformer(
-            "sentence-transformers/all-MiniLM-L6-v2",
+            model_name,
             device=os.getenv("SENTENCE_TRANSFORMERS_DEVICE", "cpu"),
         )
     return _EMBEDDER
@@ -71,8 +74,9 @@ class DeepSeekAdapter(BaseLLM):
         if tools:
             body["tools"] = tools
         if response_format:
-            # DeepSeek 也支持 json_object response_format
-            body["response_format"] = {"type": "json_object"} if response_format.get("type") == "json_object" else response_format
+            # DeepSeek 仅支持 json_object，不支持 json_schema
+            if response_format.get("type") == "json_object":
+                body["response_format"] = {"type": "json_object"}
 
         if stream:
             return self._stream_chat(body)
@@ -105,6 +109,8 @@ class DeepSeekAdapter(BaseLLM):
 
     async def _stream_chat(self, body: dict) -> AsyncIterator[StreamEvent]:
         stream = await self.client.chat.completions.create(**body, stream=True)
+        # 流式 tool_calls 按 index 增量聚合，流结束后一次性发出完整 tool_calls
+        tool_acc: dict[int, dict] = {}
         async for chunk in stream:
             if not chunk.choices:
                 continue
@@ -113,18 +119,23 @@ class DeepSeekAdapter(BaseLLM):
                 yield StreamEvent(type="chunk", content=delta.content)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
-                    yield StreamEvent(
-                        type="tool_call",
-                        tool_calls=[{
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                        }] if tc.id else [{
-                            "type": "function",
-                            "function": {"name": tc.function.name if tc.function else None,
-                                         "arguments": tc.function.arguments if tc.function else ""}
-                        }],
-                    )
+                    idx = tc.index if tc.index is not None else 0
+                    slot = tool_acc.setdefault(idx, {
+                        "id": None, "type": "function",
+                        "function": {"name": None, "arguments": ""},
+                    })
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            slot["function"]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            slot["function"]["arguments"] += tc.function.arguments
+        if tool_acc:
+            yield StreamEvent(
+                type="tool_call",
+                tool_calls=[tool_acc[k] for k in sorted(tool_acc)],
+            )
         yield StreamEvent(type="done")
 
     # ------------------------------------------------------------------

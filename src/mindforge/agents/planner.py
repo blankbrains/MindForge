@@ -155,13 +155,11 @@ class PlannerAgent(BaseAgent):
         settings = get_settings()
         # Use the planner-specific model from config
         planner_model = settings.llm.get_model("planner")
-        # Temporarily switch LLM to planner-specific model (restore after)
-        _old_llm = getattr(self, "_llm", None)
-        if _old_llm is not None:
-            from mindforge.models.base import LLMFactory
-            self._llm = LLMFactory.create(
-                settings.llm.llm_provider, planner_model
-            )
+        # 使用 _llm_override 而非直接改 self._llm，保证协程安全
+        from mindforge.models.base import LLMFactory
+        _llm_override = LLMFactory.create(
+            settings.llm.llm_provider, planner_model
+        )
 
         messages = [
             ChatMessage(role="system", content=self.system_prompt),
@@ -178,6 +176,7 @@ class PlannerAgent(BaseAgent):
                 messages,
                 response_format={"type": "json_object"},
                 temperature=0.3,
+                _llm_override=_llm_override,
             )
 
             raw = result.content.strip()
@@ -213,7 +212,3 @@ class PlannerAgent(BaseAgent):
                     "Could not decompose into multiple subtasks."
                 ),
             )
-        finally:
-            # Restore original LLM to avoid mutating shared instance
-            if _old_llm is not None:
-                self._llm = _old_llm

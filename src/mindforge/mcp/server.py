@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import time as _time
 import traceback
 from typing import Any, Optional
 
@@ -175,7 +176,7 @@ class MindForgeMCPServer:
         writer = asyncio.StreamWriter(writer_transport, writer_protocol, None, loop)
 
         # stderr is reserved for logging
-        self._start_time = asyncio.get_event_loop().time()
+        self._start_time = _time.time()
 
         while True:
             try:
@@ -241,7 +242,7 @@ class MindForgeMCPServer:
         """Handle the initialize handshake."""
         self._initialized = True
         if self._start_time == 0:
-            self._start_time = asyncio.get_event_loop().time()
+            self._start_time = _time.time()
 
         return {
             "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -325,9 +326,13 @@ class MindForgeMCPServer:
             return await self._fallback_research(topic, depth, max_sources)
 
         try:
-            report = await self._research_agent.run(
-                topic=topic, depth=depth, max_sources=max_sources
+            # ResearcherAgent.run 签名: run(task, *, context, max_rounds)
+            task_desc = (
+                f"Research topic: {topic}"
+                + (f" (depth: {depth})" if depth else "")
+                + (f" (max sources: {max_sources})" if max_sources else "")
             )
+            report = await self._research_agent.run(task_desc)
             if isinstance(report, str):
                 return report
             return str(report)

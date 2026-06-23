@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import (
-    String, Text, Float, DateTime, ForeignKey,
+    String, Text, Float, DateTime, ForeignKey, UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -27,22 +27,38 @@ _DEFAULT_SQLITE_URL = (
 _DB_URL = os.getenv("DATABASE_URL", "")
 
 if not _DB_URL:
-    # Try PostgreSQL first (Docker), fall back to SQLite
+    # Try PostgreSQL first (Docker), fall back to SQLite.
+    # 使用短 connect_timeout 避免 PG 不可达时阻塞应用启动。
     try:
         import psycopg2  # noqa: F401 — probe driver availability
-        _test_engine = create_engine(_DEFAULT_PG_URL, echo=False)
+        _test_engine = create_engine(
+            _DEFAULT_PG_URL,
+            echo=False,
+            connect_args={"connect_timeout": 2},
+        )
         _test_engine.connect().close()
+        _test_engine.dispose()
         _DB_URL = _DEFAULT_PG_URL
     except Exception:
         _DB_URL = _DEFAULT_SQLITE_URL
 
-_engine = create_engine(
-    _DB_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in _DB_URL else {},
-    echo=False,
-    pool_pre_ping=True if "postgresql" in _DB_URL else False,
-    pool_size=5 if "postgresql" in _DB_URL else 0,
-)
+if "sqlite" in _DB_URL:
+    # SQLite: 单文件连接，配合 check_same_thread=False 使用 StaticPool
+    from sqlalchemy.pool import StaticPool
+    _engine = create_engine(
+        _DB_URL,
+        connect_args={"check_same_thread": False},
+        echo=False,
+        poolclass=StaticPool,
+    )
+else:
+    _engine = create_engine(
+        _DB_URL,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=5,
+        connect_args={"connect_timeout": 5} if "postgresql" in _DB_URL else {},
+    )
 
 SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
 
@@ -56,15 +72,21 @@ def get_db() -> Session:
 # Encrypted API key helpers (simple AES-like XOR with app secret, NOT for PCI)
 # ---------------------------------------------------------------------------
 
+_SECRET_WARNED = False
+
+
 def _get_secret() -> bytes:
+    global _SECRET_WARNED
     secret = os.getenv("APP_SECRET", "")
     if not secret:
         secret = "mindforge-default-secret-change-in-production"
-        import logging
-        logging.getLogger(__name__).warning(
-            "APP_SECRET not set — using default encryption key. "
-            "Set APP_SECRET env var for production."
-        )
+        if not _SECRET_WARNED:
+            import logging
+            logging.getLogger(__name__).warning(
+                "APP_SECRET not set — using default encryption key. "
+                "Set APP_SECRET env var for production."
+            )
+            _SECRET_WARNED = True
     return hashlib.sha256(secret.encode()).digest()
 
 
@@ -130,6 +152,7 @@ class User(Base):
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_api_keys_user_provider"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)

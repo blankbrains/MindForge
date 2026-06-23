@@ -36,7 +36,12 @@ class OpenAIAdapter(BaseLLM):
         if tools:
             body["tools"] = tools
         if response_format:
-            body["response_format"] = {"type": "json_object"} if response_format.get("type") == "json_object" else response_format
+            rf_type = response_format.get("type")
+            # 仅接受 OpenAI 支持的 response_format 类型，避免空 dict 或非法值导致 400
+            if rf_type == "json_object":
+                body["response_format"] = {"type": "json_object"}
+            elif rf_type in ("json_schema", "text"):
+                body["response_format"] = response_format
 
         if stream:
             return self._stream_chat(body)
@@ -69,6 +74,8 @@ class OpenAIAdapter(BaseLLM):
 
     async def _stream_chat(self, body: dict) -> AsyncIterator[StreamEvent]:
         stream = await self.client.chat.completions.create(**body, stream=True)
+        # 流式 tool_calls 按 index 增量聚合，流结束后一次性发出完整 tool_calls
+        tool_acc: dict[int, dict] = {}
         async for chunk in stream:
             if not chunk.choices:
                 continue
@@ -77,18 +84,23 @@ class OpenAIAdapter(BaseLLM):
                 yield StreamEvent(type="chunk", content=delta.content)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
-                    yield StreamEvent(
-                        type="tool_call",
-                        tool_calls=[{
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                        }] if tc.id else [{
-                            "type": "function",
-                            "function": {"name": tc.function.name if tc.function else None,
-                                         "arguments": tc.function.arguments if tc.function else ""}
-                        }],
-                    )
+                    idx = tc.index if tc.index is not None else 0
+                    slot = tool_acc.setdefault(idx, {
+                        "id": None, "type": "function",
+                        "function": {"name": None, "arguments": ""},
+                    })
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            slot["function"]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            slot["function"]["arguments"] += tc.function.arguments
+        if tool_acc:
+            yield StreamEvent(
+                type="tool_call",
+                tool_calls=[tool_acc[k] for k in sorted(tool_acc)],
+            )
         yield StreamEvent(type="done")
 
     # ------------------------------------------------------------------
