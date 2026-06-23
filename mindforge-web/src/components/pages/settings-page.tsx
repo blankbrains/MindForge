@@ -88,7 +88,7 @@ function LLMTab() {
       <div>
         <label htmlFor="llm-api-key" className="block text-sm font-medium text-text mb-1.5">API Key</label>
         <input id="llm-api-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:outline-none" />
-        <p className="mt-1 text-xs text-text-muted">仅存储在浏览器会话中，不会写入后端</p>
+        <p className="mt-1 text-xs text-text-muted">若不填写，则降级为文档检索模式</p>
       </div>
     </div>
   );
