@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -71,9 +72,6 @@ class MCPToolDefinition:
 # ---------------------------------------------------------------------------
 # JSON-RPC message helpers
 # ---------------------------------------------------------------------------
-
-
-import uuid as _uuid
 
 
 def _make_request(method: str, params: Optional[dict[str, Any]] = None) -> str:
