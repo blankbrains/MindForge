@@ -68,7 +68,7 @@ def get_retriever() -> AdaptiveRetriever:
 
 @router.post("/query", response_model=QueryResponse)
 async def query(body: QueryRequest):
-    """Submit a research task to the Multi-Agent system."""
+    """Submit a research task. Falls back to retrieval-only if LLM is unavailable."""
     start = time.time()
     orch = get_orchestrator()
 
@@ -79,18 +79,39 @@ async def query(body: QueryRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    result = await orch.run(body.task)
-    latency = (time.time() - start) * 1000
-
-    return QueryResponse(
-        task_id=uuid.uuid4().hex[:12],
-        report=result.output,
-        sources=[],
-        quality_score=float(result.metadata.get("quality", 0)),
-        latency_ms=round(latency, 2),
-        cost_usd=round(float(result.metadata.get("cost", 0)), 6),
-        iterations=int(result.metadata.get("subtask_count", 0)),
-    )
+    # Try full Agent pipeline first, fall back to retrieval-only on failure
+    try:
+        result = await orch.run(body.task)
+        latency = (time.time() - start) * 1000
+        return QueryResponse(
+            task_id=uuid.uuid4().hex[:12],
+            report=result.output,
+            sources=[],
+            quality_score=float(result.metadata.get("quality", 0)),
+            latency_ms=round(latency, 2),
+            cost_usd=round(float(result.metadata.get("cost", 0)), 6),
+            iterations=int(result.metadata.get("subtask_count", 0)),
+        )
+    except Exception:
+        logger.exception("Agent pipeline failed, falling back to retrieval-only.")
+        # Fallback: search knowledge base directly (no LLM needed)
+        try:
+            from mindforge.tools.rag_tool import RAGTool
+            rag = RAGTool()
+            result = rag.safe_execute(query=body.task, mode="hybrid", top_k=5)
+            latency = (time.time() - start) * 1000
+            return QueryResponse(
+                task_id=uuid.uuid4().hex[:12],
+                report=result.output if result.success else f"检索失败: {result.error}",
+                sources=[],
+                quality_score=0.0,
+                latency_ms=round(latency, 2),
+                cost_usd=0.0,
+                iterations=0,
+            )
+        except Exception as e2:
+            logger.exception("Fallback retrieval also failed.")
+            raise HTTPException(status_code=500, detail=f"Research failed: {e2}")
 
 
 @router.post("/index", response_model=IndexResponse)
