@@ -29,7 +29,11 @@ export const useHistoryStore = create<HistoryState>()(
       loaded: false,
 
       addEntry: (entry) =>
-        set((s) => ({ entries: [entry, ...s.entries].slice(0, 100) })),
+        set((s) => ({
+          entries: [entry, ...s.entries]
+            .sort((a, b) => ((b.created_at ?? 0) > (a.created_at ?? 0) ? 1 : -1))
+            .slice(0, 100),
+        })),
 
       addFromResearch: async (task, report, quality, model) => {
         let serverId: number | null = null;
@@ -48,13 +52,13 @@ export const useHistoryStore = create<HistoryState>()(
             const data = await res.json() as { id?: number };
             serverId = data.id ?? null;
           }
-        } catch {
-          // Best-effort: network may be down
+        } catch (e) {
+          console.warn("history-store: POST failed, using local-only entry", e);
         }
         const entry: HistoryEntry = {
           id: serverId ?? Math.floor(Date.now() * 1000 + Math.random() * 1000),
           task,
-          report: report.slice(0, 500),
+          report: report.slice(0, 3000),  // 列表预览用，完整报告由后端存储
           quality_score: quality ?? null,
           model_used: model ?? null,
           created_at: new Date().toISOString(),

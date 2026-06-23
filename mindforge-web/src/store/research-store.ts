@@ -28,7 +28,7 @@ interface ResearchState {
   setStatus: (status: ResearchState["status"], error?: string) => void;
 }
 
-export const useResearchStore = create<ResearchState>((set) => ({
+export const useResearchStore = create<ResearchState>((set, get) => ({
   status: "idle",
   error: null,
   task: "",
@@ -59,6 +59,8 @@ export const useResearchStore = create<ResearchState>((set) => ({
   handleEvent: (event) => {
     switch (event.type) {
       case "plan_ready":
+        // 幂等防护：重复 plan_ready 不覆盖已有进度
+        if (get().plan) break;
         set({
           plan: event.plan,
           subtasks: Object.fromEntries(
@@ -68,15 +70,19 @@ export const useResearchStore = create<ResearchState>((set) => ({
         break;
 
       case "subtask_start":
-        set((s) => ({
-          subtasks: {
-            ...s.subtasks,
-            [event.task_id]: {
-              ...s.subtasks[event.task_id],
-              status: "in_progress",
+        set((s) => {
+          // 防护：未知 task_id 忽略，避免创建残缺条目
+          if (!s.subtasks[event.task_id]) return s;
+          return {
+            subtasks: {
+              ...s.subtasks,
+              [event.task_id]: {
+                ...s.subtasks[event.task_id],
+                status: "in_progress",
+              },
             },
-          },
-        }));
+          };
+        });
         break;
 
       case "subtask_result":

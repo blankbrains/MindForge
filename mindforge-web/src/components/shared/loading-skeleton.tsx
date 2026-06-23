@@ -15,6 +15,7 @@ export function LoadingSkeleton({
   className,
   count = 1,
 }: Props) {
+  if (count <= 0) return null;
   const items = Array.from({ length: count }, (_, i) => i);
 
   switch (variant) {

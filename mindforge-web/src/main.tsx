@@ -6,7 +6,15 @@ import { ErrorBoundary } from "@/components/shared/error-boundary";
 import { routeTree } from "./routeTree";
 import "./index.css";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
 const router = createRouter({ routeTree });
 

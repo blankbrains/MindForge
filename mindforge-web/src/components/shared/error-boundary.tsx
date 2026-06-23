@@ -8,14 +8,19 @@ interface Props {
 interface State {
   hasError: boolean;
   error: Error | null;
+  retryKey: number;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { hasError: false, error: null };
+  state: State = { hasError: false, error: null, retryKey: 0 };
 
   static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
+    return { hasError: true, error, retryKey: 0 };
   }
+
+  handleRetry = () => {
+    this.setState({ hasError: false, error: null, retryKey: this.state.retryKey + 1 });
+  };
 
   render() {
     if (this.state.hasError) {
@@ -31,7 +36,7 @@ export class ErrorBoundary extends Component<Props, State> {
               </p>
               <button
                 type="button"
-                onClick={() => this.setState({ hasError: false, error: null })}
+                onClick={this.handleRetry}
                 className="mt-4 rounded-md bg-red-100 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-200 dark:hover:bg-red-800"
               >
                 重试
@@ -41,6 +46,7 @@ export class ErrorBoundary extends Component<Props, State> {
         )
       );
     }
-    return this.props.children;
+    // key 自增强制重挂子树，避免重试后白屏
+    return <div key={this.state.retryKey}>{this.props.children}</div>;
   }
 }

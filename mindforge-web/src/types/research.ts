@@ -26,33 +26,24 @@ export interface AgentResult {
   token_usage?: Record<string, number>;
 }
 
+// CriticScore — 与后端 critic.py CriticScore.to_dict() 对齐
 export interface CriticScore {
   overall: number;
   completeness: number;
   accuracy: number;
   depth: number;
   clarity: number;
-  citation_quality: number;
+  citations: number;
+  issues?: string[];
+  suggestions?: string[];
   should_refine: boolean;
-  feedback: string;
 }
 
 export type SSEEvent =
   | { type: "plan_ready"; plan: ResearchPlan }
-  | { type: "subtask_start"; task_id: string; description: string }
+  | { type: "subtask_start"; task_id: string; description: string } // description 与 SubTask 冗余，由 SSE 协议定义决定
   | { type: "subtask_result"; task_id: string; result: AgentResult }
   | { type: "synthesizing"; status: "start" | "done" }
   | { type: "critic_feedback"; score: CriticScore; round: number }
   | { type: "refining"; round: number }
   | { type: "done"; result: AgentResult };
-
-export interface HistoryItem {
-  task_id: string;
-  task: string;
-  report: string;
-  quality_score: number;
-  latency_ms: number;
-  cost_usd: number;
-  iterations: number;
-  created_at: string;
-}
