@@ -304,13 +304,15 @@ class MCPRegistry:
 
         servers_raw = raw.get("mcpServers", raw.get("servers", {}))
         for name, cfg in servers_raw.items():
+            # 兼容 enabled 和 disabled 两种配置格式
+            enabled = cfg.get("enabled", not cfg.get("disabled", False))
             server_config = MCPServerConfig(
                 name=name,
                 command=cfg.get("command", ""),
                 args=cfg.get("args", []),
                 env=cfg.get("env", {}),
                 transport=cfg.get("transport", "stdio"),
-                enabled=cfg.get("enabled", True),
+                enabled=enabled,
             )
             if server_config.enabled:
                 self._servers[name] = MCPServerProcess(server_config)

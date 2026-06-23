@@ -155,6 +155,12 @@ class EpisodicMemory:
 
         Returns the top episode's result dict, or ``None`` if no match.
         """
+        # 优先精确匹配，避免不必要的 LLM 调用
+        task_clean = task.strip().lower()
+        for ep in self._episodes:
+            if ep.task.strip().lower() == task_clean:
+                return {"output": ep.result, "episode": ep}
+        # 回退到关键词相似匹配（降低阈值以增加命中率）
         matches = self.search_similar(query=task, top_k=1)
         if matches:
             return {"output": matches[0].result, "episode": matches[0]}

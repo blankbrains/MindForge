@@ -416,18 +416,21 @@ class Orchestrator:
                 st.status = "in_progress"
                 yield {"type": "subtask_start", "task_id": st.task_id, "description": st.description}
 
-            results = await asyncio.gather(
-                *[self._execute_subtask(st) for st in ready],
-                return_exceptions=True,
-            )
-
-            for st, result in zip(ready, results):
-                if isinstance(result, BaseException):
+            # 使用 as_completed 替代 gather — 子任务完成即推送结果，不等最慢的
+            task_map = {
+                asyncio.create_task(self._execute_subtask(st)): st
+                for st in ready
+            }
+            for coro in asyncio.as_completed(task_map):
+                st = task_map[coro]
+                try:
+                    result = await coro
+                except BaseException as exc:
                     st.status = "failed"
                     st.result = AgentResult(
                         agent_name="researcher",
                         success=False,
-                        output=f"Subtask failed: {result}",
+                        output=f"Subtask failed: {exc}",
                     )
                 else:
                     st.status = "completed"

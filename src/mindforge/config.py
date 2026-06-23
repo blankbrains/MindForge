@@ -99,15 +99,18 @@ class GraphRAGConfig(BaseSettings):
 
 
 class AgentConfig(BaseSettings):
-    max_iterations: int = Field(default=8, ge=1, le=20)
-    max_search_steps: int = Field(default=5)
+    max_iterations: int = Field(default=5, ge=1, le=20,
+        description="Researcher Agent ReAct 最大轮次。设为 5 而非 8 可显著提速。")
+    max_search_steps: int = Field(default=3,
+        description="单次研究中 search_knowledge_base 的最大调用次数")
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
-    max_refine_rounds: int = Field(default=2)
-    subtask_timeout: int = Field(default=45, ge=10)
+    max_refine_rounds: int = Field(default=1,
+        description="Critic 精炼最大轮次。设为 1 而非 2 可减少一轮评估+重写。")
+    subtask_timeout: int = Field(default=30, ge=10,
+        description="单个子任务超时（秒）")
     research_timeout: int = Field(
-        default=300, ge=30,
-        description="Total timeout (seconds) for the full research pipeline. "
-                    "Set via AGENT_RESEARCH_TIMEOUT env var."
+        default=180, ge=30,
+        description="研究全流程超时（秒）。Set via AGENT_RESEARCH_TIMEOUT env var."
     )
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
