@@ -68,7 +68,11 @@ export const useSettingsStore = create<SettingsState>()(
               llm_provider: state.llmProvider,
               deepseek_api_key: state.llmProvider === "deepseek" ? state.llmApiKey : "",
               openai_api_key: state.llmProvider === "openai" ? state.llmApiKey : "",
-              embedding_provider: "openai",
+              embedding_provider: state.llmProvider === "openai" ? "openai" : "bge",
+              retrieval_top_k: state.retrievalTopK,
+              rerank_top_k: state.rerankTopK,
+              max_iterations: state.maxIterations,
+              critic_threshold: state.criticThreshold,
             }),
           });
           return res.ok;

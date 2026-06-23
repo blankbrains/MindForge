@@ -54,7 +54,7 @@ export function ReportViewer({ result }: Props) {
 
       {/* Report content */}
       <div className="rounded-xl border border-border bg-surface p-6 lg:p-8">
-        <div className="prose prose-neutral dark:prose-invert max-w-none">
+        <div className="prose prose-neutral dark:prose-invert max-w-none leading-relaxed [&_p]:my-4 [&_h2]:mt-8 [&_h2]:mb-4 [&_h3]:mt-6 [&_h3]:mb-2">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}

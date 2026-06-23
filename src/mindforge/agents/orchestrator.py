@@ -144,25 +144,37 @@ class Orchestrator:
         usage: dict[str, int] = {}
 
         # --- Step 0: memory cache ---
-        cached, _ = await self._check_memory(task, start_time)
+        cached, elapsed = await self._check_memory(task, start_time)
         if cached is not None:
             yield {"type": "done", "result": cached}
+            yield {"type": "[DONE]"}
             return
 
         # --- Step 1: Plan ---
         plan: ResearchPlan = await self._planner.run(task)
-        self._accumulate_usage(usage, plan.subtasks)
+        # SubTask 无 token_usage 属性，此处不累加子任务 usage
         yield {"type": "plan_ready", "plan": plan}
 
         # --- Step 2: Execute DAG ---
+        self._validate_dag(plan)
         subtask_outputs: list[dict[str, Any]] = []
         while not plan.is_complete():
             ready = plan.get_ready_tasks()
             if not ready:
+                completed_ids = {s.task_id for s in plan.subtasks if s.status == "completed"}
                 for st in plan.subtasks:
-                    if st.status == "pending":
+                    if st.status != "pending":
+                        continue
+                    unsatisfied = [
+                        dep for dep in st.dependencies
+                        if dep not in completed_ids
+                        and any(s2.task_id == dep and s2.status == "pending" for s2 in plan.subtasks)
+                    ]
+                    if unsatisfied:
                         st.status = "failed"
-                break
+                if not plan.get_ready_tasks():
+                    break
+                continue
 
             for st in ready:
                 st.status = "in_progress"
@@ -248,15 +260,33 @@ class Orchestrator:
 
             yield {"type": "refining", "round": refine_round + 1}
 
-            current_draft = await self._synthesizer.synthesize(
+            refined_result = await self._synthesizer.synthesize(
                 task=task,
                 subtask_results=subtask_outputs,
                 all_sources=all_sources,
                 critic_feedback=critic_score,
             )
-            self._accumulate_usage(usage, current_draft)
-            current_draft = current_draft.output
+            self._accumulate_usage(usage, refined_result)
+            current_draft = refined_result.output
             refine_count = refine_round + 1
+
+        # 精炼循环耗尽后对最终 draft 补做评估，并推送 critic_feedback 事件
+        if refine_count > 0 and refine_count == max_refine:
+            try:
+                final_eval = await self._critic.evaluate(
+                    task=task,
+                    draft=current_draft,
+                    sources=all_sources,
+                )
+                final_critic = final_eval
+                self._accumulate_usage(usage, final_eval)
+                yield {
+                    "type": "critic_feedback",
+                    "score": final_critic,
+                    "round": refine_count + 1,
+                }
+            except Exception:
+                pass
 
         # --- Step 5: Memory ---
         await self._store_memory(task, plan, current_draft, final_critic)
@@ -287,6 +317,7 @@ class Orchestrator:
             cost_usd=total_cost,
         )
         yield {"type": "done", "result": result}
+        yield {"type": "[DONE]"}
 
     # ==================================================================
     # Shared pipeline helpers (used by both run and stream_run)
@@ -302,21 +333,32 @@ class Orchestrator:
 
         # --- Step 1: Plan ---
         plan: ResearchPlan = await self._planner.run(task)
-        self._accumulate_usage(usage, plan.subtasks)
+        # SubTask 无 token_usage 属性，不在此处累加 usage
         log["plan"] = {
             "subtask_count": len(plan.subtasks),
             "reasoning": plan.reasoning[:200],
         }
 
         # --- Step 2: Execute DAG ---
+        self._validate_dag(plan)
         subtask_outputs: list[dict[str, Any]] = []
         while not plan.is_complete():
             ready = plan.get_ready_tasks()
             if not ready:
+                completed_ids = {s.task_id for s in plan.subtasks if s.status == "completed"}
                 for st in plan.subtasks:
-                    if st.status == "pending":
+                    if st.status != "pending":
+                        continue
+                    unsatisfied = [
+                        dep for dep in st.dependencies
+                        if dep not in completed_ids
+                        and any(s2.task_id == dep and s2.status == "pending" for s2 in plan.subtasks)
+                    ]
+                    if unsatisfied:
                         st.status = "failed"
-                break
+                if not plan.get_ready_tasks():
+                    break
+                continue
 
             for st in ready:
                 st.status = "in_progress"
@@ -402,11 +444,25 @@ class Orchestrator:
             current_draft = refined_result.output
             refine_count = refine_round + 1
 
-        if final_critic is not None and refine_count > 0:
-            log["critic"] = {
-                "rounds": refine_count,
+        # 精炼循环耗尽后，对最终 draft 补做一次评估，保证返回给用户的
+        # final_critic 与最终报告质量一致。
+        if refine_count > 0 and refine_count == max_refine:
+            try:
+                final_eval = await self._critic.evaluate(
+                    task=task,
+                    draft=current_draft,
+                    sources=all_sources,
+                )
+                final_critic = final_eval
+                self._accumulate_usage(usage, final_eval)
+            except Exception:
+                pass  # best-effort
+
+        if final_critic is not None:
+            log["critic"] = log.get("critic", {}) | {
+                "rounds": max(refine_count, 1),
                 "overall_score": final_critic.overall,
-                "refined": True,
+                "refined": refine_count > 0,
             }
 
         return plan, subtask_outputs, all_sources, current_draft, final_critic, refine_count
@@ -491,19 +547,92 @@ class Orchestrator:
     def _collect_sources(
         subtask_outputs: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Aggregate unique sources across all subtask outputs."""
-        seen: set[int] = set()
+        """Aggregate unique sources across all subtask outputs.
+
+        用 ``(task_id, index)`` 复合键去重，避免不同子任务下相同局部编号
+        的 source 被误判为重复。
+
+        dict 类型的 source（非标准列表元素）会被包成单元素列表后正常处理。
+        """
+        seen: set[tuple[int | str, int | str]] = set()
         all_sources: list[dict[str, Any]] = []
+        global_idx = 0
         for so in subtask_outputs:
+            tid = so.get("task_id", "")
             sources = so.get("sources", [])
+            if isinstance(sources, dict):
+                sources = [sources]
             if not isinstance(sources, list):
                 continue
             for src in sources:
-                idx = src.get("index") if isinstance(src, dict) else None
-                if idx is not None and idx not in seen:
-                    seen.add(idx)
-                    all_sources.append(src)
+                if not isinstance(src, dict):
+                    continue
+                local_idx = src.get("index")
+                if local_idx is None:
+                    continue
+                key = (tid, local_idx)
+                if key not in seen:
+                    seen.add(key)
+                    # 为全局引用重新分配统一编号，避免子任务局部编号冲突
+                    global_idx += 1
+                    entry = dict(src, _global_index=global_idx)
+                    all_sources.append(entry)
         return all_sources
+
+    @staticmethod
+    def _validate_dag(plan: ResearchPlan) -> None:
+        """对 Planner 生成的 DAG 做基本校验。
+
+        - 检测依赖不存在的 task_id
+        - 检测自循环依赖
+        - 检测简单循环依赖（拓扑排序）
+        """
+        task_ids = {st.task_id for st in plan.subtasks}
+        for st in plan.subtasks:
+            for dep in st.dependencies:
+                if dep == st.task_id:
+                    logger.warning("DAG: task %s depends on itself, removing self-dep", st.task_id)
+                    st.dependencies.remove(dep)
+                elif dep not in task_ids:
+                    logger.warning(
+                        "DAG: task %s depends on nonexistent %s, removing dep",
+                        st.task_id, dep,
+                    )
+                    st.dependencies.remove(dep)
+
+        # 拓扑排序检测循环依赖
+        in_degree: dict[str, int] = {tid: 0 for tid in task_ids}
+        for st in plan.subtasks:
+            in_degree[st.task_id] += len([
+                d for d in st.dependencies if d in task_ids
+            ])
+        # 重新算入度（每个被依赖节点）
+        in_degree = {tid: 0 for tid in task_ids}
+        for st in plan.subtasks:
+            for dep in st.dependencies:
+                if dep in in_degree:
+                    in_degree[dep] += 1
+        # 实际上是"出度指向谁就被谁依赖"——拓扑排序需要入度（谁依赖我）。
+        # 纠正：in_degree 应该记录"我还有多少个未完成的依赖"。
+        dep_count = {tid: 0 for tid in task_ids}
+        for st in plan.subtasks:
+            dep_count[st.task_id] = len([d for d in st.dependencies if d in task_ids])
+        # 找入度为0（没有依赖）的节点开始
+        zero_in = [tid for tid in task_ids if dep_count.get(tid, 0) == 0]
+        visited = 0
+        while zero_in:
+            node = zero_in.pop()
+            visited += 1
+            for st in plan.subtasks:
+                if node in st.dependencies:
+                    dep_count[st.task_id] -= 1
+                    if dep_count[st.task_id] == 0:
+                        zero_in.append(st.task_id)
+        if visited < len(task_ids):
+            logger.warning(
+                "DAG: detected circular dependency in planner output "
+                "(visited %d/%d tasks).", visited, len(task_ids),
+            )
 
     @staticmethod
     def _accumulate_usage(

@@ -23,6 +23,12 @@ class TextSplitter:
         cfg = get_settings().chunking
         self.chunk_size = chunk_size or cfg.chunk_size
         self.chunk_overlap = chunk_overlap or cfg.chunk_overlap
+        if self.chunk_overlap >= self.chunk_size:
+            logger.warning(
+                "chunk_overlap (%d) >= chunk_size (%d) — clamping overlap to size//4.",
+                self.chunk_overlap, self.chunk_size,
+            )
+            self.chunk_overlap = max(self.chunk_size // 4, 0)
 
     def split(self, doc_id: str, content: str, metadata: dict = None) -> List[DocumentChunk]:
         separators = ["\n\n", "\n", "。", ".", "，", ",", " "]
@@ -48,9 +54,11 @@ class TextSplitter:
                 ))
             if end == content_len:
                 break
-            start = end - self.chunk_overlap
-            if start < 0:
-                start = 0
+            new_start = end - self.chunk_overlap
+            # 确保 start 单调递增，防止死循环
+            if new_start <= start:
+                new_start = end
+            start = new_start
         return chunks
 
 

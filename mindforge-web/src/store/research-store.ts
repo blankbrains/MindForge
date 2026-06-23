@@ -109,6 +109,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
           finalResult: event.result,
           status: "completed",
           synthesizing: false,
+          refineRound: 0,
         });
         break;
 

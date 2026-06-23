@@ -80,7 +80,8 @@ class SemanticMemory:
 
         Returns the fact_id.
         """
-        fact_id = str(hash(content) % 10**9)
+        import hashlib as _hashlib
+        fact_id = _hashlib.sha256(content.encode()).hexdigest()[:16]
 
         if fact_id in self._facts:
             existing = self._facts[fact_id]

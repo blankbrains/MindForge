@@ -16,6 +16,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Generator
 
+from mindforge.config import get_settings
+
 
 @dataclass
 class Span:
@@ -59,12 +61,20 @@ class Tracer:
         self._langfuse = None
 
         # Attempt to initialise LangFuse if the package is installed
-        # and environment variables are set.
+        # and config is set via OBSERVABILITY_* env vars or .env.
         try:
-            if all(os.environ.get(k) for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST")):
+            obs_cfg = get_settings().observability
+            pub = obs_cfg.langfuse_public_key or os.environ.get("LANGFUSE_PUBLIC_KEY")
+            sec = obs_cfg.langfuse_secret_key or os.environ.get("LANGFUSE_SECRET_KEY")
+            host = obs_cfg.langfuse_host or os.environ.get("LANGFUSE_HOST")
+            if all((pub, sec, host)):
                 import langfuse  # type: ignore[import-untyped]
-                self._langfuse = langfuse.Langfuse()
-        except ImportError:
+                self._langfuse = langfuse.Langfuse(
+                    public_key=pub,
+                    secret_key=sec,
+                    host=host,
+                )
+        except (ImportError, Exception):
             pass
 
     # ------------------------------------------------------------------
@@ -100,7 +110,7 @@ class Tracer:
         self._active_stack.append(span)
         try:
             yield span
-        except BaseException as exc:
+        except Exception as exc:
             span.error = str(exc)
             raise
         finally:

@@ -132,6 +132,7 @@ async def index_document(body: IndexRequest):
     # Embed and store in Qdrant
     from mindforge.ingestion.embedder import get_embedder
     from qdrant_client.models import PointStruct
+    import hashlib as _hashlib
 
     embedder = get_embedder()
     store = get_vector_store()
@@ -139,7 +140,7 @@ async def index_document(body: IndexRequest):
     for ch in chunks:
         vec = embedder.embed_single(ch.content)
         points.append(PointStruct(
-            id=abs(hash(ch.chunk_id)) % (2**63),
+            id=int(_hashlib.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63),
             vector=vec,
             payload={
                 "chunk_id": ch.chunk_id,
@@ -171,13 +172,14 @@ async def index_document(body: IndexRequest):
     if body.use_raptor and enrichment_llm:
         try:
             raptor = RAPTORIndexer(embedder=embedder, llm=enrichment_llm)
-            tree_nodes = raptor.build_tree(chunks)
+            tree_nodes = await raptor.build_tree(chunks)
             raptor_points = []
             for node in tree_nodes:
                 if node.level > 0:
-                    vec = embedder.embed_single(node.content)
+                    # embedding 已在 build_tree 内生成，避免重复计算
+                    vec = node.embedding or embedder.embed_single(node.content)
                     raptor_points.append(PointStruct(
-                        id=abs(hash(node.node_id)) % (2**63),
+                        id=int(_hashlib.md5(node.node_id.encode()).hexdigest(), 16) % (2**63),
                         vector=vec,
                         payload={
                             "chunk_id": node.node_id,
@@ -475,6 +477,9 @@ def update_settings_api(body: SettingsUpdateRequest):
             _os.environ["LLM_LLM_PROVIDER"] = body.llm_provider
         if body.embedding_provider:
             _os.environ["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
+        # 刷新缓存的 Settings 实例，使配置变更对后续请求生效
+        from mindforge.config import reload_settings
+        reload_settings()
         db.commit()
         return {"status": "saved"}
     finally:

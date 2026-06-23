@@ -73,11 +73,14 @@ class MCPToolDefinition:
 # ---------------------------------------------------------------------------
 
 
+import uuid as _uuid
+
+
 def _make_request(method: str, params: Optional[dict[str, Any]] = None) -> str:
     """Build a JSON-RPC request string."""
     request = {
         "jsonrpc": JSON_RPC_VERSION,
-        "id": str(id(params) if params else 0),
+        "id": _uuid.uuid4().hex[:8],
         "method": method,
         "params": params or {},
     }
@@ -252,9 +255,17 @@ class MCPServerProcess:
             if self._process.stdin:
                 self._process.stdin.write(shutdown_req.encode("utf-8"))
                 await self._process.stdin.drain()
+                # 给子进程 0.5s 处理 shutdown
+                await asyncio.sleep(0.5)
         except Exception:
             pass
 
+        if self._process.returncode is None:
+            try:
+                self._process.terminate()
+                await self._process.wait()
+            except ProcessLookupError:
+                pass
         if self._process.returncode is None:
             try:
                 self._process.kill()

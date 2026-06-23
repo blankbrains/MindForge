@@ -198,11 +198,12 @@ class ResearcherAgent(BaseAgent):
             for tc, exec_result in zip(result.tool_calls, tool_results):
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
+                tc_id = tc.get("id", "")
 
                 if isinstance(exec_result, BaseException):
                     output = f"Tool execution error: {exec_result}"
                     conv.append(
-                        ChatMessage(role="tool", content=output, tool_call_id="")
+                        ChatMessage(role="tool", content=output, tool_call_id=tc_id)
                     )
                 else:
                     output = exec_result["output"]

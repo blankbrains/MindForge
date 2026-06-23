@@ -1,3 +1,4 @@
+import { useCallback, useRef, useState } from "react";
 import { useResearchSession } from "@/hooks/use-research-session";
 import { useResearchStore } from "@/store/research-store";
 import { Link } from "@tanstack/react-router";
@@ -13,6 +14,18 @@ export function ResearchPage() {
   const session = useResearchSession();
   const task = useResearchStore((s) => s.task);
   const setTask = useResearchStore((s) => s.setTask);
+  // 保留最后一次已提交的任务，避免输入框清空后重试按钮丢失 task
+  const lastTaskRef = useRef(task);
+  const [keyWarningVisible, setKeyWarningVisible] = useState(true);
+
+  const handleSubmit = useCallback(
+    (t: string) => {
+      lastTaskRef.current = t;
+      session.startResearch(t);
+      setTask("");  // 提交后清空输入框，便于输入新问题
+    },
+    [session, setTask],
+  );
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -21,16 +34,29 @@ export function ResearchPage() {
         <p className="mt-1 text-text-muted">输入研究问题，观察 Multi-Agent 系统实时协作</p>
       </div>
 
-      {/* No API Key warning */}
-      {(
+      {/* API Key 未配置警告 — 用户可手动关闭 */}
+      {keyWarningVisible && (
         <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
           <AlertTriangle className="h-5 w-5 shrink-0" />
           <span>未配置 LLM API Key 时，自动使用<strong>文档检索模式</strong>。如需 AI 分析，请先</span>
           <Link to="/settings" search={{}} className="font-medium underline whitespace-nowrap">配置 API Key</Link>
+          <button
+            type="button"
+            onClick={() => setKeyWarningVisible(false)}
+            className="ml-auto shrink-0 rounded-md p-1 hover:bg-amber-200 dark:hover:bg-amber-800"
+            aria-label="关闭提醒"
+          >
+            <XCircle className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      <QueryInput value={task} onChange={setTask} onSubmit={session.startResearch} disabled={session.isStreaming} />
+      <QueryInput
+        value={task}
+        onChange={setTask}
+        onSubmit={handleSubmit}
+        disabled={session.isStreaming}
+      />
 
       {session.isError && (
         <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
@@ -41,7 +67,7 @@ export function ResearchPage() {
               <Link to="/settings" search={{}} className="inline-flex items-center gap-1 rounded-md bg-red-100 px-3 py-1.5 text-xs font-medium hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800">
                 <KeyRound className="h-3 w-3" />更新 API Key
               </Link>
-              <button type="button" onClick={() => session.startResearch(task)} className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-3 py-1.5 text-xs font-medium hover:bg-amber-200 dark:bg-amber-900 dark:hover:bg-amber-800">
+              <button type="button" onClick={() => session.startResearch(lastTaskRef.current)} className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-3 py-1.5 text-xs font-medium hover:bg-amber-200 dark:bg-amber-900 dark:hover:bg-amber-800">
                 <FileSearch className="h-3 w-3" />重试
               </button>
             </div>

@@ -73,23 +73,25 @@ class BM25Retriever:
 
         if self.retriever is not None and _BM25S_AVAILABLE:
             try:
-                query_tokens = list(jieba.cut(query))
+                # bm25s retrieve 期望 corpus 为 token 列表的列表
+                query_tokens = [list(jieba.cut_for_search(query))]
                 scores, indices = self.retriever.retrieve(
                     query_tokens, k=min(top_k, len(self.documents))
                 )
                 results = []
-                # bm25s returns shape (1, k) arrays
+                # bm25s returns shape (1, k) arrays; -1 表示无命中填充位
                 for rank in range(indices.shape[1]):
                     doc_idx = indices[0, rank]
+                    if doc_idx < 0 or doc_idx >= len(self.documents):
+                        continue
                     score = float(scores[0, rank])
-                    if doc_idx < len(self.documents):
-                        results.append(
-                            {
-                                "id": self.doc_ids[doc_idx],
-                                "text": self.documents[doc_idx],
-                                "score": score,
-                            }
-                        )
+                    results.append(
+                        {
+                            "id": self.doc_ids[doc_idx],
+                            "text": self.documents[doc_idx],
+                            "score": score,
+                        }
+                    )
                 return results
             except Exception:
                 logger.exception("BM25 search failed; falling back to keyword match.")
