@@ -29,7 +29,7 @@ export function QueryInput({ value, onChange, onSubmit, disabled }: QueryInputPr
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              handleSubmit(e);
+              e.currentTarget.form?.requestSubmit();
             }
           }}
         />

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSettingsStore, type LLMProvider } from "@/store/settings-store";
 import { Save, RotateCcw } from "lucide-react";
 
@@ -15,13 +15,16 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
+  useEffect(() => { loadSettings(); }, [loadSettings]);
 
   const handleSave = async () => {
     setSaving(true);
     const ok = await saveSettings();
     setSaving(false);
     setSaved(ok);
-    setTimeout(() => setSaved(false), 2000);
+    if (!ok) setSaved(false); // don't flash "saved" on failure
+    else setTimeout(() => setSaved(false), 2000);
   };
 
   const handleReset = () => {

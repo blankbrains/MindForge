@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, AsyncIterator, Optional
 
@@ -72,21 +73,18 @@ class ResearcherAgent(BaseAgent):
         """
         settings = get_settings()
         researcher_model = settings.llm.get_model("researcher")
-        _old_llm = getattr(self, "_llm", None)
-        if _old_llm is not None:
+        request_llm = self._llm
+        if request_llm is not None:
             from mindforge.models.base import LLMFactory
-            self._llm = LLMFactory.create(
+            request_llm = LLMFactory.create(
                 settings.llm.llm_provider, researcher_model
             )
-        try:
-            return await self._run_tool_loop(
-                task,
-                context=context,
-                max_rounds=max_rounds,
-            )
-        finally:
-            if _old_llm is not None:
-                self._llm = _old_llm
+        return await self._run_tool_loop(
+            task,
+            context=context,
+            max_rounds=max_rounds,
+            _llm_override=request_llm,
+        )
 
     # ------------------------------------------------------------------
     async def stream_run(
@@ -117,12 +115,11 @@ class ResearcherAgent(BaseAgent):
         max_rounds = max_rounds or settings.agent.max_iterations
         start_time = time.perf_counter()
 
-        # Resolve model (save and restore to avoid mutating shared instance)
         researcher_model = settings.llm.get_model("researcher")
-        _old_s_llm = getattr(self, "_llm", None)
-        if _old_s_llm is not None:
+        request_llm = self._llm
+        if request_llm is not None:
             from mindforge.models.base import LLMFactory
-            self._llm = LLMFactory.create(
+            request_llm = LLMFactory.create(
                 settings.llm.llm_provider, researcher_model
             )
 
@@ -142,6 +139,7 @@ class ResearcherAgent(BaseAgent):
             result = await self._chat(
                 conv,
                 tools=tool_schemas if use_tools else None,
+                _llm_override=request_llm,
             )
 
             if result.usage:
@@ -171,9 +169,6 @@ class ResearcherAgent(BaseAgent):
                     latency_ms=elapsed_ms,
                     cost_usd=cost,
                 )
-                # Restore original LLM before returning
-                if _old_s_llm is not None:
-                    self._llm = _old_s_llm
                 yield {"type": "final_answer", "content": final_content, "result": agent_result}
                 return
 
@@ -186,8 +181,6 @@ class ResearcherAgent(BaseAgent):
                     tool_calls=result.tool_calls,
                 )
             )
-
-            import asyncio
 
             for tc in result.tool_calls:
                 func = tc.get("function", {})
@@ -251,7 +244,3 @@ class ResearcherAgent(BaseAgent):
             cost_usd=cost,
         )
         yield {"type": "final_answer", "content": final_content, "result": agent_result}
-
-        # Restore original LLM after stream ends
-        if _old_s_llm is not None:
-            self._llm = _old_s_llm

@@ -44,7 +44,7 @@ export type SSEEvent =
   | { type: "synthesizing"; status: "start" | "done" }
   | { type: "critic_feedback"; score: CriticScore; round: number }
   | { type: "refining"; round: number }
-  | { type: "done"; result: AgentResult & { data: { plan: ResearchPlan; subtask_outputs: unknown[]; critic_score: CriticScore | null; refine_rounds: number } } };
+  | { type: "done"; result: AgentResult };
 
 export interface HistoryItem {
   task_id: string;

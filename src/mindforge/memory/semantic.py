@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import logging
 from dataclasses import dataclass, field
@@ -203,38 +204,29 @@ class SemanticMemory:
         self._store_path.mkdir(parents=True, exist_ok=True)
 
     def _save(self) -> None:
-        """Write facts and patterns to disk as JSON."""
+        """Atomically write facts and patterns to disk (tmp + rename)."""
         try:
             facts_data = {
                 fid: {
-                    "fact_id": f.fact_id,
-                    "content": f.content,
-                    "sources": f.sources,
-                    "confidence": f.confidence,
-                    "timestamp": f.timestamp,
-                    "category": f.category,
+                    "fact_id": f.fact_id, "content": f.content,
+                    "sources": f.sources, "confidence": f.confidence,
+                    "timestamp": f.timestamp, "category": f.category,
                 }
                 for fid, f in self._facts.items()
             }
-            (self._store_path / "facts.json").write_text(
-                json.dumps(facts_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            tmp_facts = self._store_path / ".facts.json.tmp"
+            tmp_facts.write_text(json.dumps(facts_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_facts, self._store_path / "facts.json")
 
             patterns_data = [
-                {
-                    "query_type": p.query_type,
-                    "strategy": p.strategy,
-                    "success": p.success,
-                    "quality_score": p.quality_score,
-                    "timestamp": p.timestamp,
-                }
+                {"query_type": p.query_type, "strategy": p.strategy,
+                 "success": p.success, "quality_score": p.quality_score,
+                 "timestamp": p.timestamp}
                 for p in self._patterns
             ]
-            (self._store_path / "patterns.json").write_text(
-                json.dumps(patterns_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            tmp_patterns = self._store_path / ".patterns.json.tmp"
+            tmp_patterns.write_text(json.dumps(patterns_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_patterns, self._store_path / "patterns.json")
         except Exception:
             logger.exception("Failed to save semantic memory to disk")
 

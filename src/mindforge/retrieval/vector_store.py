@@ -37,11 +37,14 @@ class QdrantStore:
         return result
 
     async def search(self, vector: List[float], top_k: int = 20) -> List[tuple[Dict, float]]:
-        results = await self._async_client.search(
+        """Vector search using query_points (qdrant-client >= 1.18)."""
+        results = await self._async_client.query_points(
             collection_name=self.collection_name,
-            query_vector=vector, limit=top_k, with_payload=True,
+            query=vector,
+            limit=top_k,
+            with_payload=True,
         )
-        return [(r.payload, r.score) for r in results]
+        return [(r.payload, r.score) for r in results.points]
 
     def _build_filter(self, filters: Optional[Dict]) -> Optional[Filter]:
         if not filters:

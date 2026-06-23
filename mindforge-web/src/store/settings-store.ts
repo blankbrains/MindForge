@@ -66,8 +66,8 @@ export const useSettingsStore = create<SettingsState>()(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               llm_provider: state.llmProvider,
-              deepseek_api_key: state.llmApiKey,
-              openai_api_key: state.llmApiKey,
+              deepseek_api_key: state.llmProvider === "deepseek" ? state.llmApiKey : "",
+              openai_api_key: state.llmProvider === "openai" ? state.llmApiKey : "",
               embedding_provider: "openai",
             }),
           });
