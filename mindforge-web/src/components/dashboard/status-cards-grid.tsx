@@ -29,7 +29,7 @@ export function StatusCardsGrid() {
     {
       label: "已索引文档",
       icon: Wifi,
-      ok: true,
+      ok: (stats?.documents_indexed ?? 0) > 0 || !!stats,
       value: isLoading ? "-" : `${stats?.documents_indexed ?? 0}`,
       isCount: true,
       linkTo: "/knowledge-base" as const,

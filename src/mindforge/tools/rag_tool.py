@@ -176,18 +176,21 @@ class RAGTool(BaseTool):
             if s >= min_score:
                 qualified.append(r)
 
+        # Quality: percentage of results above meaningful threshold (0.3 for real embeddings)
+        good_count = sum(
+            1 for r in qualified
+            if (r.get("score", 0.0) if isinstance(r, dict) else getattr(r, "score", 0.0)) >= 0.3
+        )
+        quality = round(min(good_count / max(len(qualified), 1) * 10, 10.0), 1)
+
         if not qualified:
             return ToolResult(
                 success=True,
                 output=(
-                    f"## {query}\n\n"
-                    f"> ⚠️ 当前资料库中暂无与「{query}」高度相关的内容。\n\n"
-                    "**建议：**\n"
-                    "- 尝试使用不同的关键词重新搜索\n"
-                    "- 上传更多相关文档到知识库（支持 PDF/DOCX/Markdown）\n"
-                    "- 检索到 0 条高质量结果，请提供更多资料"
+                    f"关于「{query}」，当前知识库中暂无高度相关的资料。\n\n"
+                    "建议尝试更换关键词，或上传更多相关文档到知识库。"
                 ),
-                data={"results": [], "total": 0, "filtered_out": len(results)},
+                data={"results": [], "total": 0, "quality": 0.0, "filtered_out": len(results)},
                 execution_time_ms=elapsed,
             )
 
@@ -195,31 +198,21 @@ class RAGTool(BaseTool):
         return ToolResult(
             success=True,
             output=formatted,
-            data={"results": qualified, "total": len(qualified)},
+            data={"results": qualified, "total": len(qualified), "quality": quality},
             execution_time_ms=elapsed,
         )
 
     def _format_results(self, results: list[Any], query: str) -> str:
-        """Format retrieved documents into a clean, readable report."""
+        """Format results as clean Markdown ready for ReactMarkdown rendering.
+
+        Preserves headers, bold, lists. Removes code blocks, pipes, prompt artifacts,
+        and other garbage that shouldn't appear in user-facing output.
+        """
+        import re as _re
+
         lines: list[str] = [f"## {query}\n"]
 
-        # Estimate overall relevance
-        avg_score = 0.0
-        count = 0
         for doc in results:
-            s = 0.0
-            if hasattr(doc, "score"):
-                s = doc.score
-            elif isinstance(doc, dict):
-                s = doc.get("score", 0.0)
-            avg_score += s
-            count += 1
-        avg_score = avg_score / count if count else 0
-        if avg_score < 0.2:
-            lines.append(f"> 📄 基于现有资料整理（平均相关度 {avg_score:.3f}，仅供参考）\n")
-
-        for i, doc in enumerate(results, 1):
-            # Extract content
             if hasattr(doc, "page_content"):
                 content = doc.page_content
             elif isinstance(doc, dict):
@@ -227,33 +220,31 @@ class RAGTool(BaseTool):
             else:
                 content = str(doc)
 
-            # Extract source
-            source = ""
-            if isinstance(doc, dict):
-                meta = doc.get("metadata", {}) or {}
-                source = meta.get("source", meta.get("title", ""))
-            elif hasattr(doc, "metadata") and doc.metadata:
-                source = doc.metadata.get("source", "")
+            text = str(content).strip()
 
-            # Clean up content — remove code fences, strip leading/trailing garbage
-            content_str = str(content).strip()
-            # Remove leading Markdown heading fragments like "中 |" or "中 |\n\n"
-            import re
-            content_str = re.sub(r'^[^\n]{0,3}\s*\|\s*\n+', '', content_str)
-            # Collapse 3+ newlines into 2
-            content_str = re.sub(r'\n{3,}', '\n\n', content_str)
-            # Truncate
-            if len(content_str) > 2000:
-                content_str = content_str[:2000] + "\n\n…（内容过长，已截断）"
+            # Remove garbage artifacts — code blocks, inline code, pipes, prompt templates
+            text = _re.sub(r'```[\s\S]*?```', '', text)
+            text = _re.sub(r'`{1,3}[^`]+`{1,3}', '', text)
+            text = _re.sub(r'^[^\n]{0,3}\s*\|\s*\n+', '', text)
+            text = _re.sub(r'\|', ' ', text)
+            text = _re.sub(r'_{3,}', '', text)
+            # Remove prompt template artifacts
+            text = _re.sub(r'prompt\s*=\s*f"[^"]*"', '', text)
+            text = _re.sub(r'QueryMode\.\w+\s*[=:]\s*\[[^\]]*\]', '', text)
+            text = _re.sub(r'STRATEGY_MAP\s*=\s*\{[^}]*\}', '', text)
+            text = _re.sub(r'class\s+\w+.*?:', '', text)
+            # Clean up newlines
+            text = _re.sub(r'\n{3,}', '\n\n', text)
+            text = text.strip()
 
-            # Build result block
-            lines.append(f"### 📌 来源 {i}")
-            if source:
-                lines[-1] += f" — *{source}*"
-            lines.append("")
-            lines.append(content_str)
-            lines.append("")
+            if len(text) > 1200:
+                text = text[:1200] + "\n\n…"
 
-        lines.append("---")
-        lines.append(f"*共检索到 {len(results)} 条相关结果*")
+            if text:
+                lines.append(text)
+                lines.append("")
+
+        if len(lines) <= 2:
+            return f"## {query}\n\n当前知识库中暂无高度相关的资料。\n\n建议更换关键词或上传更多文档到知识库。"
+
         return "\n".join(lines)

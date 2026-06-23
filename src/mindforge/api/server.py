@@ -171,7 +171,11 @@ if os.path.isdir(_FRONTEND_DIR):
     # Registered last so API routes (/api/v1/*) take priority.
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
-        candidate = os.path.join(_FRONTEND_DIR, full_path)
+        # Prevent path traversal: resolve the canonical path and verify it stays
+        # within the frontend build directory.
+        candidate = os.path.normpath(os.path.join(_FRONTEND_DIR, full_path))
+        if not candidate.startswith(_FRONTEND_DIR):
+            return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
         if os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))

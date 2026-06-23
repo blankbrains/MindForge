@@ -131,14 +131,16 @@ class BaseAgent(ABC):
         tools: Optional[list[dict]] = None,
         response_format: Optional[dict] = None,
         temperature: Optional[float] = None,
+        _llm_override: Any = None,
     ) -> ChatResult:
         """Call the LLM with 3-attempt retry and exponential backoff."""
         temp = temperature if temperature is not None else self._temperature
+        llm = _llm_override if _llm_override is not None else self._llm
         last_exc: Optional[Exception] = None
 
         for attempt in range(3):
             try:
-                return await self._llm.chat(
+                return await llm.chat(
                     messages=messages,
                     tools=tools,
                     response_format=response_format,
@@ -230,6 +232,7 @@ class BaseAgent(ABC):
         context: Optional[str] = None,
         max_rounds: Optional[int] = None,
         messages: Optional[list[ChatMessage]] = None,
+        _llm_override: Any = None,
     ) -> AgentResult:
         """Run the LLM tool-calling loop (ReAct / function calling).
 
@@ -276,6 +279,7 @@ class BaseAgent(ABC):
             result = await self._chat(
                 conv,
                 tools=tool_schemas if use_tools else None,
+                _llm_override=_llm_override,
             )
 
             # Accumulate token usage

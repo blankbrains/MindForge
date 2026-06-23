@@ -316,14 +316,18 @@ class MCPRegistry:
 
     # ---- Lifecycle ------------------------------------------------------------
 
-    async def start_all(self) -> None:
-        """Start all enabled MCP server subprocesses."""
-        for server in self._servers.values():
+    async def start_all(self, timeout: float = 30.0) -> None:
+        """Start all enabled MCP server subprocesses in parallel with timeout."""
+        async def _start_one(server):
             try:
-                await server.start()
-            except Exception as exc:
+                await asyncio.wait_for(server.start(), timeout=timeout)
+            except (Exception, asyncio.TimeoutError) as exc:
                 print(f"Warning: Failed to start MCP server '{server.config.name}': {exc}",
                       file=sys.stderr)
+
+        tasks = [_start_one(s) for s in self._servers.values()]
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def stop_all(self) -> None:
         """Stop all MCP server subprocesses."""

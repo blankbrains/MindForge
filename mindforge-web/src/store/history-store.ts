@@ -18,7 +18,8 @@ export interface HistoryState {
   addEntry: (entry: HistoryEntry) => void;
   addFromResearch: (task: string, report: string, quality?: number, model?: string) => Promise<void>;
   loadHistory: () => Promise<void>;
-  clearAll: () => void;
+  removeEntry: (id: number) => Promise<void>;
+  clearAll: () => Promise<void>;
 }
 
 export const useHistoryStore = create<HistoryState>()(
@@ -46,7 +47,7 @@ export const useHistoryStore = create<HistoryState>()(
           // Best-effort: network may be down
         }
         const entry: HistoryEntry = {
-          id: Date.now(),
+          id: Date.now() + Math.random(), // composite ID to avoid same-ms collisions
           task,
           report: report.slice(0, 500),
           quality_score: quality ?? null,
@@ -68,7 +69,15 @@ export const useHistoryStore = create<HistoryState>()(
         }
       },
 
-      clearAll: () => set({ entries: [] }),
+      removeEntry: async (id: number) => {
+        try { await fetch(`${API_BASE}/history/${id}`, { method: "DELETE" }); } catch {}
+        set((s) => ({ entries: s.entries.filter((e) => e.id !== id) }));
+      },
+
+      clearAll: async () => {
+        try { await fetch(`${API_BASE}/history`, { method: "DELETE" }); } catch {}
+        set({ entries: [] });
+      },
     }),
     {
       name: "mindforge-history",

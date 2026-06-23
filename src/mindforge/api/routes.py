@@ -100,18 +100,20 @@ async def query(body: QueryRequest):
             rag = RAGTool()
             result = rag.safe_execute(query=body.task, mode="hybrid", top_k=5)
             latency = (time.time() - start) * 1000
+            fallback_quality = float(result.data.get("quality", 0.0)) if result.data else 0.0
             return QueryResponse(
                 task_id=uuid.uuid4().hex[:12],
                 report=result.output if result.success else f"检索失败: {result.error}",
                 sources=[],
-                quality_score=0.0,
+                quality_score=fallback_quality,
                 latency_ms=round(latency, 2),
                 cost_usd=0.0,
                 iterations=0,
             )
-        except Exception as e2:
+        except Exception:
             logger.exception("Fallback retrieval also failed.")
-            raise HTTPException(status_code=500, detail=f"Research failed: {e2}")
+            logger.exception("All research paths failed")
+            raise HTTPException(status_code=500, detail="Research service temporarily unavailable")
 
 
 @router.post("/index", response_model=IndexResponse)
@@ -365,31 +367,44 @@ async def upload_document(
     use_graphrag: bool = Form(False),
 ):
     """Upload a document file for indexing into the knowledge base."""
-    # Save uploaded file to data/ directory
+    # Sanitize filename — prevent path traversal
+    import re as _re
+    safe_name = file.filename or "uploaded_doc"
+    safe_name = _re.sub(r'[\\/]', '_', safe_name)  # strip path separators
+    safe_name = _re.sub(r'\.\.+', '', safe_name)     # strip double dots
+
+    # Size limit: 50 MB
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 50 MB)")
+
     upload_dir = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "data")
     _os.makedirs(upload_dir, exist_ok=True)
-    file_path = _os.path.join(upload_dir, file.filename or "uploaded_doc")
-    content = await file.read()
+    file_path = _os.path.join(upload_dir, safe_name)
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Parse and index
-    parser = DocumentParser()
-    parsed = parser.parse(file_path)
-    splitter = TextSplitter()
-    chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
+    try:
+        parser = DocumentParser()
+        parsed = parser.parse(file_path)
+        splitter = TextSplitter()
+        chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
 
-    from mindforge.ingestion.embedder import get_embedder
-    embedder = get_embedder()
-    store = get_vector_store()
-    store.ensure_collection()
+        from mindforge.ingestion.embedder import get_embedder
+        embedder = get_embedder()
+        store = get_vector_store()
+        store.ensure_collection()
 
-    from qdrant_client.models import PointStruct
-    points = []
-    for ch in chunks:
-        vec = embedder.embed_single(ch.content)
-        points.append(PointStruct(
-            id=abs(hash(ch.chunk_id)) % (2**63),
+        from qdrant_client.models import PointStruct
+        points = []
+        for ch in chunks:
+            vec = embedder.embed_single(ch.content)
+            # Use a stable ID based on hashlib, not Python's hash()
+            import hashlib as _hl
+            stable_id = int(_hl.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63)
+            points.append(PointStruct(
+                id=stable_id,
             vector=vec,
             payload={
                 "chunk_id": ch.chunk_id,
@@ -398,15 +413,21 @@ async def upload_document(
                 "source": file.filename or parsed.filename,
             },
         ))
-    for i in range(0, len(points), 100):
-        await store.upsert(points[i:i+100])
+        for i in range(0, len(points), 100):
+            await store.upsert(points[i:i+100])
 
-    return IndexResponse(
-        doc_id=parsed.doc_id,
-        filename=file.filename or parsed.filename,
-        chunk_count=len(chunks),
-        status="indexed",
-    )
+        return IndexResponse(
+            doc_id=parsed.doc_id,
+            filename=file.filename or parsed.filename,
+            chunk_count=len(chunks),
+            status="indexed",
+        )
+    finally:
+        # Always attempt cleanup of the uploaded temp file after indexing
+        try:
+            _os.remove(file_path)
+        except OSError:
+            pass
 
 
 # ------------------------------------------------------------------
@@ -516,6 +537,35 @@ def save_history(body: dict):
         db.close()
 
 
+@router.delete("/history/{entry_id}", status_code=204)
+def delete_history_entry(entry_id: int):
+    """Delete a single research history entry."""
+    from mindforge.db import SessionLocal, ResearchHistory
+    db = SessionLocal()
+    try:
+        entry = db.query(ResearchHistory).filter(ResearchHistory.id == entry_id).first()
+        if entry is None:
+            raise HTTPException(status_code=404, detail="History entry not found")
+        db.delete(entry)
+        db.commit()
+        return None
+    finally:
+        db.close()
+
+
+@router.delete("/history", status_code=204)
+def clear_history():
+    """Delete all research history entries."""
+    from mindforge.db import SessionLocal, ResearchHistory
+    db = SessionLocal()
+    try:
+        db.query(ResearchHistory).delete()
+        db.commit()
+        return None
+    finally:
+        db.close()
+
+
 @router.post("/mcp")
 async def mcp_endpoint(request: dict):
     """MCP JSON-RPC endpoint — exposes MindForce tools via MCP over HTTP.
@@ -529,8 +579,9 @@ async def mcp_endpoint(request: dict):
         mcp_server = MindForgeMCPServer()
         result = await mcp_server.handle_request(request)
         return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("MCP endpoint error")
+        raise HTTPException(status_code=500, detail="MCP service error")
 
 
 @router.get("/mcp")
@@ -590,8 +641,20 @@ async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[byte
                     "agent_name": "orchestrator",
                     "success": True,
                     "output": result.output if result.success else f"检索失败: {result.error}",
-                    "data": {"fallback": True},
-                    "metadata": {"quality": 0.0, "cost": 0.0, "subtask_count": 0, "model": "fallback-retrieval"},
+                    "data": {
+                        "plan": None,
+                        "subtask_outputs": [],
+                        "critic_score": None,
+                        "refine_rounds": 0,
+                        "fallback": True,
+                    },
+                    "metadata": {
+                        "quality": float(result.data.get("quality", 0.0)) if result.data else 0.0,
+                        "cost": 0.0,
+                        "subtask_count": 0,
+                        "refine_rounds": 0,
+                        "model": "fallback-retrieval",
+                    },
                 },
             }
             yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n".encode("utf-8")

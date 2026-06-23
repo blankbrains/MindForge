@@ -5,9 +5,10 @@ import { Clock, Trash2, CheckCircle2, ChevronDown, ChevronUp } from "lucide-reac
 import { cn } from "@/lib/utils";
 
 export function HistoryPage() {
-  const { entries, loadHistory, clearAll } = useHistoryStore();
+  const { entries, loadHistory, removeEntry, clearAll } = useHistoryStore();
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
@@ -49,18 +50,40 @@ export function HistoryPage() {
                   {entry.model_used && <span>模型: {entry.model_used}</span>}
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setDeleteTargetId(entry.id); }}
+                className="shrink-0 rounded-lg p-1 text-text-muted hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors opacity-0 group-hover:opacity-100"
+                title="删除记录"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
               {expandedId === entry.id ? <ChevronUp className="h-4 w-4 text-text-muted" /> : <ChevronDown className="h-4 w-4 text-text-muted" />}
             </button>
             {expandedId === entry.id && (
               <div className="border-t border-border px-5 py-4">
-                <pre className="whitespace-pre-wrap text-sm font-sans bg-surface-alt rounded-lg p-4 max-h-96 overflow-y-auto">
-                  {entry.report && entry.report.length > 3000 ? entry.report.slice(0, 3000) + "\n\n… (内容过长，此处截断)" : (entry.report || "（无内容）")}
-                </pre>
+                <div className="whitespace-pre-wrap text-sm font-sans bg-surface-alt rounded-lg p-4 max-h-96 overflow-y-auto">
+                  {entry.report && entry.report.length > 3000 ? entry.report.slice(0, 3000) + "\n\n…" : (entry.report || "（无内容）")}
+                </div>
               </div>
             )}
           </div>
         ))}
       </div>
+
+      {/* Per-item Delete Modal */}
+      {deleteTargetId != null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDeleteTargetId(null)}>
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-2">确认删除</h3>
+            <p className="text-sm text-text-muted mb-4">将永久删除该条研究记录</p>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setDeleteTargetId(null)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">取消</button>
+              <button type="button" onClick={async () => { await removeEntry(deleteTargetId); setDeleteTargetId(null); }} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 transition-colors">确认删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

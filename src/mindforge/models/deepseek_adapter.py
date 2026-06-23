@@ -43,8 +43,14 @@ class DeepSeekAdapter(BaseLLM):
     def __init__(self, model: str = "deepseek-chat", api_key: Optional[str] = None,
                  base_url: str = DEEPSEEK_BASE_URL, max_retries: int = 3, **kwargs):
         self.model = model
+        key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        if not key or not key.strip():
+            raise ValueError(
+                "DeepSeek API key is not configured. "
+                "Set DEEPSEEK_API_KEY env var or pass api_key parameter."
+            )
         self.client = openai.AsyncOpenAI(
-            api_key=api_key or os.getenv("DEEPSEEK_API_KEY", ""),
+            api_key=key,
             base_url=base_url,
             max_retries=max_retries,
         )

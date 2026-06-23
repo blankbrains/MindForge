@@ -57,7 +57,14 @@ def get_db() -> Session:
 # ---------------------------------------------------------------------------
 
 def _get_secret() -> bytes:
-    secret = os.getenv("APP_SECRET", "mindforge-default-secret-change-in-production")
+    secret = os.getenv("APP_SECRET", "")
+    if not secret:
+        secret = "mindforge-default-secret-change-in-production"
+        import logging
+        logging.getLogger(__name__).warning(
+            "APP_SECRET not set — using default encryption key. "
+            "Set APP_SECRET env var for production."
+        )
     return hashlib.sha256(secret.encode()).digest()
 
 

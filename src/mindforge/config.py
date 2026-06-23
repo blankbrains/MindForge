@@ -31,10 +31,10 @@ class LLMConfig(BaseSettings):
     critic_model: str = "gpt-4o"
     synthesizer_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
-    deepseek_planner: str = "deepseek-chat"
-    deepseek_researcher: str = "deepseek-chat"
-    deepseek_critic: str = "deepseek-reasoner"
-    deepseek_synthesizer: str = "deepseek-chat"
+    deepseek_planner: str = "deepseek-v4-flash"
+    deepseek_researcher: str = "deepseek-v4-flash"
+    deepseek_critic: str = "deepseek-v4-flash"
+    deepseek_synthesizer: str = "deepseek-v4-flash"
     deepseek_embedding: str = "BAAI/bge-m3"
     embedding_dim: int = 1536
     local_embedding_model: str = "BAAI/bge-m3"
@@ -104,6 +104,7 @@ class AgentConfig(BaseSettings):
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
     max_refine_rounds: int = Field(default=2)
     subtask_timeout: int = Field(default=45, ge=10)
+    research_timeout: int = Field(default=300, ge=30)
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
 
