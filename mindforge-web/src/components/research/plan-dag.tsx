@@ -31,7 +31,7 @@ export function PlanDAG({ plan }: Props) {
       return {
         id: st.task_id,
         type: "default",
-        position: { x: 0, y: i * 120 },
+        position: { x: 0, y: 50 + i * 120 },
         data: {
           label: (
             <div
@@ -87,7 +87,13 @@ export function PlanDAG({ plan }: Props) {
 
   return (
     <div className="h-[400px] w-full rounded-xl border border-border bg-surface">
-      <ReactFlow nodes={nodes} edges={edges} fitView>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        fitView
+        fitViewOptions={{ padding: 0.2 }}
+        translateExtent={[[-Infinity, -Infinity], [Infinity, Infinity]]}
+      >
         <Background />
         <Controls />
         <MiniMap

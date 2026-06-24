@@ -13,10 +13,12 @@ class CrossEncoderReranker:
     :meth:`rerank` to avoid unnecessary memory usage at import time.
     """
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str | None = None):
         self.model_name = model_name
         self._model = None
         self._model_lock = threading.Lock()
+        if model_name is None:
+            logger.info("Reranker: no model configured — reranking disabled (results returned in original order)")
 
     # ------------------------------------------------------------------
     # Lazy-loading property
@@ -24,26 +26,23 @@ class CrossEncoderReranker:
 
     @property
     def model(self):
-        """Lazy-loaded CrossEncoder instance."""
+        """Lazy-loaded CrossEncoder instance. Returns None if no model configured."""
+        if self.model_name is None:
+            return None
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
                     try:
                         from sentence_transformers import CrossEncoder
-
                         self._model = CrossEncoder(self.model_name)
-                        logger.info(
-                            "Loaded CrossEncoder model '%s'.", self.model_name
-                        )
+                        logger.info("Loaded CrossEncoder model '%s'.", self.model_name)
                     except ImportError:
                         raise ImportError(
                             "sentence-transformers is required for CrossEncoderReranker. "
                             "Install it with: pip install sentence-transformers"
                         )
                     except Exception:
-                        logger.exception(
-                            "Failed to load CrossEncoder model '%s'.", self.model_name
-                        )
+                        logger.exception("Failed to load CrossEncoder model '%s'.", self.model_name)
                         raise
         return self._model
 
@@ -77,11 +76,16 @@ class CrossEncoderReranker:
         texts = [c.get("text", "") for c in candidates]
         pairs = [(query, text) for text in texts]
 
-        try:
-            scores = self.model.predict(pairs)
-        except Exception:
-            logger.exception("Cross-encoder scoring failed; returning original order.")
+        model = self.model
+        if model is None:
+            logger.warning("No reranker model configured; returning original order.")
             scores = [0.0] * len(candidates)
+        else:
+            try:
+                scores = model.predict(pairs)
+            except Exception:
+                logger.exception("Cross-encoder scoring failed; returning original order.")
+                scores = [0.0] * len(candidates)
 
         # Attach scores and re-sort
         reranked = []

@@ -52,6 +52,24 @@ app.include_router(router, prefix="/api/v1")
 
 
 # ------------------------------------------------------------------
+# Background helpers
+# ------------------------------------------------------------------
+
+async def _preload_embedder() -> None:
+    """Preload the embedding model in background so first upload is instant."""
+    try:
+        from mindforge.ingestion.embedder import EmbeddingManager
+        from mindforge.config import get_settings
+        settings = get_settings()
+        model = settings.llm.local_embedding_model or "BAAI/bge-m3"
+        logger.info("Preloading embedding model '%s' in background...", model)
+        EmbeddingManager(model_name=model, provider="sentence-transformers")
+        logger.info("Embedding model '%s' ready.", model)
+    except Exception as exc:
+        logger.warning("Embedding preload skipped (will use hash fallback): %s", exc)
+
+
+# ------------------------------------------------------------------
 # Lifecycle
 # ------------------------------------------------------------------
 
@@ -83,8 +101,8 @@ async def startup():
     # Redis probe
     try:
         import redis as r
-        rc = r.from_url(settings.cache.redis_url or "redis://localhost:6379",
-                        decode_responses=True)
+        rc = r.from_url(settings.cache.redis_url or "redis://localhost:6377",
+                        decode_responses=True, protocol=2)
         rc.ping()
         rc.close()
         logger.info("Redis connected — %s", settings.cache.redis_url)
@@ -120,6 +138,12 @@ async def startup():
             set_mcp_registry(reg)
         except Exception as exc:
             logger.warning("Failed to store MCP registry reference: %s", exc)
+
+    # 后台预加载 embedding 模型（BGE-M3 1.7GB，首次加载 ~170s）
+    # 避免用户上传文档时等待
+    if settings.llm.embedding_provider in ("bge", "sentence-transformers"):
+        import asyncio as _asyncio
+        _asyncio.create_task(_preload_embedder())
 
     logger.info("MindForge startup complete")
 

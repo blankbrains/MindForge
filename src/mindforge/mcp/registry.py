@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 

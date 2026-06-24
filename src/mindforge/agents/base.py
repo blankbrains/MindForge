@@ -92,7 +92,7 @@ class BaseAgent(ABC):
         *,
         provider: Optional[str] = None,
         model: Optional[str] = None,
-        temperature: float = 0.7,
+        temperature: float = 0.9,
     ) -> None:
         settings = get_settings()
 
@@ -281,6 +281,7 @@ class BaseAgent(ABC):
         aggregated_usage: dict[str, int] = {}
         final_content = ""
         tool_calls_made = 0
+        collected_sources: list[dict[str, Any]] = []  # aggregate source metadata from tool calls
 
         for round_idx in range(max_rounds):
             result = await self._chat(
@@ -339,6 +340,12 @@ class BaseAgent(ABC):
                             tool_call_id=exec_result["tool_call_id"],
                         )
                     )
+                    # Collect source metadata from tool results (e.g. RAGTool returns sources in data)
+                    tool_data = exec_result.get("data") if isinstance(exec_result, dict) else None
+                    if isinstance(tool_data, dict) and "sources" in tool_data:
+                        for src in tool_data["sources"]:
+                            if isinstance(src, dict):
+                                collected_sources.append(src)
 
         # --- Determine final output ---
         # If we exited because of max rounds, force one final non-tool call
@@ -372,17 +379,6 @@ class BaseAgent(ABC):
         model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
         cost = _estimate_cost(model_used, aggregated_usage)
 
-        # Aggregate sources from tool results
-        sources: list[dict[str, Any]] = []
-        for msg in conv:
-            if msg.role == "tool" and hasattr(msg, "data") and msg.data:
-                try:
-                    src_data = msg.data
-                    if isinstance(src_data, dict) and "sources" in src_data:
-                        sources.extend(src_data["sources"])
-                except Exception:
-                    pass
-
         return AgentResult(
             agent_name=self.name,
             success=True,
@@ -391,7 +387,7 @@ class BaseAgent(ABC):
                 "rounds": min(round_idx + 1, max_rounds),
                 "tool_calls": tool_calls_made,
                 "messages": len(conv),
-                "sources": sources,
+                "sources": collected_sources,
             },
             metadata={
                 "model": self._model_name,

@@ -3,10 +3,34 @@
 
 from __future__ import annotations
 import os
+from pathlib import Path
 from typing import Optional
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+
+# 加载 .env 文件 — 优先从 CWD 查找，兜底从项目根目录（__file__ 推导）查找
+# 这样无论从哪个目录启动、部署在哪台服务器上都能正确加载
+_candidates: list[Path] = []
+# 1) 当前工作目录（最常见：从项目根目录启动）
+_candidates.append(Path.cwd() / ".env")
+# 2) 项目根目录（从 src/ 启动时通过 __file__ 推导）
+_candidates.append(Path(__file__).resolve().parent.parent.parent / ".env")
+# 3) 环境变量显式指定
+_env_override = os.getenv("MINDFORGE_ENV_FILE")
+if _env_override:
+    _candidates.insert(0, Path(_env_override))
+
+_dotenv_loaded = False
+for _env_path in _candidates:
+    if _env_path.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(str(_env_path), encoding="utf-8")
+            _dotenv_loaded = True
+            break
+        except Exception:
+            pass
 
 class LLMConfig(BaseSettings):
     """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
@@ -52,7 +76,7 @@ class VectorStoreConfig(BaseSettings):
     embedding_dim: int = Field(
         default=1536,
         description="Must match the embedding model dimension. "
-                    "OpenAI text-embedding-3-small = 1536, all-MiniLM-L6-v2 = 384, BGE-M3 = 1024."
+                    "OpenAI text-embedding-3-small = 1536, BGE-M3 = 1024."
     )
     model_config = SettingsConfigDict(env_prefix="VECTOR_", extra="ignore")
 
@@ -90,12 +114,19 @@ class GraphRAGConfig(BaseSettings):
 
 
 class AgentConfig(BaseSettings):
-    max_iterations: int = Field(default=8, ge=1, le=20)
-    max_search_steps: int = Field(default=5)
+    max_iterations: int = Field(default=3, ge=1, le=20,
+        description="Researcher Agent ReAct 最大轮次。设为 3 可显著提速，复杂任务可调高。")
+    max_search_steps: int = Field(default=3,
+        description="单次研究中 search_knowledge_base 的最大调用次数")
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
-    max_refine_rounds: int = Field(default=2)
-    subtask_timeout: int = Field(default=45, ge=10)
-    research_timeout: int = Field(default=300, ge=30)
+    max_refine_rounds: int = Field(default=1,
+        description="Critic 精炼最大轮次。设为 1 可减少一轮评估+重写，显著提速。")
+    subtask_timeout: int = Field(default=30, ge=10,
+        description="单个子任务超时（秒）")
+    research_timeout: int = Field(
+        default=180, ge=30,
+        description="研究全流程超时（秒）。Set via AGENT_RESEARCH_TIMEOUT env var."
+    )
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
 
@@ -109,7 +140,7 @@ class MCPConfig(BaseSettings):
 
 
 class CacheConfig(BaseSettings):
-    redis_url: str = Field(default="redis://localhost:6379")
+    redis_url: str = Field(default="redis://localhost:6377")
     cache_ttl: int = Field(default=3600, ge=60)
     embedding_cache_size: int = Field(default=1000)
     model_config = SettingsConfigDict(env_prefix="CACHE_", extra="ignore")
@@ -147,9 +178,7 @@ class Settings(BaseSettings):
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore",
-    )
+    model_config = SettingsConfigDict(extra="ignore")
 
 
 @lru_cache()

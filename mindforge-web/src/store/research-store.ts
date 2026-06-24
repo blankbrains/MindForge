@@ -21,6 +21,7 @@ interface ResearchState {
   criticScore: CriticScore | null;
   refineRound: number;
   finalResult: AgentResult | null;
+  streamingAnswer: string;
 
   setTask: (task: string) => void;
   reset: () => void;
@@ -38,6 +39,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
   criticScore: null,
   refineRound: 0,
   finalResult: null,
+  streamingAnswer: "",
 
   setTask: (task) => set({ task }),
 
@@ -52,6 +54,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       criticScore: null,
       refineRound: 0,
       finalResult: null,
+      streamingAnswer: "",
     }),
 
   setStatus: (status, error) => set({ status, error: error ?? null }),
@@ -108,6 +111,10 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
 
       case "refining":
         set({ refineRound: event.round });
+        break;
+
+      case "answer_chunk":
+        set((s) => ({ streamingAnswer: s.streamingAnswer + event.content }));
         break;
 
       case "done":
