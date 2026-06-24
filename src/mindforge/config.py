@@ -3,20 +3,34 @@
 
 from __future__ import annotations
 import os
+from pathlib import Path
 from typing import Optional
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
-# 显式加载 .env 文件（兼容 Windows 编码问题）
-_env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
-if os.path.exists(_env_path):
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_env_path, encoding="utf-8")
-    except Exception:
-        pass
+# 加载 .env 文件 — 优先从 CWD 查找，兜底从项目根目录（__file__ 推导）查找
+# 这样无论从哪个目录启动、部署在哪台服务器上都能正确加载
+_candidates: list[Path] = []
+# 1) 当前工作目录（最常见：从项目根目录启动）
+_candidates.append(Path.cwd() / ".env")
+# 2) 项目根目录（从 src/ 启动时通过 __file__ 推导）
+_candidates.append(Path(__file__).resolve().parent.parent.parent / ".env")
+# 3) 环境变量显式指定
+_env_override = os.getenv("MINDFORGE_ENV_FILE")
+if _env_override:
+    _candidates.insert(0, Path(_env_override))
 
+_dotenv_loaded = False
+for _env_path in _candidates:
+    if _env_path.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(str(_env_path), encoding="utf-8")
+            _dotenv_loaded = True
+            break
+        except Exception:
+            pass
 
 class LLMConfig(BaseSettings):
     """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
@@ -33,10 +47,10 @@ class LLMConfig(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     deepseek_planner: str = "deepseek-chat"
     deepseek_researcher: str = "deepseek-chat"
-    deepseek_critic: str = "deepseek-reasoner"
+    deepseek_critic: str = "deepseek-chat"
     deepseek_synthesizer: str = "deepseek-chat"
     deepseek_embedding: str = "BAAI/bge-m3"
-    embedding_dim: int = 1536
+    embedding_dim: int = 1024
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_dim: int = 1024
 
@@ -47,6 +61,7 @@ class LLMConfig(BaseSettings):
                 "researcher": self.deepseek_researcher,
                 "critic": self.deepseek_critic,
                 "synthesizer": self.deepseek_synthesizer,
+                "embedding": self.deepseek_embedding,
             }
             return mapping.get(role, self.deepseek_researcher)
         return getattr(self, f"{role}_model", self.researcher_model)
@@ -61,7 +76,7 @@ class VectorStoreConfig(BaseSettings):
     embedding_dim: int = Field(
         default=1536,
         description="Must match the embedding model dimension. "
-                    "OpenAI text-embedding-3-small = 1536, all-MiniLM-L6-v2 = 384, BGE-M3 = 1024."
+                    "OpenAI text-embedding-3-small = 1536, BGE-M3 = 1024."
     )
     model_config = SettingsConfigDict(env_prefix="VECTOR_", extra="ignore")
 
@@ -99,13 +114,13 @@ class GraphRAGConfig(BaseSettings):
 
 
 class AgentConfig(BaseSettings):
-    max_iterations: int = Field(default=5, ge=1, le=20,
-        description="Researcher Agent ReAct 最大轮次。设为 5 而非 8 可显著提速。")
+    max_iterations: int = Field(default=3, ge=1, le=20,
+        description="Researcher Agent ReAct 最大轮次。设为 3 可显著提速，复杂任务可调高。")
     max_search_steps: int = Field(default=3,
         description="单次研究中 search_knowledge_base 的最大调用次数")
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
     max_refine_rounds: int = Field(default=1,
-        description="Critic 精炼最大轮次。设为 1 而非 2 可减少一轮评估+重写。")
+        description="Critic 精炼最大轮次。设为 1 可减少一轮评估+重写，显著提速。")
     subtask_timeout: int = Field(default=30, ge=10,
         description="单个子任务超时（秒）")
     research_timeout: int = Field(
@@ -125,7 +140,7 @@ class MCPConfig(BaseSettings):
 
 
 class CacheConfig(BaseSettings):
-    redis_url: str = Field(default="redis://localhost:6379")
+    redis_url: str = Field(default="redis://localhost:6377")
     cache_ttl: int = Field(default=3600, ge=60)
     embedding_cache_size: int = Field(default=1000)
     model_config = SettingsConfigDict(env_prefix="CACHE_", extra="ignore")
@@ -163,11 +178,19 @@ class Settings(BaseSettings):
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore",
-    )
+    model_config = SettingsConfigDict(extra="ignore")
 
 
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
+
+
+def reload_settings() -> Settings:
+    """清除缓存的 Settings 并重新加载。
+
+    在运行时通过 ``update_settings_api`` 修改 ``os.environ`` 后必须调用，
+    否则 ``lru_cache`` 仍返回旧实例，配置切换不生效。
+    """
+    get_settings.cache_clear()
+    return get_settings()

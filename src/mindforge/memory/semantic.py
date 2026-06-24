@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import logging
 from dataclasses import dataclass, field
@@ -79,7 +80,8 @@ class SemanticMemory:
 
         Returns the fact_id.
         """
-        fact_id = str(hash(content) % 10**9)
+        import hashlib as _hashlib
+        fact_id = _hashlib.sha256(content.encode()).hexdigest()[:16]
 
         if fact_id in self._facts:
             existing = self._facts[fact_id]
@@ -169,7 +171,8 @@ class SemanticMemory:
 
     async def store(self, task: str, output: str) -> None:
         """Async alias for ``add_fact`` — used by Orchestrator."""
-        self.add_fact(content=output, sources=[f"task: {task[:100]}"], confidence=0.8)
+        async with self._lock:
+            self.add_fact(content=output, sources=[f"task: {task[:100]}"], confidence=0.8)
 
     def search_facts(self, query: str, top_k: int = 5) -> list[Fact]:
         """Simple keyword-based fact retrieval.
@@ -203,38 +206,34 @@ class SemanticMemory:
         self._store_path.mkdir(parents=True, exist_ok=True)
 
     def _save(self) -> None:
-        """Write facts and patterns to disk as JSON."""
+        """Atomically write facts and patterns to disk (tmp + rename).
+
+        Uses unique temp filenames per call to avoid races when two saves
+        overlap (e.g. from concurrent ``add_fact`` / ``add_pattern``).
+        """
+        import uuid as _uuid
         try:
             facts_data = {
                 fid: {
-                    "fact_id": f.fact_id,
-                    "content": f.content,
-                    "sources": f.sources,
-                    "confidence": f.confidence,
-                    "timestamp": f.timestamp,
-                    "category": f.category,
+                    "fact_id": f.fact_id, "content": f.content,
+                    "sources": f.sources, "confidence": f.confidence,
+                    "timestamp": f.timestamp, "category": f.category,
                 }
                 for fid, f in self._facts.items()
             }
-            (self._store_path / "facts.json").write_text(
-                json.dumps(facts_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            tmp_facts = self._store_path / f".facts.json.{_uuid.uuid4().hex[:8]}.tmp"
+            tmp_facts.write_text(json.dumps(facts_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_facts, self._store_path / "facts.json")
 
             patterns_data = [
-                {
-                    "query_type": p.query_type,
-                    "strategy": p.strategy,
-                    "success": p.success,
-                    "quality_score": p.quality_score,
-                    "timestamp": p.timestamp,
-                }
+                {"query_type": p.query_type, "strategy": p.strategy,
+                 "success": p.success, "quality_score": p.quality_score,
+                 "timestamp": p.timestamp}
                 for p in self._patterns
             ]
-            (self._store_path / "patterns.json").write_text(
-                json.dumps(patterns_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            tmp_patterns = self._store_path / f".patterns.json.{_uuid.uuid4().hex[:8]}.tmp"
+            tmp_patterns.write_text(json.dumps(patterns_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_patterns, self._store_path / "patterns.json")
         except Exception:
             logger.exception("Failed to save semantic memory to disk")
 

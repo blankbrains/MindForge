@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import time as _time
 import traceback
 from typing import Any, Optional
 
@@ -175,7 +176,7 @@ class MindForgeMCPServer:
         writer = asyncio.StreamWriter(writer_transport, writer_protocol, None, loop)
 
         # stderr is reserved for logging
-        self._start_time = asyncio.get_event_loop().time()
+        self._start_time = _time.time()
 
         while True:
             try:
@@ -241,7 +242,7 @@ class MindForgeMCPServer:
         """Handle the initialize handshake."""
         self._initialized = True
         if self._start_time == 0:
-            self._start_time = asyncio.get_event_loop().time()
+            self._start_time = _time.time()
 
         return {
             "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -325,9 +326,13 @@ class MindForgeMCPServer:
             return await self._fallback_research(topic, depth, max_sources)
 
         try:
-            report = await self._research_agent.run(
-                topic=topic, depth=depth, max_sources=max_sources
+            # ResearcherAgent.run 签名: run(task, *, context, max_rounds)
+            task_desc = (
+                f"Research topic: {topic}"
+                + (f" (depth: {depth})" if depth else "")
+                + (f" (max sources: {max_sources})" if max_sources else "")
             )
+            report = await self._research_agent.run(task_desc)
             if isinstance(report, str):
                 return report
             return str(report)
@@ -337,55 +342,20 @@ class MindForgeMCPServer:
     async def _fallback_research(
         self, topic: str, depth: str, max_sources: int
     ) -> str:
-        """Research fallback when LLM is unavailable — search knowledge base + web.
-
-        Composes results from the internal knowledge base and (optionally) web
-        search into a structured Markdown report without LLM synthesis.
-        """
-        parts: list[str] = [
-            f"# Research: {topic}\n",
-            "> Generated without LLM — retrieval-only mode.\n",
-            "",
-            "## 📚 Knowledge Base Results\n",
-        ]
-        max_results = max_sources if depth == "deep" else (5 if depth == "standard" else 3)
-
-        # 1. Search internal knowledge base
-        kb_text = ""
-        if self._rag_tool is not None:
-            kb_result = self._rag_tool.safe_execute(query=topic, mode="hybrid", top_k=max_results)
-            if kb_result.success:
-                kb_text = kb_result.output
-            else:
-                kb_text = f"(Knowledge base search unavailable: {kb_result.error})"
-        else:
-            try:
-                self._rag_tool = RAGTool()
-                kb_result = self._rag_tool.safe_execute(query=topic, mode="hybrid", top_k=max_results)
-                kb_text = kb_result.output if kb_result.success else f"(Error: {kb_result.error})"
-            except Exception as exc:
-                kb_text = f"(Knowledge base not available: {exc})"
-        parts.append(kb_text)
-
-        # 2. Web search (best-effort)
-        parts.append("\n## 🌐 Web Search Results\n")
-        if self._web_search_tool is None and WebSearchTool is not None:
-            try:
+        """Minimal research fallback when ResearchAgent is unavailable."""
+        if self._web_search_tool is None:
+            if WebSearchTool is not None:
                 self._web_search_tool = WebSearchTool()
-            except Exception:
-                pass
-
-        if self._web_search_tool is not None:
-            web_result = self._web_search_tool.safe_execute(query=topic, max_results=max_results)
-            if web_result.success:
-                parts.append(web_result.output)
             else:
-                parts.append(f"(Web search unavailable: {web_result.error})")
-        else:
-            parts.append("(Web search not configured.)")
+                return "Neither research agent nor web search is available."
 
-        parts.append(f"\n---\n*Retrieval-only report · {max_results} results per source.*")
-        return "\n\n".join(parts)
+        max_results = max_sources if depth == "deep" else (5 if depth == "standard" else 3)
+        result = self._web_search_tool.safe_execute(
+            query=topic, max_results=max_results
+        )
+        if result.success:
+            return result.output
+        return f"Research fallback failed: {result.error}"
 
     async def _exec_verify_citation(
         self, report_text: str, sources: list[dict[str, Any]], **kwargs: Any

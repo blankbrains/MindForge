@@ -1,13 +1,13 @@
 services:
   qdrant:
-    image: docker.m.daocloud.io/qdrant/qdrant:v1.10.0
+    image: docker.m.daocloud.io/qdrant/qdrant:v1.13.5
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333; echo -e \"GET /readyz HTTP/1.0\r\n\r\n\" >&3; grep -q ready <&3'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -16,7 +16,7 @@ services:
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
     ports:
-      - "6380:6379"
+      - "6377:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -30,9 +30,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: mindforge
-      POSTGRES_PASSWORD: mindforge
-      POSTGRES_DB: mindforge
+      POSTGRES_USER: ${POSTGRES_USER:-mindforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindforge}
+      POSTGRES_DB: ${POSTGRES_DB:-mindforge}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

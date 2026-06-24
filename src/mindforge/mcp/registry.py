@@ -78,7 +78,7 @@ def _make_request(method: str, params: Optional[dict[str, Any]] = None) -> str:
     """Build a JSON-RPC request string."""
     request = {
         "jsonrpc": JSON_RPC_VERSION,
-        "id": str(id(params) if params else 0),
+        "id": _uuid.uuid4().hex[:8],
         "method": method,
         "params": params or {},
     }
@@ -253,9 +253,17 @@ class MCPServerProcess:
             if self._process.stdin:
                 self._process.stdin.write(shutdown_req.encode("utf-8"))
                 await self._process.stdin.drain()
+                # 给子进程 0.5s 处理 shutdown
+                await asyncio.sleep(0.5)
         except Exception:
             pass
 
+        if self._process.returncode is None:
+            try:
+                self._process.terminate()
+                await self._process.wait()
+            except ProcessLookupError:
+                pass
         if self._process.returncode is None:
             try:
                 self._process.kill()
@@ -304,29 +312,31 @@ class MCPRegistry:
 
         servers_raw = raw.get("mcpServers", raw.get("servers", {}))
         for name, cfg in servers_raw.items():
-            # 兼容 enabled 和 disabled 两种配置格式
-            enabled = cfg.get("enabled", not cfg.get("disabled", False))
             server_config = MCPServerConfig(
                 name=name,
                 command=cfg.get("command", ""),
                 args=cfg.get("args", []),
                 env=cfg.get("env", {}),
                 transport=cfg.get("transport", "stdio"),
-                enabled=enabled,
+                enabled=cfg.get("enabled", True),
             )
             if server_config.enabled:
                 self._servers[name] = MCPServerProcess(server_config)
 
     # ---- Lifecycle ------------------------------------------------------------
 
-    async def start_all(self) -> None:
-        """Start all enabled MCP server subprocesses."""
-        for server in self._servers.values():
+    async def start_all(self, timeout: float = 30.0) -> None:
+        """Start all enabled MCP server subprocesses in parallel with timeout."""
+        async def _start_one(server):
             try:
-                await server.start()
-            except Exception as exc:
+                await asyncio.wait_for(server.start(), timeout=timeout)
+            except (Exception, asyncio.TimeoutError) as exc:
                 print(f"Warning: Failed to start MCP server '{server.config.name}': {exc}",
                       file=sys.stderr)
+
+        tasks = [_start_one(s) for s in self._servers.values()]
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def stop_all(self) -> None:
         """Stop all MCP server subprocesses."""

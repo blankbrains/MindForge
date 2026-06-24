@@ -29,7 +29,7 @@ class RetrievalConfig:
     use_multi_query: bool = False
     vector_weight: float = 0.5
     bm25_weight: float = 0.5
-    raptor_levels: int = 0
+    raptor_levels: int = 0  # reserved for future RAPTOR-level-aware retrieval filtering
     use_graph: bool = False
     reasoning: str = ""
 
@@ -244,8 +244,10 @@ class AdaptiveRetriever:
             result = await self.llm_fn(prompt)
             result_clean = result.strip().lower()
 
+            import re as _re
+            tokens = set(_re.findall(r'[a-z]+', result_clean))
             for mode in QueryMode:
-                if mode.value in result_clean:
+                if mode.value in tokens:
                     return mode
 
             logger.warning(

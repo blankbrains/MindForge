@@ -13,23 +13,24 @@ from mindforge.config import get_settings
 # ResearcherAgent
 # ---------------------------------------------------------------------------
 
-_RESEARCHER_SYSTEM_PROMPT = """You are an expert research assistant. You have access to several tools that let you gather information and verify facts.
+_RESEARCHER_SYSTEM_PROMPT = """你是一名专业的研究助理。你可以使用多种工具来收集信息和验证事实。
 
-Available tools:
-- **search_knowledge_base** — Query the internal knowledge base for relevant documents and context.
-- **web_search** — Search the web for current, up-to-date information.
-- **code_executor** — Execute Python code in a sandbox for calculations, data analysis, or prototyping.
-- **verify_citation** — Verify that citation markers [N] in a report match their source definitions.
-- **mcp_tool** — Access external MCP (Model Context Protocol) tools for database queries, API calls, etc.
+可用工具：
+- **search_knowledge_base** — 查询内部知识库中的相关文档。
+- **web_search** — 搜索网络获取最新信息。
+- **code_executor** — 在沙箱中执行 Python 代码，用于计算、数据分析或原型设计。
+- **verify_citation** — 验证报告中的引用标记 [N] 是否与来源匹配。
+- **mcp_tool** — 访问外部 MCP（模型上下文协议）工具。
 
-Guidelines:
-1. Start by searching the knowledge base first if the topic might be covered internally.
-2. Use web search for recent or external information.
-3. When you find relevant information, cite your sources with [N] markers.
-4. Use code_executor for data processing, statistics, or running algorithms.
-5. Think step by step. Explain your reasoning before using a tool.
-6. When you have enough information, provide a comprehensive answer with proper citations.
-7. If you hit dead ends, try alternative search queries or approaches."""
+核心原则：
+1. **先直接回答**：如果你的知识储备足够回答该问题，直接在 1 轮内给出全面、详细的答案，**不要调用任何工具**。
+2. 只有在确实需要外部数据、实时信息或知识库检索时才使用工具。
+3. 如果知识库 1-2 次搜索无结果，立即停止搜索，直接用你自己的知识回答。
+4. 每次回答要**详尽、深入、结构化**——给出一次性的完整答案，包含具体细节、例证、数据。不要简短敷衍，要写到用户满意为止。复杂问题的回答应达到 800-2000 字。
+5. **输出语言必须是中文**（专业术语可保留英文）。
+6. 引用来源时使用 [N] 标记。
+
+记住：你是一个能力强大的模型，拥有广博的知识。优先用你的知识回答，工具只是辅助手段。"""
 
 
 class ResearcherAgent(BaseAgent):
@@ -72,21 +73,16 @@ class ResearcherAgent(BaseAgent):
         """
         settings = get_settings()
         researcher_model = settings.llm.get_model("researcher")
-        _old_llm = getattr(self, "_llm", None)
-        if _old_llm is not None:
-            from mindforge.models.base import LLMFactory
-            self._llm = LLMFactory.create(
-                settings.llm.llm_provider, researcher_model
-            )
-        try:
-            return await self._run_tool_loop(
-                task,
-                context=context,
-                max_rounds=max_rounds,
-            )
-        finally:
-            if _old_llm is not None:
-                self._llm = _old_llm
+        from mindforge.models.base import LLMFactory
+        _llm_override = LLMFactory.create(
+            settings.llm.llm_provider, researcher_model
+        )
+        return await self._run_tool_loop(
+            task,
+            context=context,
+            max_rounds=max_rounds,
+            _llm_override=_llm_override,
+        )
 
     # ------------------------------------------------------------------
     async def stream_run(
@@ -117,14 +113,12 @@ class ResearcherAgent(BaseAgent):
         max_rounds = max_rounds or settings.agent.max_iterations
         start_time = time.perf_counter()
 
-        # Resolve model (save and restore to avoid mutating shared instance)
+        # Resolve model override (no self._llm mutation → generator-safe)
         researcher_model = settings.llm.get_model("researcher")
-        _old_s_llm = getattr(self, "_llm", None)
-        if _old_s_llm is not None:
-            from mindforge.models.base import LLMFactory
-            self._llm = LLMFactory.create(
-                settings.llm.llm_provider, researcher_model
-            )
+        from mindforge.models.base import LLMFactory
+        _llm_override = LLMFactory.create(
+            settings.llm.llm_provider, researcher_model
+        )
 
         conv: list[ChatMessage] = [
             ChatMessage(role="system", content=self.system_prompt),
@@ -142,6 +136,7 @@ class ResearcherAgent(BaseAgent):
             result = await self._chat(
                 conv,
                 tools=tool_schemas if use_tools else None,
+                _llm_override=_llm_override,
             )
 
             if result.usage:
@@ -171,9 +166,6 @@ class ResearcherAgent(BaseAgent):
                     latency_ms=elapsed_ms,
                     cost_usd=cost,
                 )
-                # Restore original LLM before returning
-                if _old_s_llm is not None:
-                    self._llm = _old_s_llm
                 yield {"type": "final_answer", "content": final_content, "result": agent_result}
                 return
 
@@ -251,7 +243,3 @@ class ResearcherAgent(BaseAgent):
             cost_usd=cost,
         )
         yield {"type": "final_answer", "content": final_content, "result": agent_result}
-
-        # Restore original LLM after stream ends
-        if _old_s_llm is not None:
-            self._llm = _old_s_llm

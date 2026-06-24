@@ -67,16 +67,38 @@ class RAGTool(BaseTool):
         self._retriever_kwargs = retriever_kwargs or {}
 
     def _get_retriever(self) -> Any:
-        """Lazy-init AdaptiveRetriever if none was provided."""
+        """Lazy-init AdaptiveRetriever with full dependency wiring."""
         if self._retriever is not None:
             return self._retriever
-        if AdaptiveRetriever is not None:
-            self._retriever = AdaptiveRetriever(**self._retriever_kwargs)
-            return self._retriever
-        raise RuntimeError(
-            "AdaptiveRetriever is not available. "
-            "Install mindforge with retrieval extras or provide a retriever instance."
+        if AdaptiveRetriever is None:
+            raise RuntimeError(
+                "AdaptiveRetriever is not available. "
+                "Install mindforge with retrieval extras or provide a retriever instance."
+            )
+
+        from mindforge.retrieval.vector_store import get_vector_store
+        from mindforge.retrieval.hybrid import HybridRetriever
+        from mindforge.ingestion.embedder import get_embedder
+
+        store = get_vector_store()
+        store.ensure_collection()
+        embedder = get_embedder()
+
+        async def _async_embed(text: str):
+            return embedder.embed_single(text)
+
+        hybrid = HybridRetriever(
+            vector_store=store,
+            bm25_retriever=None,
+            embedding_fn=_async_embed,
         )
+        # Skip reranker to avoid HuggingFace download in offline environments
+        self._retriever = AdaptiveRetriever(
+            hybrid_retriever=hybrid,
+            reranker=None,
+            **self._retriever_kwargs,
+        )
+        return self._retriever
 
     def execute(self, query: str, mode: str = "hybrid", top_k: int = 5, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
         """Synchronous wrapper — uses thread pool when event loop is running."""
@@ -107,68 +129,94 @@ class RAGTool(BaseTool):
         start = time.perf_counter()
 
         if not query or not query.strip():
-            return ToolResult(
-                success=False,
-                error="Query must be a non-empty string.",
-            )
+            return ToolResult(success=False, error="请输入搜索内容。")
 
         retriever = self._get_retriever()
 
-        # Convert string mode to QueryMode enum with distinct strategy mappings
         mode_map = {
-            "semantic": QueryMode.CONCEPTUAL,  # vector-heavy
-            "hybrid": QueryMode.FACTUAL,       # balanced
-            "keyword": QueryMode.PROCEDURAL,   # keyword-heavy
+            "semantic": QueryMode.CONCEPTUAL,
+            "hybrid": QueryMode.FACTUAL,
+            "keyword": QueryMode.PROCEDURAL,
         }
         qmode = mode_map.get(mode, QueryMode.FACTUAL)
 
         try:
-            result_dict = await retriever.retrieve(
-                query=query,
-                mode=qmode,
-                top_k=top_k,
-            )
+            result_dict = await retriever.retrieve(query=query, mode=qmode, top_k=top_k)
         except Exception as exc:
-            elapsed = (time.perf_counter() - start) * 1000
             return ToolResult(
                 success=False,
-                error=f"Retrieval failed: {exc}",
-                execution_time_ms=elapsed,
+                error=f"检索失败: {exc}",
+                execution_time_ms=(time.perf_counter() - start) * 1000,
             )
 
         elapsed = (time.perf_counter() - start) * 1000
         results = result_dict.get("results", []) if isinstance(result_dict, dict) else result_dict
 
-        if not results:
+        # ── Score filtering ──
+        # Real embeddings (BGE-M3): relevant > 0.3, noise < 0.1
+        # Hash fallback: all scores ~0.01, use minimal threshold
+        if threshold > 0:
+            min_score = threshold
+        else:
+            try:
+                from mindforge.ingestion.embedder import get_embedder
+                if get_embedder().provider == "fallback":
+                    min_score = 0.005   # hash: accept everything
+                else:
+                    min_score = 0.15    # real embeddings: filter noise
+            except Exception:
+                min_score = 0.01
+        qualified = []
+        for r in results:
+            s = 0.0
+            if hasattr(r, "score"):
+                s = r.score
+            elif isinstance(r, dict):
+                s = r.get("score", 0.0)
+            if s >= min_score:
+                qualified.append(r)
+
+        # Quality: average of all result scores, scaled to 0-10.
+        # RRF fusion blends rank signal (0.6) with raw cosine similarity (0.4),
+        # so relevant results score ~0.3-0.6 and noise scores ~0.01.
+        total_score = sum(
+            r.get("score", 0.0) if isinstance(r, dict) else getattr(r, "score", 0.0)
+            for r in qualified
+        )
+        avg = total_score / max(len(qualified), 1)
+        # Scale: 0.5 avg → 8.0, 0.3 → 5.0, 0.1 → 2.0
+        quality = round(min(avg * 16, 10.0), 1)
+
+        if not qualified:
             return ToolResult(
                 success=True,
-                output=f"No results found for query: {query}",
-                data={"results": [], "total": 0, "mode": mode},
+                output=(
+                    f"关于「{query}」，当前知识库中暂无高度相关的资料。\n\n"
+                    "建议尝试更换关键词，或上传更多相关文档到知识库。"
+                ),
+                data={"results": [], "total": 0, "quality": 0.0, "filtered_out": len(results)},
                 execution_time_ms=elapsed,
             )
 
-        formatted = self._format_results(results, query, mode)
+        formatted = self._format_results(qualified, query)
         return ToolResult(
             success=True,
             output=formatted,
-            data={
-                "results": results,
-                "total": len(results),
-                "mode": mode,
-                "query": query,
-            },
+            data={"results": qualified, "total": len(qualified), "quality": quality},
             execution_time_ms=elapsed,
         )
 
-    def _format_results(self, results: list[Any], query: str, mode: str) -> str:
-        """Format retrieved documents into a readable string."""
-        lines: list[str] = [
-            f"Knowledge Base Results (mode={mode}, query={query!r})",
-            f"Found {len(results)} result(s)",
-            "-" * 72,
-        ]
+    def _format_results(self, results: list[Any], query: str) -> str:
+        """Format results as clean Markdown ready for ReactMarkdown rendering.
 
-        for i, doc in enumerate(results, 1):
+        Preserves headers, bold, lists. Removes garbage artifacts.
+        Adds proper spacing between sections for readability.
+        """
+        import re as _re
+
+        lines: list[str] = [f"## {query}\n"]
+
+        for doc in results:
             if hasattr(doc, "page_content"):
                 content = doc.page_content
             elif isinstance(doc, dict):
@@ -176,29 +224,31 @@ class RAGTool(BaseTool):
             else:
                 content = str(doc)
 
-            score = ""
-            if hasattr(doc, "score"):
-                score = f" [score={doc.score:.3f}]"
-            elif isinstance(doc, dict) and "score" in doc:
-                score = f" [score={doc['score']:.3f}]"
+            text = str(content).strip()
 
-            source = ""
-            if hasattr(doc, "metadata") and doc.metadata:
-                source = doc.metadata.get("source", doc.metadata.get("title", ""))
-            elif isinstance(doc, dict):
-                meta = doc.get("metadata", {}) or {}
-                source = meta.get("source", meta.get("title", ""))
+            # 清理不必要的空白/噪声，保留正常文档内容
+            # 注意：不再删除 `|` 字符（避免破坏 Markdown 表格）
+            # 注意：不再删除 `class Foo:` 类声明（避免破坏代码/文档内容）
+            text = _re.sub(r'_{3,}', '', text)
+            # Collapse whitespace but keep paragraph structure
+            text = _re.sub(r'\n{4,}', '\n\n\n', text)
+            text = text.strip()
 
-            header = f"\n--- Result {i}{score} ---"
-            if source:
-                header += f"  (source: {source})"
+            # Truncate at 20000 chars, but prefer sentence boundaries
+            if len(text) > 20000:
+                truncated = text[:20000]
+                last_period = max(truncated.rfind('。'), truncated.rfind('. '), truncated.rfind('\n\n'))
+                if last_period > 10000:
+                    text = truncated[:last_period+1] + "\n\n…"
+                else:
+                    text = truncated + "\n\n…"
 
-            # Truncate very long documents for display
-            content_str = content if isinstance(content, str) else str(content)
-            if len(content_str) > 2000:
-                content_str = content_str[:2000] + "\n... [truncated]"
+            if text:
+                lines.append(text)
+                lines.append("")
 
-            lines.append(header)
-            lines.append(content_str)
+        if len(lines) <= 2:
+            return f"## {query}\n\n当前知识库中暂无高度相关的资料。\n\n建议更换关键词或上传更多文档到知识库。"
 
-        return "\n".join(lines)
+        # Join with double newlines for clear paragraph separation
+        return "\n\n".join(lines)

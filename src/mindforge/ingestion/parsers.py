@@ -1,12 +1,27 @@
 """多格式文档解析器 — 支持 PDF/DOCX/HTML/MD/TXT"""
 from __future__ import annotations
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List
 from dataclasses import dataclass, field
 import hashlib
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _read_text_with_fallback(path: Path) -> str:
+    """读取文本文件，依次尝试 utf-8 / gbk / latin-1 编码。"""
+    encodings = ["utf-8", "gbk", "latin-1"]
+    for enc in encodings:
+        try:
+            return path.read_text(encoding=enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    # 最后兜底
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 @dataclass
@@ -29,8 +44,11 @@ class DocumentParser:
             raise ValueError(f"不支持的文件格式: {suffix}，支持: {self.SUPPORTED_EXTENSIONS}")
         parser = self._get_parser(suffix)
         content, sections, metadata = parser(path)
-        doc_id = hashlib.md5(f"{path.name}:{path.stat().st_size}".encode()).hexdigest()[:12]
-        metadata.update({"source": path.name, "file_type": suffix, "size_bytes": path.stat().st_size})
+        st = path.stat()
+        doc_id = hashlib.md5(
+            f"{path.name}:{st.st_size}:{st.st_mtime_ns}:{content[:256]}".encode()
+        ).hexdigest()[:12]
+        metadata.update({"source": path.name, "file_type": suffix, "size_bytes": st.st_size})
         logger.info(f"已解析: {path.name} ({len(content)} 字符)")
         return ParsedDocument(doc_id=doc_id, filename=path.name, content=content, sections=sections, metadata=metadata)
 
@@ -41,12 +59,41 @@ class DocumentParser:
 
     def _parse_pdf(self, path: Path):
         import pdfplumber
+        import warnings
+        # pdfminer 对某些嵌入字体会输出 FontBBox 警告，不影响内容提取
+        warnings.filterwarnings("ignore", message=".*FontBBox.*")
+        warnings.filterwarnings("ignore", message=".*font descriptor.*")
         content_parts, sections = [], []
+
         with pdfplumber.open(str(path)) as pdf:
-            for i, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
-                content_parts.append(text)
-                sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+            total = len(pdf.pages)
+            if total <= 10:
+                # 小 PDF 直接串行
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text() or ""
+                    content_parts.append(text)
+                    sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+            else:
+                # 大 PDF 并行解析 — 线程数取 min(8, CPU 核数)
+                workers = min(8, os.cpu_count() or 4)
+                logger.info("PDF 并行解析: %d 页, %d 线程", total, workers)
+
+                def _extract_page(i: int) -> tuple[int, str]:
+                    try:
+                        return i, pdf.pages[i].extract_text() or ""
+                    except Exception:
+                        return i, ""
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    results = list(pool.map(_extract_page, range(total)))
+
+                # Sort by page index to preserve order
+                results.sort(key=lambda x: x[0])
+                for i, text in results:
+                    content_parts.append(text)
+                    sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+                logger.info("PDF 解析完成: %d 页, %d 字符", total, sum(len(t) for _, t in results))
+
         return "\n".join(content_parts), sections, {"pages": len(content_parts)}
 
     def _parse_docx(self, path: Path):
@@ -58,34 +105,40 @@ class DocumentParser:
                 content_parts.append(para.text)
                 if para.style.name.startswith("Heading"):
                     try:
-                        # Extract heading level number: "Heading 1" → 1, "Heading 2" → 2
                         level_str = para.style.name[len("Heading"):].strip()
                         level = int(level_str.split()[0]) if level_str else 1
                     except (ValueError, IndexError):
-                        level = 1  # default for non-standard heading styles
+                        level = 1
                     sections.append({"title": para.text, "content": para.text, "level": level})
+        # 提取表格内容
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_text:
+                    content_parts.append(row_text)
         return "\n".join(content_parts), sections, {}
 
     def _parse_html(self, path: Path):
         from bs4 import BeautifulSoup
-        with open(path, "r", encoding="utf-8") as f:
-            soup = BeautifulSoup(f.read(), "html.parser")
+        raw = _read_text_with_fallback(path)
+        soup = BeautifulSoup(raw, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
         return text, [], {"title": soup.title.string if soup.title else ""}
 
     def _parse_markdown(self, path: Path):
-        content = path.read_text(encoding="utf-8")
+        content = _read_text_with_fallback(path)
         sections = []
         for line in content.split("\n"):
-            if line.startswith("#"):
-                level = len(line.split(" ")[0])
-                sections.append({"title": line.lstrip("# "), "content": "", "level": level})
+            m = re.match(r'^(#{1,6})\s', line)
+            if m:
+                level = len(m.group(1))
+                sections.append({"title": line.lstrip("#").strip(), "content": "", "level": level})
         return content, sections, {}
 
     def _parse_text(self, path: Path):
-        return path.read_text(encoding="utf-8"), [], {}
+        return _read_text_with_fallback(path), [], {}
 
 
 class DirectoryParser:

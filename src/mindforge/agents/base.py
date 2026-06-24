@@ -92,7 +92,7 @@ class BaseAgent(ABC):
         *,
         provider: Optional[str] = None,
         model: Optional[str] = None,
-        temperature: float = 0.7,
+        temperature: float = 0.9,
     ) -> None:
         settings = get_settings()
 
@@ -131,14 +131,16 @@ class BaseAgent(ABC):
         tools: Optional[list[dict]] = None,
         response_format: Optional[dict] = None,
         temperature: Optional[float] = None,
+        _llm_override: Any = None,
     ) -> ChatResult:
         """Call the LLM with 3-attempt retry and exponential backoff."""
         temp = temperature if temperature is not None else self._temperature
+        llm = _llm_override if _llm_override is not None else self._llm
         last_exc: Optional[Exception] = None
 
         for attempt in range(3):
             try:
-                return await self._llm.chat(
+                return await llm.chat(
                     messages=messages,
                     tools=tools,
                     response_format=response_format,
@@ -146,6 +148,10 @@ class BaseAgent(ABC):
                 )
             except Exception as exc:
                 last_exc = exc
+                # 401/400/403 等客户端错误不重试；仅 429/5xx/超时等可恢复错误重试
+                status = getattr(exc, "status_code", None)
+                if status is not None and 400 <= status < 500:
+                    raise
                 if attempt < 2:
                     wait = 2.0 ** attempt * 1.0
                     await asyncio.sleep(wait)
@@ -219,6 +225,7 @@ class BaseAgent(ABC):
             "output": output,
             "success": result.success,
             "error": result.error,
+            "data": result.data if result.data else None,
         }
 
     # -- Tool-calling loop --------------------------------------------------
@@ -230,6 +237,7 @@ class BaseAgent(ABC):
         context: Optional[str] = None,
         max_rounds: Optional[int] = None,
         messages: Optional[list[ChatMessage]] = None,
+        _llm_override: Any = None,
     ) -> AgentResult:
         """Run the LLM tool-calling loop (ReAct / function calling).
 
@@ -249,6 +257,8 @@ class BaseAgent(ABC):
         AgentResult with the final assistant output and aggregated metadata.
         """
         max_rounds = max_rounds or self._settings.agent.max_iterations
+        if max_rounds < 1:
+            max_rounds = 1  # 防御非正配置
         start_time = time.perf_counter()
 
         # --- Build message list ---
@@ -271,11 +281,13 @@ class BaseAgent(ABC):
         aggregated_usage: dict[str, int] = {}
         final_content = ""
         tool_calls_made = 0
+        collected_sources: list[dict[str, Any]] = []  # aggregate source metadata from tool calls
 
         for round_idx in range(max_rounds):
             result = await self._chat(
                 conv,
                 tools=tool_schemas if use_tools else None,
+                _llm_override=_llm_override,
             )
 
             # Accumulate token usage
@@ -309,14 +321,15 @@ class BaseAgent(ABC):
                 return_exceptions=True,
             )
 
-            # 3. Feed tool results back
-            for exec_result in tool_results:
+            # 3. Feed tool results back (pair with original tool_call for id)
+            for tc, exec_result in zip(result.tool_calls, tool_results):
+                tc_id = tc.get("id", "")
                 if isinstance(exec_result, BaseException):
                     conv.append(
                         ChatMessage(
                             role="tool",
                             content=f"Tool execution error: {exec_result}",
-                            tool_call_id="",
+                            tool_call_id=tc_id,
                         )
                     )
                 else:
@@ -327,17 +340,44 @@ class BaseAgent(ABC):
                             tool_call_id=exec_result["tool_call_id"],
                         )
                     )
+                    # Collect source metadata from tool results (e.g. RAGTool returns sources in data)
+                    tool_data = exec_result.get("data") if isinstance(exec_result, dict) else None
+                    if isinstance(tool_data, dict) and "sources" in tool_data:
+                        for src in tool_data["sources"]:
+                            if isinstance(src, dict):
+                                collected_sources.append(src)
 
         # --- Determine final output ---
-        # If we exited because of max rounds, grab the last assistant content
+        # If we exited because of max rounds, force one final non-tool call
+        # so the LLM can produce a closing answer from accumulated tool results.
+        if not final_content and use_tools and tool_calls_made > 0:
+            try:
+                final_result = await self._chat(
+                    conv,
+                    tools=None,  # no tools allowed – force text answer
+                    _llm_override=_llm_override,
+                )
+                final_content = final_result.content or ""
+                if final_content:
+                    conv.append(
+                        ChatMessage(role="assistant", content=final_content)
+                    )
+                if final_result.usage:
+                    for k, v in final_result.usage.items():
+                        aggregated_usage[k] = aggregated_usage.get(k, 0) + (v or 0)
+            except Exception:
+                pass  # best-effort; fall through to backward scan
+
+        # Fallback: scan backwards for the last assistant message with content
         if not final_content:
             for msg in reversed(conv):
-                if msg.role == "assistant":
-                    final_content = msg.content or ""
+                if msg.role == "assistant" and msg.content:
+                    final_content = msg.content
                     break
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        cost = _estimate_cost(self._model_name, aggregated_usage)
+        model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
+        cost = _estimate_cost(model_used, aggregated_usage)
 
         return AgentResult(
             agent_name=self.name,
@@ -347,6 +387,7 @@ class BaseAgent(ABC):
                 "rounds": min(round_idx + 1, max_rounds),
                 "tool_calls": tool_calls_made,
                 "messages": len(conv),
+                "sources": collected_sources,
             },
             metadata={
                 "model": self._model_name,

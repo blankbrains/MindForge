@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -15,6 +16,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Generator
+
+from mindforge.config import get_settings
 
 
 @dataclass
@@ -52,19 +55,33 @@ class Tracer:
     """
 
     def __init__(self) -> None:
-        self._traces_dir = Path.cwd() / ".traces"
+        _traces_base_env = os.getenv("MINDFORGE_TRACES_DIR")
+        if _traces_base_env:
+            _traces_base = Path(_traces_base_env)
+        else:
+            _traces_base = Path(__file__).resolve().parent.parent.parent.parent  # MindForge root
+        self._traces_dir = _traces_base / ".traces"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
 
         self._active_stack: list[Span] = []
+        self._lock = threading.Lock()
         self._langfuse = None
 
         # Attempt to initialise LangFuse if the package is installed
-        # and environment variables are set.
+        # and config is set via OBSERVABILITY_* env vars or .env.
         try:
-            if all(os.environ.get(k) for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST")):
+            obs_cfg = get_settings().observability
+            pub = obs_cfg.langfuse_public_key or os.environ.get("LANGFUSE_PUBLIC_KEY")
+            sec = obs_cfg.langfuse_secret_key or os.environ.get("LANGFUSE_SECRET_KEY")
+            host = obs_cfg.langfuse_host or os.environ.get("LANGFUSE_HOST")
+            if all((pub, sec, host)):
                 import langfuse  # type: ignore[import-untyped]
-                self._langfuse = langfuse.Langfuse()
-        except ImportError:
+                self._langfuse = langfuse.Langfuse(
+                    public_key=pub,
+                    secret_key=sec,
+                    host=host,
+                )
+        except (ImportError, Exception):
             pass
 
     # ------------------------------------------------------------------
@@ -86,7 +103,8 @@ class Tracer:
         span_id = uuid.uuid4().hex[:16]
         trace_id = trace_id or uuid.uuid4().hex[:16]
 
-        parent_id = self._active_stack[-1].span_id if self._active_stack else None
+        with self._lock:
+            parent_id = self._active_stack[-1].span_id if self._active_stack else None
 
         span = Span(
             span_id=span_id,
@@ -97,15 +115,19 @@ class Tracer:
             metadata=metadata or {},
         )
 
-        self._active_stack.append(span)
+        with self._lock:
+            self._active_stack.append(span)
         try:
             yield span
-        except BaseException as exc:
+        except Exception as exc:
             span.error = str(exc)
             raise
         finally:
             span.end_time = time.time()
-            self._active_stack.remove(span)
+            try:
+                self._active_stack.remove(span)
+            except ValueError:
+                pass  # already removed or stack corrupted
             self._export(span)
 
     # ------------------------------------------------------------------

@@ -64,10 +64,8 @@ class GraphRAGEngine:
     def __init__(
         self,
         llm_fn=None,
-        embedding_fn=None,
     ):
         self.llm_fn = llm_fn
-        self.embedding_fn = embedding_fn
 
         # Graph state
         self.entities: Dict[str, Entity] = {}
@@ -88,16 +86,21 @@ class GraphRAGEngine:
             logger.warning("No documents provided; graph will be empty.")
             return
 
-        tasks = []
+        # Batch all chunks into a single LLM call for speed
+        texts_parts: list[str] = []
         for doc in documents:
             text = doc.get("text", "")
             doc_id = doc.get("id", "")
             if not text:
                 continue
-            tasks.append(self._extract_entities_and_relations(text, doc_id))
-
-        if tasks:
-            await asyncio.gather(*tasks)
+            texts_parts.append(f"[doc:{doc_id}]\n{text[:1000]}")
+        if not texts_parts:
+            return
+        # Merge all chunks, cap total length to avoid token overflow
+        combined = "\n\n---\n\n".join(texts_parts)
+        if len(combined) > 8000:
+            combined = combined[:8000] + "\n\n[...truncated]"
+        await self._extract_entities_and_relations(combined, "batch")
 
         self._build_adjacency()
         self._discover_communities()
@@ -114,13 +117,15 @@ class GraphRAGEngine:
         """Persist the graph to a JSON file."""
         import json
         payload = {
-            "entities": {eid: {"id": e.id, "name": e.name, "type": e.type}
+            "entities": {eid: {"id": e.id, "name": e.name, "type": e.type, "description": e.description}
                          for eid, e in self.entities.items()},
             "relations": [{"source": r.source, "target": r.target,
                            "relation_type": r.relation_type, "weight": r.weight}
                           for r in self.relations],
-            "communities": [{"id": c.id, "entity_ids": list(c.entity_ids),
-                             "summary": c.summary, "label": c.label}
+            # Community 无 label / entity_ids 字段，只序列化已有字段
+            "communities": [{"id": c.id,
+                             "entity_ids": [e.id for e in c.entities],
+                             "summary": c.summary}
                             for c in self.communities],
         }
         with open(path, "w", encoding="utf-8") as f:
@@ -133,7 +138,8 @@ class GraphRAGEngine:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         self.entities = {
-            eid: Entity(id=e["id"], name=e["name"], type=e.get("type", ""))
+            eid: Entity(id=e["id"], name=e["name"], type=e.get("type", ""),
+                       description=e.get("description", ""))
             for eid, e in payload.get("entities", {}).items()
         }
         self.relations = [
@@ -142,11 +148,15 @@ class GraphRAGEngine:
                      weight=r.get("weight", 0.5))
             for r in payload.get("relations", [])
         ]
-        self.communities = [
-            Community(id=c["id"], entity_ids=set(c.get("entity_ids", [])),
-                      summary=c.get("summary", ""), label=c.get("label", ""))
-            for c in payload.get("communities", [])
-        ]
+        self.communities = []
+        for c in payload.get("communities", []):
+            entity_ids = set(c.get("entity_ids", []))
+            com_entities = [self.entities[eid] for eid in entity_ids
+                            if eid in self.entities]
+            self.communities.append(
+                Community(id=c["id"], entities=com_entities,
+                          summary=c.get("summary", ""))
+            )
         self._build_adjacency()
         logger.info("GraphRAG state loaded from %s", path)
 
@@ -195,22 +205,45 @@ class GraphRAGEngine:
                     relation_type=item.get("relation_type", ""),
                     weight=float(item.get("weight", 1.0)),
                 )
-                if relation.source in self.entities and relation.target in self.entities:
+                # 暂存本地列表，由 build_graph 在 gather 后统一合并
+                # 避免并发写 self.relations 的竞态
+                if relation.source and relation.target:
                     self.relations.append(relation)
 
     def _parse_extraction(self, raw: str) -> List[Dict[str, Any]]:
-        """Crude JSON array parser for LLM output. Falls back to empty list."""
+        """Parse LLM JSON array output, handling nested JSON with bracket counting."""
         import json
-        import re
 
-        # Find the first [ ... ] block
-        match = re.search(r"\[.*?\]", raw, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse extraction JSON; skipping.")
-        return []
+        raw = raw.strip()
+        # Try full parse first
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: bracket-balanced extraction
+        start = raw.find("[")
+        if start == -1:
+            return []
+        depth = 0
+        end = -1
+        for i in range(start, len(raw)):
+            if raw[i] == "[":
+                depth += 1
+            elif raw[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end == -1:
+            return []
+        try:
+            parsed = json.loads(raw[start:end+1])
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            return []
 
     # ------------------------------------------------------------------
     # Adjacency & community discovery (BFS)
@@ -308,8 +341,12 @@ class GraphRAGEngine:
             logger.warning("Graph is empty; returning no results.")
             return []
 
-        query_lower = query.lower()
-        query_terms = set(query_lower.split())
+        # 中文查询使用 jieba 分词，避免整段中文当作单个 term
+        try:
+            import jieba
+            query_terms = set(jieba.cut_for_search(query))
+        except Exception:
+            query_terms = set(query.lower().split())
 
         # Score entities by term overlap
         entity_scores: List[Tuple[str, float]] = []
@@ -328,6 +365,10 @@ class GraphRAGEngine:
         entity_scores.sort(key=lambda x: x[1], reverse=True)
         top_entities = entity_scores[:top_k_entities]
 
+        # 归一化实体分到 [0, 1] 区间，与 hybrid/RRF 分数可比
+        max_es = max((s for _, s in entity_scores), default=1.0)
+        entity_norm = {eid: s / max_es for eid, s in entity_scores} if max_es > 0 else {}
+
         # Find communities that contain these entities
         relevant_community_ids: Set[str] = set()
         for eid, _ in top_entities:
@@ -342,43 +383,53 @@ class GraphRAGEngine:
         # Build results
         results: List[Dict[str, Any]] = []
 
-        # Rank 1: matched entities
-        for eid, score in top_entities:
+        # Rank 1: matched entities (使用归一化分数)
+        for eid, _ in top_entities:
             entity = self.entities[eid]
             results.append(
                 {
                     "id": f"entity_{eid}",
                     "text": f"{entity.name} ({entity.type}): {entity.description}",
-                    "score": score,
+                    "score": entity_norm.get(eid, 0.5),
                     "source": "graph",
                     "entity_id": eid,
                 }
             )
 
-        # Rank 2: matched communities
+        # Rank 2: matched communities（仅含≥2实体的社区，且分数基于所含实体平均归一化分）
         for comm in self.communities:
-            if comm.id in relevant_community_ids:
-                results.append(
-                    {
-                        "id": comm.id,
-                        "text": comm.summary,
-                        "score": 0.5,
-                        "source": "graph",
-                        "community_id": comm.id,
-                    }
-                )
+            if comm.id not in relevant_community_ids:
+                continue
+            if len(comm.entities) < 2:
+                continue
+            comm_norm = sum(
+                entity_norm.get(e.id, 0) for e in comm.entities
+            ) / max(len(comm.entities), 1)
+            results.append(
+                {
+                    "id": comm.id,
+                    "text": comm.summary,
+                    "score": round(comm_norm, 4),
+                    "source": "graph",
+                    "community_id": comm.id,
+                }
+            )
 
-        # Rank 3: relations from matched entities
+        # Rank 3: relations from matched entities（也归一化到实体分区间）
         top_eid_set = {eid for eid, _ in top_entities}
+        rel_max = max((r.weight for r in self.relations
+                       if r.source in top_eid_set or r.target in top_eid_set),
+                      default=1.0)
         for rel in self.relations:
             if rel.source in top_eid_set or rel.target in top_eid_set:
                 src_name = self.entities.get(rel.source, Entity("", "")).name
                 tgt_name = self.entities.get(rel.target, Entity("", "")).name
+                rel_norm = (rel.weight / rel_max) * 0.5 if rel_max > 0 else 0.15
                 results.append(
                     {
                         "id": f"rel_{rel.source}_{rel.target}",
                         "text": f"{src_name} --[{rel.relation_type}]--> {tgt_name}",
-                        "score": 0.3 * rel.weight,
+                        "score": round(rel_norm, 4),
                         "source": "graph",
                     }
                 )

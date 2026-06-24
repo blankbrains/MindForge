@@ -119,9 +119,10 @@ class EpisodicMemory:
         query_words = set(query.lower().split())
 
         def _score(ep: Episode) -> float:
+            # Only match on task similarity, NOT result content
+            # (matching on result causes false hits for any common word)
             task_words = set(ep.task.lower().split())
-            result_words = set(ep.result.lower().split())
-            overlap = len(query_words & task_words) + len(query_words & result_words)
+            overlap = len(query_words & task_words)
             # Bonus for exact task-type match
             ep_type = self._classify_task(query)
             bonus = 1.0 if ep.task_type == ep_type else 0.0
@@ -147,24 +148,31 @@ class EpisodicMemory:
         Accepts a result dict (with an ``output`` key) and delegates to the
         synchronous ``add_episode``.
         """
-        output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
-        self.add_episode(task=task, result=output, sources=[])
+        async with self._lock:
+            output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
+            self.add_episode(task=task, result=output, sources=[])
 
     async def recall(self, task: str) -> dict | None:
         """Async alias for ``search_similar`` — used by Orchestrator.
 
         Returns the top episode's result dict, or ``None`` if no match.
         """
-        # 优先精确匹配，避免不必要的 LLM 调用
-        task_clean = task.strip().lower()
-        for ep in self._episodes:
-            if ep.task.strip().lower() == task_clean:
-                return {"output": ep.result, "episode": ep}
-        # 回退到关键词相似匹配（降低阈值以增加命中率）
-        matches = self.search_similar(query=task, top_k=1)
-        if matches:
-            return {"output": matches[0].result, "episode": matches[0]}
-        return None
+        async with self._lock:
+            # 优先精确匹配，避免不必要的 LLM 调用
+            task_clean = task.strip().lower()
+            for ep in self._episodes:
+                if ep.task.strip().lower() == task_clean:
+                    return {"output": ep.result, "episode": ep}
+            # 回退到关键词相似匹配（至少 2 个词重叠才命中，避免误匹配）
+            matches = self.search_similar(query=task, top_k=1)
+            if matches:
+                # Verify the match is strong enough
+                query_words = set(task.strip().lower().split())
+                task_words = set(matches[0].task.strip().lower().split())
+                overlap = len(query_words & task_words)
+                if overlap >= 2:
+                    return {"output": matches[0].result, "episode": matches[0]}
+            return None
 
     def get_user_profile(self) -> dict[str, float]:
         """Return the distribution of task types across stored episodes.

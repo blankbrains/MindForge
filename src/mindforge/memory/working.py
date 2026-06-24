@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ class WorkingMemory:
         self._capacity_tokens = capacity_tokens
         self._entries: dict[str, MemoryEntry] = {}  # key -> entry (dedup key)
         self._last_cleanup: float = time.time()
+        self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,10 +161,11 @@ class WorkingMemory:
 
         return "".join(sections)
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """Reset working memory to empty."""
-        self._entries.clear()
-        self._last_cleanup = time.time()
+        async with self._lock:
+            self._entries.clear()
+            self._last_cleanup = time.time()
 
     # ------------------------------------------------------------------
     # Capacity management
