@@ -131,6 +131,16 @@ class HistoryListResponse(BaseModel):
     total: int = 0
 
 
+class HistorySaveRequest(BaseModel):
+    """Request body for saving a research history entry."""
+
+    task: str
+    report: str = ""
+    quality_score: float | None = None
+    model_used: str | None = None
+    token_usage: dict[str, Any] = Field(default_factory=dict)
+
+
 class HealthResponse(BaseModel):
     """Service health information."""
 

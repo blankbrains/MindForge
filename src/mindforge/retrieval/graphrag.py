@@ -64,10 +64,8 @@ class GraphRAGEngine:
     def __init__(
         self,
         llm_fn=None,
-        embedding_fn=None,
     ):
         self.llm_fn = llm_fn
-        self.embedding_fn = embedding_fn
 
         # Graph state
         self.entities: Dict[str, Entity] = {}
@@ -88,13 +86,19 @@ class GraphRAGEngine:
             logger.warning("No documents provided; graph will be empty.")
             return
 
+        sem = asyncio.Semaphore(5)
+
+        async def _bounded_extract(text, doc_id):
+            async with sem:
+                return await self._extract_entities_and_relations(text, doc_id)
+
         tasks = []
         for doc in documents:
             text = doc.get("text", "")
             doc_id = doc.get("id", "")
             if not text:
                 continue
-            tasks.append(self._extract_entities_and_relations(text, doc_id))
+            tasks.append(_bounded_extract(text, doc_id))
 
         if tasks:
             await asyncio.gather(*tasks)
@@ -114,7 +118,7 @@ class GraphRAGEngine:
         """Persist the graph to a JSON file."""
         import json
         payload = {
-            "entities": {eid: {"id": e.id, "name": e.name, "type": e.type}
+            "entities": {eid: {"id": e.id, "name": e.name, "type": e.type, "description": e.description}
                          for eid, e in self.entities.items()},
             "relations": [{"source": r.source, "target": r.target,
                            "relation_type": r.relation_type, "weight": r.weight}
@@ -135,7 +139,8 @@ class GraphRAGEngine:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         self.entities = {
-            eid: Entity(id=e["id"], name=e["name"], type=e.get("type", ""))
+            eid: Entity(id=e["id"], name=e["name"], type=e.get("type", ""),
+                       description=e.get("description", ""))
             for eid, e in payload.get("entities", {}).items()
         }
         self.relations = [
@@ -207,15 +212,11 @@ class GraphRAGEngine:
                     self.relations.append(relation)
 
     def _parse_extraction(self, raw: str) -> List[Dict[str, Any]]:
-        """解析 LLM 输出的 JSON 数组，兼容嵌套 JSON 场景。
-
-        先尝试整体解析(raw)，再尝试贪婪匹配最后一个 [...] 块。
-        """
+        """Parse LLM JSON array output, handling nested JSON with bracket counting."""
         import json
-        import re
 
         raw = raw.strip()
-        # 尝试整体解析
+        # Try full parse first
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
@@ -223,16 +224,27 @@ class GraphRAGEngine:
         except json.JSONDecodeError:
             pass
 
-        # 降级：匹配第一个 [ ... 最后一个 ]（贪婪，兼容嵌套 JSON）
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group())
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse extraction JSON; skipping.")
-        return []
+        # Fallback: bracket-balanced extraction
+        start = raw.find("[")
+        if start == -1:
+            return []
+        depth = 0
+        end = -1
+        for i in range(start, len(raw)):
+            if raw[i] == "[":
+                depth += 1
+            elif raw[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end == -1:
+            return []
+        try:
+            parsed = json.loads(raw[start:end+1])
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            return []
 
     # ------------------------------------------------------------------
     # Adjacency & community discovery (BFS)

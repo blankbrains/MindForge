@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
+import threading
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ class CrossEncoderReranker:
     def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
         self.model_name = model_name
         self._model = None
+        self._model_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lazy-loading property
@@ -24,23 +26,25 @@ class CrossEncoderReranker:
     def model(self):
         """Lazy-loaded CrossEncoder instance."""
         if self._model is None:
-            try:
-                from sentence_transformers import CrossEncoder
+            with self._model_lock:
+                if self._model is None:
+                    try:
+                        from sentence_transformers import CrossEncoder
 
-                self._model = CrossEncoder(self.model_name)
-                logger.info(
-                    "Loaded CrossEncoder model '%s'.", self.model_name
-                )
-            except ImportError:
-                raise ImportError(
-                    "sentence-transformers is required for CrossEncoderReranker. "
-                    "Install it with: pip install sentence-transformers"
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to load CrossEncoder model '%s'.", self.model_name
-                )
-                raise
+                        self._model = CrossEncoder(self.model_name)
+                        logger.info(
+                            "Loaded CrossEncoder model '%s'.", self.model_name
+                        )
+                    except ImportError:
+                        raise ImportError(
+                            "sentence-transformers is required for CrossEncoderReranker. "
+                            "Install it with: pip install sentence-transformers"
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to load CrossEncoder model '%s'.", self.model_name
+                        )
+                        raise
         return self._model
 
     # ------------------------------------------------------------------
@@ -67,7 +71,7 @@ class CrossEncoderReranker:
         if not candidates:
             return []
 
-        top_k = top_k or len(candidates)
+        top_k = top_k if top_k is not None else len(candidates)
 
         # Prepare query-doc pairs
         texts = [c.get("text", "") for c in candidates]

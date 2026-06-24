@@ -39,6 +39,7 @@ class ResearchPlan:
     original_task: str
     subtasks: list[SubTask]
     reasoning: str = ""
+    planner_usage: dict[str, int] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     def get_ready_tasks(self) -> list[SubTask]:
@@ -185,6 +186,7 @@ class PlannerAgent(BaseAgent):
             plan_dict["plan_id"] = uuid.uuid4().hex[:12]
 
             plan = ResearchPlan.from_dict(plan_dict)
+            plan.planner_usage = result.usage or {}
 
             # Validate at least one subtask
             if not plan.subtasks:

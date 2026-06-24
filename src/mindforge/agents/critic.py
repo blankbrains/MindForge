@@ -29,6 +29,7 @@ class CriticScore:
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
     should_refine: bool = False
+    token_usage: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict, *, threshold: float | None = None) -> CriticScore:
@@ -192,6 +193,7 @@ class CriticAgent(BaseAgent):
             raw = result.content.strip()
             score_dict = json.loads(raw)
             score = CriticScore.from_dict(score_dict)
+            score.token_usage = result.usage or {}
 
             # Apply threshold
             if threshold is not None:

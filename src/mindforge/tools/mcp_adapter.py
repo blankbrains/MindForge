@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Optional
 
+from mindforge.config import get_settings
 from mindforge.tools.base import BaseTool, ToolResult
 
 try:
@@ -81,11 +83,25 @@ class MCPToolAdapter(BaseTool):
 
         client = await self._ensure_client()
 
+        timeout = get_settings().mcp.mcp_tool_timeout
         try:
             if server_name:
-                result_data = await client.call_tool(server_name, tool_name, params)
+                result_data = await asyncio.wait_for(
+                    client.call_tool(server_name, tool_name, params),
+                    timeout=timeout,
+                )
             else:
-                result_data = await client.call_by_function_name(tool_name, params)
+                result_data = await asyncio.wait_for(
+                    client.call_by_function_name(tool_name, params),
+                    timeout=timeout,
+                )
+        except asyncio.TimeoutError:
+            elapsed = (time.perf_counter() - start) * 1000
+            return ToolResult(
+                success=False,
+                error=f"MCP tool '{tool_name}' timed out after {timeout}s",
+                execution_time_ms=elapsed,
+            )
         except Exception as exc:
             elapsed = (time.perf_counter() - start) * 1000
             return ToolResult(

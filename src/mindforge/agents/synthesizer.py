@@ -27,12 +27,19 @@ Always structure your reports with these sections:
 
 Guidelines:
 - Write in a clear, professional tone.
-- Use [N] citation markers for every factual claim (e.g., "The sky appears blue due to Rayleigh scattering [1]").
+- Use [N] citation markers for factual claims backed by retrieved sources.
 - Integrate findings from multiple subtasks into a unified narrative.
 - Eliminate redundancy — if multiple subtasks covered the same ground, present it once.
 - If the critic provided feedback, address each issue or suggestion explicitly.
 - Aim for comprehensive coverage while maintaining readability.
-- Use markdown formatting for structure (headings, lists, emphasis)."""
+- Use markdown formatting for structure (headings, lists, emphasis).
+
+**CRITICAL — When subtask findings are sparse or empty**:
+- Do NOT produce a short report that says "no information found".
+- Instead, draw on your own broad training knowledge to provide a thorough, detailed answer.
+- Clearly label knowledge-source sections as "Based on general knowledge" vs "Based on retrieved documents".
+- The report should still be comprehensive — 500+ words with structured analysis.
+- The Critic will still evaluate and refine your output, so make it thorough."""
 
 
 class SynthesizerAgent(BaseAgent):
@@ -77,14 +84,12 @@ class SynthesizerAgent(BaseAgent):
         """
         settings = get_settings()
 
-        # Use the synthesizer-specific model from config
+        # Use the synthesizer-specific model from config (via _llm_override for co-routine safety)
         synthesizer_model = settings.llm.get_model("synthesizer")
-        request_llm = self._llm
-        if request_llm is not None:
-            from mindforge.models.base import LLMFactory
-            request_llm = LLMFactory.create(
-                settings.llm.llm_provider, synthesizer_model
-            )
+        from mindforge.models.base import LLMFactory
+        _llm_override = LLMFactory.create(
+            settings.llm.llm_provider, synthesizer_model
+        )
 
         # --- Build the findings block ---
         findings_lines: list[str] = []
@@ -93,75 +98,76 @@ class SynthesizerAgent(BaseAgent):
             output = sr.get("output", sr.get("result", ""))
             if isinstance(output, AgentResult):
                 output = output.output
-            elif not isinstance(output, str):
-                output = str(output)
             findings_lines.append(f"### Subtask {i}: {desc}\n\n{output}\n")
 
         findings_text = "\n".join(findings_lines)
 
-        # --- Build the sources block ---
-        sources_text = ""
-        if all_sources:
-            src_lines = ["Consolidated source list:"]
-            for s in all_sources:
-                idx = s.get("index", "")
-                title = s.get("title", s.get("source", "Untitled"))
-                url = s.get("url", "")
-                if url:
-                    src_lines.append(f"  [{idx}] {title} — {url}")
-                else:
-                    src_lines.append(f"  [{idx}] {title}")
-            sources_text = "\n".join(src_lines)
+        try:
+            # --- Build the sources block ---
+            sources_text = ""
+            if all_sources:
+                src_lines = ["Consolidated source list:"]
+                for s in all_sources:
+                    idx = s.get("index", "")
+                    title = s.get("title", s.get("source", "Untitled"))
+                    url = s.get("url", "")
+                    if url:
+                        src_lines.append(f"  [{idx}] {title} — {url}")
+                    else:
+                        src_lines.append(f"  [{idx}] {title}")
+                sources_text = "\n".join(src_lines)
 
-        # --- Build the feedback block ---
-        feedback_text = ""
-        if critic_feedback is not None:
-            fb_lines = [
-                "Critic feedback to address:",
-                f"  Overall score: {critic_feedback.overall}/10",
-                "  Issues:",
+            # --- Build the feedback block ---
+            feedback_text = ""
+            if critic_feedback is not None:
+                fb_lines = [
+                    "Critic feedback to address:",
+                    f"  Overall score: {critic_feedback.overall}/10",
+                    "  Issues:",
+                ]
+                for issue in critic_feedback.issues:
+                    fb_lines.append(f"    - {issue}")
+                fb_lines.append("  Suggestions:")
+                for suggestion in critic_feedback.suggestions:
+                    fb_lines.append(f"    - {suggestion}")
+                feedback_text = "\n".join(fb_lines)
+
+            # --- Assemble the user prompt ---
+            user_prompt_parts = [
+                f"## Original Research Task\n\n{task}\n",
+                f"## Subtask Findings\n\n{findings_text}\n",
             ]
-            for issue in critic_feedback.issues:
-                fb_lines.append(f"    - {issue}")
-            fb_lines.append("  Suggestions:")
-            for suggestion in critic_feedback.suggestions:
-                fb_lines.append(f"    - {suggestion}")
-            feedback_text = "\n".join(fb_lines)
+            if sources_text:
+                user_prompt_parts.append(f"## Sources\n\n{sources_text}\n")
+            if feedback_text:
+                user_prompt_parts.append(f"## Critic Feedback to Address\n\n{feedback_text}\n")
 
-        # --- Assemble the user prompt ---
-        user_prompt_parts = [
-            f"## Original Research Task\n\n{task}\n",
-            f"## Subtask Findings\n\n{findings_text}\n",
-        ]
-        if sources_text:
-            user_prompt_parts.append(f"## Sources\n\n{sources_text}\n")
-        if feedback_text:
-            user_prompt_parts.append(f"## Critic Feedback to Address\n\n{feedback_text}\n")
+            user_prompt_parts.append(
+                "Please synthesize these findings into a comprehensive, well-structured "
+                "final report following the required sections. Use [N] citation markers "
+                "for all factual claims referencing the provided sources."
+            )
 
-        user_prompt_parts.append(
-            "Please synthesize these findings into a comprehensive, well-structured "
-            "final report following the required sections. Use [N] citation markers "
-            "for all factual claims referencing the provided sources."
-        )
+            user_prompt = "\n".join(user_prompt_parts)
 
-        user_prompt = "\n".join(user_prompt_parts)
+            messages = [
+                ChatMessage(role="system", content=self.system_prompt),
+                ChatMessage(role="user", content=user_prompt),
+            ]
 
-        messages = [
-            ChatMessage(role="system", content=self.system_prompt),
-            ChatMessage(role="user", content=user_prompt),
-        ]
+            temp = temperature if temperature is not None else 0.4
+            result = await self._chat(messages, temperature=temp, _llm_override=_llm_override)
 
-        temp = temperature if temperature is not None else 0.4
-        result = await self._chat(messages, temperature=temp, _llm_override=request_llm)
-
-        return AgentResult(
-            agent_name=self.name,
-            success=True,
-            output=result.content or "",
-            data={
-                "subtask_count": len(subtask_results),
-                "source_count": len(all_sources) if all_sources else 0,
-            },
-            token_usage=result.usage or {},
-            metadata={"model": self._model_name},
-        )
+            return AgentResult(
+                agent_name=self.name,
+                success=True,
+                output=result.content or "",
+                data={
+                    "subtask_count": len(subtask_results),
+                    "source_count": len(all_sources) if all_sources else 0,
+                },
+                token_usage=result.usage or {},
+                metadata={"model": self._model_name},
+            )
+        except Exception:
+            raise

@@ -14,20 +14,24 @@ import openai
 from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, StreamEvent
 
 
-# 延迟加载 embedding 模型（单例）
+# 延迟加载 embedding 模型（单例，线程安全）
+import threading as _threading
 _EMBEDDER = None
+_EMBEDDER_LOCK = _threading.Lock()
 
 
 def _get_embedder():
     global _EMBEDDER
     if _EMBEDDER is None:
-        from mindforge.config import get_settings
-        from sentence_transformers import SentenceTransformer
-        model_name = get_settings().llm.local_embedding_model or "BAAI/bge-m3"
-        _EMBEDDER = SentenceTransformer(
-            model_name,
-            device=os.getenv("SENTENCE_TRANSFORMERS_DEVICE", "cpu"),
-        )
+        with _EMBEDDER_LOCK:
+            if _EMBEDDER is None:  # double-check
+                from mindforge.config import get_settings
+                from sentence_transformers import SentenceTransformer
+                model_name = get_settings().llm.local_embedding_model or "BAAI/bge-m3"
+                _EMBEDDER = SentenceTransformer(
+                    model_name,
+                    device=os.getenv("SENTENCE_TRANSFORMERS_DEVICE", "cpu"),
+                )
     return _EMBEDDER
 
 

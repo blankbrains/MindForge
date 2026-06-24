@@ -8,16 +8,6 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
-# 显式加载 .env 文件（兼容 Windows 编码问题）
-_env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
-if os.path.exists(_env_path):
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_env_path, encoding="utf-8")
-    except Exception:
-        pass
-
-
 class LLMConfig(BaseSettings):
     """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
     llm_provider: str = Field(default="openai", description="openai | deepseek")
@@ -36,7 +26,7 @@ class LLMConfig(BaseSettings):
     deepseek_critic: str = "deepseek-chat"
     deepseek_synthesizer: str = "deepseek-chat"
     deepseek_embedding: str = "BAAI/bge-m3"
-    embedding_dim: int = 1536
+    embedding_dim: int = 1024
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_dim: int = 1024
 
@@ -47,6 +37,7 @@ class LLMConfig(BaseSettings):
                 "researcher": self.deepseek_researcher,
                 "critic": self.deepseek_critic,
                 "synthesizer": self.deepseek_synthesizer,
+                "embedding": self.deepseek_embedding,
             }
             return mapping.get(role, self.deepseek_researcher)
         return getattr(self, f"{role}_model", self.researcher_model)

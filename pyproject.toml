@@ -8,6 +8,16 @@ version = "1.0.0"
 description = "MindForge — 自适应研究助理系统 (Multi-Agent RAG with MCP)"
 requires-python = ">=3.9"
 dependencies = [
+    # Web Framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sse-starlette>=2.0.0",
+    "python-multipart>=0.0.12",
+
+    # Database
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+
     # LLM & Embedding
     "openai>=1.30.0",
     "tiktoken>=0.7.0",
