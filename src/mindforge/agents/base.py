@@ -149,7 +149,8 @@ class BaseAgent(ABC):
             except Exception as exc:
                 last_exc = exc
                 # 401/400/403 等客户端错误不重试；仅 429/5xx/超时等可恢复错误重试
-                if getattr(exc, "status_code", None) in (400, 401, 403):
+                status = getattr(exc, "status_code", None)
+                if status is not None and 400 <= status < 500:
                     raise
                 if attempt < 2:
                     wait = 2.0 ** attempt * 1.0
@@ -224,6 +225,7 @@ class BaseAgent(ABC):
             "output": output,
             "success": result.success,
             "error": result.error,
+            "data": result.data if result.data else None,
         }
 
     # -- Tool-calling loop --------------------------------------------------
@@ -367,7 +369,19 @@ class BaseAgent(ABC):
                     break
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        cost = _estimate_cost(self._model_name, aggregated_usage)
+        model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
+        cost = _estimate_cost(model_used, aggregated_usage)
+
+        # Aggregate sources from tool results
+        sources: list[dict[str, Any]] = []
+        for msg in conv:
+            if msg.role == "tool" and hasattr(msg, "data") and msg.data:
+                try:
+                    src_data = msg.data
+                    if isinstance(src_data, dict) and "sources" in src_data:
+                        sources.extend(src_data["sources"])
+                except Exception:
+                    pass
 
         return AgentResult(
             agent_name=self.name,
@@ -377,6 +391,7 @@ class BaseAgent(ABC):
                 "rounds": min(round_idx + 1, max_rounds),
                 "tool_calls": tool_calls_made,
                 "messages": len(conv),
+                "sources": sources,
             },
             metadata={
                 "model": self._model_name,

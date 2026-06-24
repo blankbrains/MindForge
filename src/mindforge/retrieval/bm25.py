@@ -35,16 +35,17 @@ class BM25Retriever:
 
         Each dict should have at least ``id`` and ``text`` keys.
         """
-        self.documents = [d.get("text", "") for d in documents]
-        self.doc_ids = [d.get("id", str(i)) for i, d in enumerate(documents)]
+        new_docs = [d.get("text", "") for d in documents]
+        new_ids = [d.get("id", str(i)) for i, d in enumerate(documents)]
 
         if _BM25S_AVAILABLE:
             try:
-                tokenized = self._tokenize(self.documents)
-                self.retriever = bm25s.BM25()
-                self.retriever.index(tokenized)
+                tokenized = self._tokenize(new_docs)
+                new_retriever = bm25s.BM25()
+                new_retriever.index(tokenized)
+                self.retriever = new_retriever
                 logger.info(
-                    "Built BM25 index with %d documents.", len(self.documents)
+                    "Built BM25 index with %d documents.", len(new_docs)
                 )
             except Exception:
                 logger.exception("Failed to build BM25 index; falling back.")
@@ -53,6 +54,8 @@ class BM25Retriever:
             logger.info(
                 "bm25s not available; falling back to simple keyword matching."
             )
+        self.documents = new_docs
+        self.doc_ids = new_ids
 
     def _tokenize(self, texts: List[str]) -> List[List[str]]:
         """Tokenize a list of texts using jieba for Chinese support."""
@@ -166,7 +169,7 @@ class BM25Retriever:
             except Exception:
                 logger.exception("Failed to load BM25 index; metadata loaded, but retriever unavailable.")
                 self.retriever = None
-                return False
+                return True
         else:
             logger.info("bm25s not available; loaded document metadata only.")
             return True

@@ -58,8 +58,7 @@ class EmbeddingManager:
 
     def _init_backend(self) -> None:
         """Try backends in order: sentence-transformers → OpenAI → fallback."""
-        explicit = bool(self._provider)
-        if explicit:
+        if self._provider:
             backends = [self._provider]
         else:
             backends = ["sentence-transformers", "openai", "fallback"]
@@ -77,14 +76,7 @@ class EmbeddingManager:
             except Exception as exc:
                 logger.debug("Embedding backend %s unavailable: %s", backend, exc)
 
-        # 显式指定 provider 时失败不应静默降级
-        if explicit:
-            raise RuntimeError(
-                f"Embedding provider '{self._provider}' was explicitly requested "
-                "but could not be initialised."
-            )
-
-        # Ultimate fallback (仅自动探测模式)
+        # Ultimate fallback
         self._init_fallback()
 
     def _init_st(self) -> None:
@@ -97,6 +89,7 @@ class EmbeddingManager:
             try:
                 self._dim = self._model.get_embedding_dimension()
             except AttributeError:
+                # get_sentence_embedding_dimension is deprecated → get_embedding_dimension
                 self._dim = self._model.get_sentence_embedding_dimension()
         self._provider = "sentence-transformers"
         logger.info("Embedding: sentence-transformers/%s (dim=%d)", model_name, self._dim)
@@ -142,10 +135,6 @@ class EmbeddingManager:
     # ------------------------------------------------------------------
 
     @property
-    def provider(self) -> str:
-        return self._provider
-
-    @property
     def dim(self) -> int:
         return self._dim or _FALLBACK_DIM
 
@@ -184,44 +173,17 @@ class EmbeddingManager:
         return result.tolist()
 
     def _embed_openai(self, texts: List[str]) -> List[List[float]]:
-        # OpenAI embedding 单次请求有 token / 批量上限，按 64 条分片
-        max_batch = 64
-        if len(texts) <= max_batch:
-            resp = self._client.embeddings.create(
-                model=self._model_name,
-                input=texts,
-            )
-            return [d.embedding for d in resp.data]
-
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), max_batch):
-            batch = texts[i:i + max_batch]
-            resp = self._client.embeddings.create(
-                model=self._model_name,
-                input=batch,
-            )
-            all_embeddings.extend(d.embedding for d in resp.data)
-        return all_embeddings
+        resp = self._client.embeddings.create(
+            model=self._model_name,
+            input=texts,
+        )
+        return [d.embedding for d in resp.data]
 
     def _embed_fallback(self, texts: List[str]) -> List[List[float]]:
-        """Deterministic hash projection (zero model, zero semantic).
-
-        尝试用 jieba 对中文文本分词以改善降级质量；
-        若 jieba 不可用则回退到空白分词。
-        """
+        """Deterministic hash projection (zero model, zero semantic)."""
         results = []
         for text in texts:
-            lower = text.lower()
-            # 中文文本优先用 jieba 分词
-            has_cjk = any('一' <= c <= '鿿' for c in text)
-            if has_cjk:
-                try:
-                    import jieba
-                    words = list(jieba.cut(lower))
-                except Exception:
-                    words = lower.split()
-            else:
-                words = lower.split()
+            words = text.lower().split()
             vec = [0.0] * self.dim
             for word in words:
                 h = int(hashlib.md5(word.encode()).hexdigest(), 16)

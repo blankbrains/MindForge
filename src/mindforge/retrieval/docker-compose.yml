@@ -16,7 +16,7 @@ services:
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -30,9 +30,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-mindforge}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindforge}
-      POSTGRES_DB: ${POSTGRES_DB:-mindforge}
+      POSTGRES_USER: mindforge
+      POSTGRES_PASSWORD: mindforge
+      POSTGRES_DB: mindforge
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

@@ -1,4 +1,4 @@
-"""Database layer — SQLAlchemy with SQLite (swap to PostgreSQL in production)."""
+"""Database layer — PostgreSQL via SQLAlchemy."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import os
 import hashlib
 import secrets
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import (
@@ -16,49 +15,19 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 # ---------------------------------------------------------------------------
-# Engine — PostgreSQL preferred, SQLite fallback
+# Engine — PostgreSQL only
 # ---------------------------------------------------------------------------
 
 _DEFAULT_PG_URL = "postgresql://mindforge:mindforge@localhost:5432/mindforge"
-_DEFAULT_SQLITE_URL = (
-    f"sqlite:///{Path(__file__).resolve().parent.parent.parent / 'data' / 'mindforge.db'}"
+_DB_URL = os.getenv("DATABASE_URL", _DEFAULT_PG_URL)
+
+_engine = create_engine(
+    _DB_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=5,
+    connect_args={"connect_timeout": 5},
 )
-
-_DB_URL = os.getenv("DATABASE_URL", "")
-
-if not _DB_URL:
-    # Try PostgreSQL first (Docker), fall back to SQLite.
-    # 使用短 connect_timeout 避免 PG 不可达时阻塞应用启动。
-    try:
-        import psycopg2  # noqa: F401 — probe driver availability
-        _test_engine = create_engine(
-            _DEFAULT_PG_URL,
-            echo=False,
-            connect_args={"connect_timeout": 2},
-        )
-        _test_engine.connect().close()
-        _test_engine.dispose()
-        _DB_URL = _DEFAULT_PG_URL
-    except Exception:
-        _DB_URL = _DEFAULT_SQLITE_URL
-
-if "sqlite" in _DB_URL:
-    # SQLite: 单文件连接，配合 check_same_thread=False 使用 StaticPool
-    from sqlalchemy.pool import StaticPool
-    _engine = create_engine(
-        _DB_URL,
-        connect_args={"check_same_thread": False},
-        echo=False,
-        poolclass=StaticPool,
-    )
-else:
-    _engine = create_engine(
-        _DB_URL,
-        echo=False,
-        pool_pre_ping=True,
-        pool_size=5,
-        connect_args={"connect_timeout": 5} if "postgresql" in _DB_URL else {},
-    )
 
 SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
 
@@ -79,11 +48,12 @@ def _get_secret() -> bytes:
     global _SECRET_WARNED
     secret = os.getenv("APP_SECRET", "")
     if not secret:
-        secret = "mindforge-default-secret-change-in-production"
+        secret = secrets.token_hex(32)
         if not _SECRET_WARNED:
             import logging
             logging.getLogger(__name__).warning(
-                "APP_SECRET not set — using default encryption key. "
+                "APP_SECRET not set — using a random per-process encryption key. "
+                "Stored API keys will be unreadable after restart. "
                 "Set APP_SECRET env var for production."
             )
             _SECRET_WARNED = True
@@ -139,13 +109,16 @@ class User(Base):
     @staticmethod
     def hash_password(password: str) -> str:
         salt = secrets.token_hex(16)
-        return salt + ":" + hashlib.sha256((salt + password).encode()).hexdigest()
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+        return salt + ":" + dk.hex()
 
     @staticmethod
     def verify_password(password: str, hashed: str) -> bool:
         try:
             salt, h = hashed.split(":", 1)
-            return h == hashlib.sha256((salt + password).encode()).hexdigest()
+            return h == hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), salt.encode(), 100000
+            ).hex()
         except Exception:
             return False
 

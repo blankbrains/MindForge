@@ -65,7 +65,8 @@ class RAPTORIndexer:
         if len(nodes) <= 3:
             return [nodes]
         embeddings = []
-        for node in nodes:
+        embedding_indices = []  # maps embedding_idx -> node_idx
+        for i, node in enumerate(nodes):
             if node.embedding is None and self.embedder:
                 try:
                     node.embedding = self.embedder.embed_single(node.content[:512])
@@ -73,20 +74,29 @@ class RAPTORIndexer:
                     pass
             if node.embedding is not None:
                 embeddings.append(node.embedding)
+                embedding_indices.append(i)
         if not embeddings:
             cs = max(3, len(nodes) // 3)
             return [nodes[i:i+cs] for i in range(0, len(nodes), cs)]
         embeddings = np.array(embeddings)
+        # Build reverse map: node_idx -> embedding_idx
+        node_to_emb = {node_idx: emb_idx for emb_idx, node_idx in enumerate(embedding_indices)}
         clusters, used = [], set()
         for i in range(len(nodes)):
             if i in used:
                 continue
+            if i not in node_to_emb:
+                continue
             cluster = [nodes[i]]
             used.add(i)
+            ei = node_to_emb[i]
             for j in range(i+1, len(nodes)):
                 if j in used:
                     continue
-                sim = np.dot(embeddings[i], embeddings[j]) / (np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[j]) + 1e-8)
+                if j not in node_to_emb:
+                    continue
+                ej = node_to_emb[j]
+                sim = np.dot(embeddings[ei], embeddings[ej]) / (np.linalg.norm(embeddings[ei]) * np.linalg.norm(embeddings[ej]) + 1e-8)
                 if sim > self.threshold:
                     cluster.append(nodes[j])
                     used.add(j)
@@ -106,7 +116,10 @@ class RAPTORIndexer:
                     [ChatMessage(role="user", content=prompt)],
                     temperature=0.3,
                 )
-                return (result.content or "").strip()[:1000]
+                content = result.content or ""
+                if not content.strip():
+                    content = "\n".join(n.content[:200] for n in cluster[:3])
+                return content.strip()[:1000]
             else:
                 # callable fallback: async llm_fn
                 result = await self.llm(prompt)

@@ -14,11 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 安装 Python 依赖（利用 docker layer 缓存）
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev]"
+RUN pip install --no-cache-dir -e "."
 
 # 复制源码
 COPY src/ src/
 RUN pip install --no-cache-dir -e .
+
+# 创建非 root 用户运行
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 

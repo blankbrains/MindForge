@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
@@ -47,9 +48,9 @@ class EpisodicMemory:
     """
 
     def __init__(self, redis_client: Any = None) -> None:
-        from collections import deque
-        self._episodes: deque[Episode] = deque(maxlen=MAX_EPISODES)
+        self._episodes: list[Episode] = []
         self._redis = redis_client
+        self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -73,6 +74,10 @@ class EpisodicMemory:
         )
 
         self._episodes.append(episode)
+
+        # In-memory cap
+        if len(self._episodes) > MAX_EPISODES:
+            self._episodes.pop(0)
 
         # Redis persistence (best-effort)
         if self._redis is not None:
@@ -112,13 +117,14 @@ class EpisodicMemory:
             return []
 
         query_words = set(query.lower().split())
-        query_type = self._classify_task(query)  # 预计算，避免每 episode 重复调用
 
         def _score(ep: Episode) -> float:
             task_words = set(ep.task.lower().split())
             result_words = set(ep.result.lower().split())
             overlap = len(query_words & task_words) + len(query_words & result_words)
-            bonus = 1.0 if ep.task_type == query_type else 0.0
+            # Bonus for exact task-type match
+            ep_type = self._classify_task(query)
+            bonus = 1.0 if ep.task_type == ep_type else 0.0
             return overlap + bonus
 
         scored = [(ep, _score(ep)) for ep in candidates]
@@ -141,18 +147,26 @@ class EpisodicMemory:
         Accepts a result dict (with an ``output`` key) and delegates to the
         synchronous ``add_episode``.
         """
-        output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
-        self.add_episode(task=task, result=output, sources=[])
+        async with self._lock:
+            output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
+            self.add_episode(task=task, result=output, sources=[])
 
     async def recall(self, task: str) -> dict | None:
         """Async alias for ``search_similar`` — used by Orchestrator.
 
         Returns the top episode's result dict, or ``None`` if no match.
         """
-        matches = self.search_similar(query=task, top_k=1)
-        if matches:
-            return {"output": matches[0].result, "episode": matches[0]}
-        return None
+        async with self._lock:
+            # 优先精确匹配，避免不必要的 LLM 调用
+            task_clean = task.strip().lower()
+            for ep in self._episodes:
+                if ep.task.strip().lower() == task_clean:
+                    return {"output": ep.result, "episode": ep}
+            # 回退到关键词相似匹配（降低阈值以增加命中率）
+            matches = self.search_similar(query=task, top_k=1)
+            if matches:
+                return {"output": matches[0].result, "episode": matches[0]}
+            return None
 
     def get_user_profile(self) -> dict[str, float]:
         """Return the distribution of task types across stored episodes.

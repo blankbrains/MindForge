@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -54,10 +55,16 @@ class Tracer:
     """
 
     def __init__(self) -> None:
-        self._traces_dir = Path.cwd() / ".traces"
+        _traces_base_env = os.getenv("MINDFORGE_TRACES_DIR")
+        if _traces_base_env:
+            _traces_base = Path(_traces_base_env)
+        else:
+            _traces_base = Path(__file__).resolve().parent.parent.parent.parent  # MindForge root
+        self._traces_dir = _traces_base / ".traces"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
 
         self._active_stack: list[Span] = []
+        self._lock = threading.Lock()
         self._langfuse = None
 
         # Attempt to initialise LangFuse if the package is installed
@@ -96,7 +103,8 @@ class Tracer:
         span_id = uuid.uuid4().hex[:16]
         trace_id = trace_id or uuid.uuid4().hex[:16]
 
-        parent_id = self._active_stack[-1].span_id if self._active_stack else None
+        with self._lock:
+            parent_id = self._active_stack[-1].span_id if self._active_stack else None
 
         span = Span(
             span_id=span_id,
@@ -107,7 +115,8 @@ class Tracer:
             metadata=metadata or {},
         )
 
-        self._active_stack.append(span)
+        with self._lock:
+            self._active_stack.append(span)
         try:
             yield span
         except Exception as exc:
@@ -115,7 +124,10 @@ class Tracer:
             raise
         finally:
             span.end_time = time.time()
-            self._active_stack.remove(span)
+            try:
+                self._active_stack.remove(span)
+            except ValueError:
+                pass  # already removed or stack corrupted
             self._export(span)
 
     # ------------------------------------------------------------------

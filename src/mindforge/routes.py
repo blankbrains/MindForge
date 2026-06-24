@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from mindforge.api.schemas import (
     DocumentContentResponse, DocumentItem, HealthResponse,
-    HistoryItem, HistorySaveRequest, IndexRequest, IndexResponse,
+    HistoryItem, IndexRequest, IndexResponse,
     QueryRequest, QueryResponse,
     SettingsResponse, SettingsUpdateRequest,
 )
@@ -53,10 +53,7 @@ def get_retriever() -> AdaptiveRetriever:
         from mindforge.retrieval.vector_store import get_vector_store
         from mindforge.ingestion.embedder import get_embedder
 
-        embedder = get_embedder()
-        async def _async_embed(text: str):
-            return embedder.embed_single(text)
-        _embed_fn = _async_embed
+        _embed_fn = get_embedder().embed_single
         _store = get_vector_store()
 
         _adaptive_retriever = AdaptiveRetriever(
@@ -103,20 +100,18 @@ async def query(body: QueryRequest):
             rag = RAGTool()
             result = rag.safe_execute(query=body.task, mode="hybrid", top_k=5)
             latency = (time.time() - start) * 1000
-            fallback_quality = float(result.data.get("quality", 0.0)) if result.data else 0.0
             return QueryResponse(
                 task_id=uuid.uuid4().hex[:12],
                 report=result.output if result.success else f"检索失败: {result.error}",
                 sources=[],
-                quality_score=fallback_quality,
+                quality_score=0.0,
                 latency_ms=round(latency, 2),
                 cost_usd=0.0,
                 iterations=0,
             )
-        except Exception:
+        except Exception as e2:
             logger.exception("Fallback retrieval also failed.")
-            logger.exception("All research paths failed")
-            raise HTTPException(status_code=500, detail="Research service temporarily unavailable")
+            raise HTTPException(status_code=500, detail=f"Research failed: {e2}")
 
 
 @router.post("/index", response_model=IndexResponse)
@@ -135,7 +130,6 @@ async def index_document(body: IndexRequest):
     # Embed and store in Qdrant
     from mindforge.ingestion.embedder import get_embedder
     from qdrant_client.models import PointStruct
-    import hashlib as _hashlib
 
     embedder = get_embedder()
     store = get_vector_store()
@@ -143,7 +137,7 @@ async def index_document(body: IndexRequest):
     for ch in chunks:
         vec = embedder.embed_single(ch.content)
         points.append(PointStruct(
-            id=int(_hashlib.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63),
+            id=abs(hash(ch.chunk_id)) % (2**63),
             vector=vec,
             payload={
                 "chunk_id": ch.chunk_id,
@@ -175,14 +169,13 @@ async def index_document(body: IndexRequest):
     if body.use_raptor and enrichment_llm:
         try:
             raptor = RAPTORIndexer(embedder=embedder, llm=enrichment_llm)
-            tree_nodes = await raptor.build_tree(chunks)
+            tree_nodes = raptor.build_tree(chunks)
             raptor_points = []
             for node in tree_nodes:
                 if node.level > 0:
-                    # embedding 已在 build_tree 内生成，避免重复计算
-                    vec = node.embedding or embedder.embed_single(node.content)
+                    vec = embedder.embed_single(node.content)
                     raptor_points.append(PointStruct(
-                        id=int(_hashlib.md5(node.node_id.encode()).hexdigest(), 16) % (2**63),
+                        id=abs(hash(node.node_id)) % (2**63),
                         vector=vec,
                         payload={
                             "chunk_id": node.node_id,
@@ -204,7 +197,7 @@ async def index_document(body: IndexRequest):
     if body.use_graphrag and enrichment_llm:
         try:
             from mindforge.retrieval.graphrag import GraphRAGEngine
-            graphrag = GraphRAGEngine(llm_fn=enrichment_llm)
+            graphrag = GraphRAGEngine(llm_fn=enrichment_llm, embedding_fn=embedder.embed_single)
             graph_docs = [{"doc_id": doc.doc_id, "content": ch.content, "source": doc.filename} for ch in chunks]
             await graphrag.build_graph(graph_docs)
             logger.info(f"GraphRAG: built graph from {len(graph_docs)} chunks")
@@ -317,8 +310,7 @@ async def delete_document(doc_id: str):
     try:
         await store.delete(doc_id)
     except Exception as e:
-        logger.exception(f"Delete failed for {doc_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+        logger.warning(f"Delete failed for {doc_id}: {e}")
     return None
 
 
@@ -373,101 +365,31 @@ async def upload_document(
     use_graphrag: bool = Form(False),
 ):
     """Upload a document file for indexing into the knowledge base."""
-    # Sanitize filename — prevent path traversal
-    import re as _re
-    safe_name = file.filename or "uploaded_doc"
-    safe_name = _re.sub(r'[\\/]', '_', safe_name)  # strip path separators
-    safe_name = _re.sub(r'\.\.+', '', safe_name)     # strip double dots
-
-    # Size limit: 50 MB
-    MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File too large (max 50 MB)")
-
+    # Save uploaded file to data/ directory
     upload_dir = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "data")
     _os.makedirs(upload_dir, exist_ok=True)
-    unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    file_path = _os.path.join(upload_dir, unique_name)
-    try:
-        with open(file_path, "wb") as f:
-            f.write(content)
+    file_path = _os.path.join(upload_dir, file.filename or "uploaded_doc")
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
 
-        parser = DocumentParser()
-        parsed = parser.parse(file_path)
-        splitter = TextSplitter()
-        chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
+    # Parse and index
+    parser = DocumentParser()
+    parsed = parser.parse(file_path)
+    splitter = TextSplitter()
+    chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
 
-        # RAPTOR / GraphRAG enrichment (same pattern as /index)
-        enrichment_llm = None
-        if use_raptor or use_graphrag:
-            try:
-                from mindforge.models.deepseek_adapter import DeepSeekAdapter
-                from mindforge.config import get_settings
-                settings = get_settings()
-                enrichment_llm = DeepSeekAdapter(
-                    model=settings.llm.get_model("researcher"),
-                    api_key=settings.llm.deepseek_api_key,
-                )
-            except Exception as e:
-                logger.warning("Enrichment LLM init failed: %s", e)
+    from mindforge.ingestion.embedder import get_embedder
+    embedder = get_embedder()
+    store = get_vector_store()
+    store.ensure_collection()
 
-        if use_raptor and enrichment_llm:
-            try:
-                from mindforge.ingestion.raptor import RAPTORIndexer
-                from mindforge.ingestion.embedder import get_embedder
-                from qdrant_client.models import PointStruct
-                import hashlib as _raptor_hashlib
-                _raptor_embedder = get_embedder()
-                _raptor_store = get_vector_store()
-                raptor = RAPTORIndexer(embedder=_raptor_embedder, llm=enrichment_llm)
-                tree_nodes = await raptor.build_tree(chunks)
-                raptor_points = []
-                for node in tree_nodes:
-                    if node.level > 0:
-                        vec = node.embedding or _raptor_embedder.embed_single(node.content)
-                        raptor_points.append(PointStruct(
-                            id=int(_raptor_hashlib.md5(node.node_id.encode()).hexdigest(), 16) % (2**63),
-                            vector=vec,
-                            payload={
-                                "chunk_id": node.node_id,
-                                "doc_id": parsed.doc_id,
-                                "content": node.content[:2000],
-                                "source": file.filename or parsed.filename,
-                                "raptor_level": node.level,
-                                "is_summary": True,
-                            },
-                        ))
-                for i in range(0, len(raptor_points), 100):
-                    await _raptor_store.upsert(raptor_points[i:i+100])
-                logger.info("RAPTOR: %d summary nodes indexed", len(raptor_points))
-            except Exception as e:
-                logger.warning("RAPTOR indexing skipped: %s", e)
-
-        if use_graphrag and enrichment_llm:
-            try:
-                from mindforge.retrieval.graphrag import GraphRAGEngine
-                graphrag = GraphRAGEngine(llm_fn=enrichment_llm)
-                graph_docs = [{"doc_id": parsed.doc_id, "content": ch.content, "source": file.filename or parsed.filename} for ch in chunks]
-                await graphrag.build_graph(graph_docs)
-                logger.info("GraphRAG: built graph from %d chunks", len(graph_docs))
-            except Exception as e:
-                logger.warning("GraphRAG indexing skipped: %s", e)
-
-        from mindforge.ingestion.embedder import get_embedder
-        embedder = get_embedder()
-        store = get_vector_store()
-        store.ensure_collection()
-
-        from qdrant_client.models import PointStruct
-        points = []
-        for ch in chunks:
-            vec = embedder.embed_single(ch.content)
-            # Use a stable ID based on hashlib, not Python's hash()
-            import hashlib as _hl
-            stable_id = int(_hl.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63)
-            points.append(PointStruct(
-                id=stable_id,
+    from qdrant_client.models import PointStruct
+    points = []
+    for ch in chunks:
+        vec = embedder.embed_single(ch.content)
+        points.append(PointStruct(
+            id=abs(hash(ch.chunk_id)) % (2**63),
             vector=vec,
             payload={
                 "chunk_id": ch.chunk_id,
@@ -476,21 +398,15 @@ async def upload_document(
                 "source": file.filename or parsed.filename,
             },
         ))
-        for i in range(0, len(points), 100):
-            await store.upsert(points[i:i+100])
+    for i in range(0, len(points), 100):
+        await store.upsert(points[i:i+100])
 
-        return IndexResponse(
-            doc_id=parsed.doc_id,
-            filename=file.filename or parsed.filename,
-            chunk_count=len(chunks),
-            status="indexed",
-        )
-    finally:
-        # Always attempt cleanup of the uploaded temp file after indexing
-        try:
-            _os.remove(file_path)
-        except OSError:
-            pass
+    return IndexResponse(
+        doc_id=parsed.doc_id,
+        filename=file.filename or parsed.filename,
+        chunk_count=len(chunks),
+        status="indexed",
+    )
 
 
 # ------------------------------------------------------------------
@@ -501,128 +417,44 @@ async def upload_document(
 def get_settings_api():
     """Return current user settings (API keys masked)."""
     from mindforge.db import SessionLocal, ApiKey
-    from mindforge.config import get_settings
     db = SessionLocal()
     try:
         keys = {k.provider: k for k in db.query(ApiKey).filter(ApiKey.is_active).all()}
-        s = get_settings()
-
-        def _masked(provider: str, db_keys: dict, settings_key: str) -> str:
-            if provider in db_keys:
-                return "***" + db_keys[provider].key_encrypted[-4:]
-            if settings_key:
-                return "***" + settings_key[-4:]
-            return ""
-
         return SettingsResponse(
-            llm_provider=s.llm.llm_provider,
-            deepseek_api_key=_masked("deepseek", keys, s.llm.deepseek_api_key),
-            openai_api_key=_masked("openai", keys, s.llm.openai_api_key),
+            llm_provider=get_settings().llm.llm_provider,
+            deepseek_api_key="***" + keys["deepseek"].key_encrypted[-4:] if "deepseek" in keys else "",
+            openai_api_key="***" + keys["openai"].key_encrypted[-4:] if "openai" in keys else "",
             embedding_provider=_os.getenv("LLM_EMBEDDING_PROVIDER", "openai"),
         )
     finally:
         db.close()
 
 
-def _sync_env_file(updates: dict[str, str]) -> None:
-    """同步写入 .env 文件，保证 key 在服务器重启后仍然生效。"""
-    _env_path = _os.path.abspath(
-        _os.path.join(_os.path.dirname(__file__), "..", "..", "..", ".env")
-    )
-    if not _os.path.exists(_env_path):
-        return
-    try:
-        with open(_env_path, "r", encoding="utf-8") as fh:
-            lines = fh.readlines()
-    except Exception:
-        return
-    updated_keys: set[str] = set()
-    new_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        # 跳过注释和空行
-        if not stripped or stripped.startswith("#"):
-            new_lines.append(line)
-            continue
-        matched = False
-        for key, value in updates.items():
-            if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} "):
-                new_lines.append(f"{key}={value}\n")
-                updated_keys.add(key)
-                matched = True
-                break
-        if not matched:
-            new_lines.append(line)
-    # 追加未在 .env 中出现的 key
-    for key, value in updates.items():
-        if key not in updated_keys:
-            new_lines.append(f"{key}={value}\n")
-    try:
-        with open(_env_path, "w", encoding="utf-8") as fh:
-            fh.writelines(new_lines)
-    except Exception:
-        pass
-
-
 @router.put("/settings")
 def update_settings_api(body: SettingsUpdateRequest):
-    """Save user settings (API keys encrypted in DB, synced to .env)."""
+    """Save user settings (API keys encrypted in DB)."""
     from mindforge.db import SessionLocal, ApiKey, encrypt_api_key
     db = SessionLocal()
     try:
         db.query(ApiKey).first()  # ensure table exists for single-user mode
-        env_updates: dict[str, str] = {}
-        _env_key_map = {
-            "deepseek": "LLM_DEEPSEEK_API_KEY",
-            "openai": "LLM_OPENAI_API_KEY",
-        }
         for provider, key_val in [
             ("deepseek", body.deepseek_api_key),
             ("openai", body.openai_api_key),
         ]:
-            existing = db.query(ApiKey).filter(
-                ApiKey.provider == provider
-            ).first()
-            # 拒绝脱敏值（***开头）被当作真实 key 保存
-            if key_val is None:
-                continue  # undefined → 不修改
-            if key_val and key_val.startswith("***"):
-                continue  # 脱敏值 → 不修改
             if key_val:
-                # 保存新 key → DB + os.environ + .env
+                existing = db.query(ApiKey).filter(
+                    ApiKey.provider == provider
+                ).first()
                 if existing:
                     existing.key_encrypted = encrypt_api_key(key_val)
                 else:
                     db.add(ApiKey(provider=provider, key_encrypted=encrypt_api_key(key_val), user_id=1))
-                _os.environ[_env_key_map[provider]] = key_val
-                env_updates[_env_key_map[provider]] = key_val
-            else:
-                # key_val 为空 → 删除 key: DB + os.environ + .env
-                if existing:
-                    db.delete(existing)
-                _os.environ.pop(_env_key_map[provider], None)
-                env_updates[_env_key_map[provider]] = ""
         # Update env for current session
         if body.llm_provider:
             _os.environ["LLM_LLM_PROVIDER"] = body.llm_provider
-            env_updates["LLM_LLM_PROVIDER"] = body.llm_provider
         if body.embedding_provider:
             _os.environ["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
-            env_updates["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
-        # 刷新缓存的 Settings 实例
-        from mindforge.config import reload_settings
-        reload_settings()
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        # 同步写入 .env 文件（在 DB 提交成功后，.env 失败不影响 DB 数据）
-        if env_updates:
-            try:
-                _sync_env_file(env_updates)
-            except Exception as e:
-                logger.error("Settings saved to DB but .env sync failed: %s", e)
+        db.commit()
         return {"status": "saved"}
     finally:
         db.close()
@@ -663,7 +495,7 @@ def list_history():
 
 
 @router.post("/history")
-def save_history(body: HistorySaveRequest):
+def save_history(body: dict):
     """Save a research result to history."""
     from mindforge.db import SessionLocal, ResearchHistory
     import json as _json
@@ -671,56 +503,15 @@ def save_history(body: HistorySaveRequest):
     try:
         entry = ResearchHistory(
             user_id=1,  # single-user
-            task=body.task,
-            report=body.report,
-            quality_score=body.quality_score,
-            model_used=body.model_used,
-            token_usage=_json.dumps(body.token_usage),
+            task=body.get("task", ""),
+            report=body.get("report", ""),
+            quality_score=body.get("quality_score"),
+            model_used=body.get("model_used"),
+            token_usage=_json.dumps(body.get("token_usage", {})),
         )
         db.add(entry)
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
+        db.commit()
         return {"id": entry.id, "status": "saved"}
-    finally:
-        db.close()
-
-
-@router.delete("/history/{entry_id}", status_code=204)
-def delete_history_entry(entry_id: int):
-    """Delete a single research history entry."""
-    from mindforge.db import SessionLocal, ResearchHistory
-    db = SessionLocal()
-    try:
-        entry = db.query(ResearchHistory).filter(ResearchHistory.id == entry_id).first()
-        if entry is None:
-            raise HTTPException(status_code=404, detail="History entry not found")
-        db.delete(entry)
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        return None
-    finally:
-        db.close()
-
-
-@router.delete("/history", status_code=204)
-def clear_history():
-    """Delete all research history entries."""
-    from mindforge.db import SessionLocal, ResearchHistory
-    db = SessionLocal()
-    try:
-        db.query(ResearchHistory).delete()
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        return None
     finally:
         db.close()
 
@@ -738,9 +529,8 @@ async def mcp_endpoint(request: dict):
         mcp_server = MindForgeMCPServer()
         result = await mcp_server.handle_request(request)
         return result
-    except Exception:
-        logger.exception("MCP endpoint error")
-        raise HTTPException(status_code=500, detail="MCP service error")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/mcp")
@@ -800,20 +590,8 @@ async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[byte
                     "agent_name": "orchestrator",
                     "success": True,
                     "output": result.output if result.success else f"检索失败: {result.error}",
-                    "data": {
-                        "plan": None,
-                        "subtask_outputs": [],
-                        "critic_score": None,
-                        "refine_rounds": 0,
-                        "fallback": True,
-                    },
-                    "metadata": {
-                        "quality": float(result.data.get("quality", 0.0)) if result.data else 0.0,
-                        "cost": 0.0,
-                        "subtask_count": 0,
-                        "refine_rounds": 0,
-                        "model": "fallback-retrieval",
-                    },
+                    "data": {"fallback": True},
+                    "metadata": {"quality": 0.0, "cost": 0.0, "subtask_count": 0, "model": "fallback-retrieval"},
                 },
             }
             yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n".encode("utf-8")
