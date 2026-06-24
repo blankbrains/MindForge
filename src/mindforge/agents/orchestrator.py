@@ -252,60 +252,80 @@ class Orchestrator:
         }
 
         # ------------------------------------------------------------------
-        # Step 3: Synthesize
+        # Step 3: Synthesize (skip for single-subtask)
         # ------------------------------------------------------------------
         all_sources = self._collect_sources(subtask_outputs)
+        skip_syn = len(subtask_outputs) == 1 and subtask_outputs[0].get("success")
 
-        draft_result = await self._synthesizer.synthesize(
-            task=task,
-            subtask_results=subtask_outputs,
-            all_sources=all_sources,
+        if skip_syn:
+            logger.info("单子任务，跳过 Synthesizer（直接用 Researcher 输出）")
+            current_draft = subtask_outputs[0].get("output", "")
+            draft_result = AgentResult(agent_name="synthesizer", success=True, output=current_draft)
+            pipeline_log["synthesize"] = {"status": "skipped_single_subtask"}
+        else:
+            draft_result = await self._synthesizer.synthesize(
+                task=task,
+                subtask_results=subtask_outputs,
+                all_sources=all_sources,
+            )
+            self._accumulate_usage(total_usage, draft_result)
+            pipeline_log["synthesize"] = {"status": "completed"}
+
+        # ------------------------------------------------------------------
+        # Step 4: Critic + refine loop
+        # 简单查询（1 个子任务 + 输出较短）跳过 Critic 以提速
+        # ------------------------------------------------------------------
+        # 用 Researcher 原始输出判断复杂度（Synthesizer 会把简单内容扩写成报告）
+        researcher_output = (
+            subtask_outputs[0].get("output", "") if subtask_outputs else ""
         )
-        self._accumulate_usage(total_usage, draft_result)
-        pipeline_log["synthesize"] = {"status": "completed"}
-
-        # ------------------------------------------------------------------
-        # Step 4: Critic + refine loop (max 2 rounds)
-        # ------------------------------------------------------------------
-        max_refine = self._settings.agent.max_refine_rounds
+        is_simple = (
+            len(plan.subtasks) == 1
+            and len(researcher_output) < 800
+        )
         current_draft = draft_result.output
         final_critic: Optional[CriticScore] = None
         refine_count = 0
 
-        for refine_round in range(max_refine):
-            critic_score = await self._critic.evaluate(
-                task=task,
-                draft=current_draft,
-                sources=all_sources,
-            )
-            final_critic = critic_score
-            self._accumulate_usage(total_usage, critic_score.token_usage)
+        if is_simple and self._settings.agent.max_refine_rounds > 0:
+            logger.info("简单查询，跳过 Critic 评估（提速）")
+            pipeline_log["critic"] = {"skipped": True, "reason": "简单查询"}
+        else:
+            max_refine = self._settings.agent.max_refine_rounds
+            for refine_round in range(max_refine):
+                critic_score = await self._critic.evaluate(
+                    task=task,
+                    draft=current_draft,
+                    sources=all_sources,
+                )
+                final_critic = critic_score
+                self._accumulate_usage(total_usage, critic_score.token_usage)
 
-            if not critic_score.should_refine:
+                if not critic_score.should_refine:
+                    pipeline_log["critic"] = {
+                        "rounds": refine_round + 1,
+                        "overall_score": critic_score.overall,
+                        "refined": False,
+                    }
+                    break
+
+                # Refine: re-synthesize with critic feedback
+                current_draft = await self._synthesizer.synthesize(
+                    task=task,
+                    subtask_results=subtask_outputs,
+                    all_sources=all_sources,
+                    critic_feedback=critic_score,
+                )
+                self._accumulate_usage(total_usage, current_draft)
+                current_draft = current_draft.output
+                refine_count = refine_round + 1
+
+            if final_critic is not None and refine_count > 0:
                 pipeline_log["critic"] = {
                     "rounds": refine_round + 1,
-                    "overall_score": critic_score.overall,
-                    "refined": False,
+                    "overall_score": final_critic.overall,
+                    "refined": True,
                 }
-                break
-
-            # Refine: re-synthesize with critic feedback
-            current_draft = await self._synthesizer.synthesize(
-                task=task,
-                subtask_results=subtask_outputs,
-                all_sources=all_sources,
-                critic_feedback=critic_score,
-            )
-            self._accumulate_usage(total_usage, current_draft)
-            current_draft = current_draft.output
-            refine_count = refine_round + 1
-
-        if final_critic is not None and refine_count > 0:
-            pipeline_log["critic"] = {
-                "rounds": refine_round + 1,
-                "overall_score": final_critic.overall,
-                "refined": True,
-            }
 
         # ------------------------------------------------------------------
         # Step 5: Store to memory
@@ -466,53 +486,77 @@ class Orchestrator:
                     "result": st.result,
                 }
 
-        # --- Step 3: Synthesize ---
+        # --- Step 3: Synthesize (skip for single-subtask — use Researcher output directly) ---
         all_sources = self._collect_sources(subtask_outputs)
-        yield {"type": "synthesizing", "status": "start"}
+        skip_synthesizer = len(subtask_outputs) == 1 and subtask_outputs[0].get("success")
 
-        draft_result = await self._synthesizer.synthesize(
-            task=task,
-            subtask_results=subtask_outputs,
-            all_sources=all_sources,
-        )
-        self._accumulate_usage(total_usage, draft_result)
-        yield {"type": "synthesizing", "status": "done"}
+        if skip_synthesizer:
+            logger.info("单子任务，跳过 Synthesizer（流式输出 Researcher 结果）")
+            researcher_text = subtask_outputs[0].get("output", "")
+            # 流式推送 Researcher 的输出，实现逐字渲染
+            chunk_size = 8
+            for i in range(0, len(researcher_text), chunk_size):
+                yield {"type": "answer_chunk", "content": researcher_text[i:i+chunk_size]}
+                await asyncio.sleep(0.02)  # 模拟流式速度，让前端有时间渲染
+            yield {"type": "synthesizing", "status": "done"}
+            current_draft = researcher_text
+            draft_result = AgentResult(agent_name="synthesizer", success=True, output=researcher_text)
+        else:
+            yield {"type": "synthesizing", "status": "start"}
+            draft_result = await self._synthesizer.synthesize(
+                task=task,
+                subtask_results=subtask_outputs,
+                all_sources=all_sources,
+            )
+            self._accumulate_usage(total_usage, draft_result)
+            yield {"type": "synthesizing", "status": "done"}
 
         # --- Step 4: Critic + refine ---
-        max_refine = self._settings.agent.max_refine_rounds
         current_draft = draft_result.output
         final_critic: Optional[CriticScore] = None
         refine_count = 0
 
-        for refine_round in range(max_refine):
-            critic_score = await self._critic.evaluate(
-                task=task,
-                draft=current_draft,
-                sources=all_sources,
-            )
-            final_critic = critic_score
-            self._accumulate_usage(total_usage, critic_score.token_usage)
+        # 用 Researcher 原始输出判断复杂度（Synthesizer 会把简单内容扩写成报告）
+        researcher_output = (
+            subtask_outputs[0].get("output", "") if subtask_outputs else ""
+        )
+        is_simple = (
+            len(plan.subtasks) == 1
+            and len(researcher_output) < 800
+        )
+        if is_simple and self._settings.agent.max_refine_rounds > 0:
+            logger.info("简单查询，跳过 Critic 评估（提速）")
+        else:
+            max_refine = self._settings.agent.max_refine_rounds
+            for refine_round in range(max_refine):
+                critic_score = await self._critic.evaluate(
+                    task=task,
+                    draft=current_draft,
+                    sources=all_sources,
+                )
+                final_critic = critic_score
+                self._accumulate_usage(total_usage, critic_score.token_usage)
 
-            yield {
-                "type": "critic_feedback",
-                "score": critic_score,
-                "round": refine_round + 1,
-            }
+                yield {
+                    "type": "critic_feedback",
+                    "score": critic_score,
+                    "round": refine_round + 1,
+                }
 
-            if not critic_score.should_refine:
-                break
+                if not critic_score.should_refine:
+                    break
 
-            yield {"type": "refining", "round": refine_round + 1}
+                yield {"type": "refining", "round": refine_round + 1}
 
-            current_draft = await self._synthesizer.synthesize(
-                task=task,
-                subtask_results=subtask_outputs,
-                all_sources=all_sources,
-                critic_feedback=critic_score,
-            )
-            self._accumulate_usage(total_usage, current_draft)
-            current_draft = current_draft.output
-            refine_count = refine_round + 1
+                current_draft = await self._synthesizer.synthesize(
+                    task=task,
+                    subtask_results=subtask_outputs,
+                    all_sources=all_sources,
+                    critic_feedback=critic_score,
+                )
+                self._accumulate_usage(total_usage, current_draft)
+                current_draft = current_draft.output
+                refine_count = refine_round + 1
 
         # --- Step 5: Memory ---
         if self._episodic_memory is not None:
@@ -616,14 +660,12 @@ class Orchestrator:
             return
         if hasattr(result, "token_usage") and result.token_usage:
             for k, v in result.token_usage.items():
-                if isinstance(v, (int, float)):
+                if isinstance(v, (int, float)) and k != "cost_usd":
                     accumulator[k] = accumulator.get(k, 0) + int(v)
-        if hasattr(result, "cost_usd") and result.cost_usd:
-            accumulator["cost_usd"] = accumulator.get("cost_usd", 0) + result.cost_usd
         # Handle list of subtasks (from planner)
         if isinstance(result, list):
             for item in result:
                 if hasattr(item, "token_usage") and item.token_usage:
                     for k, v in item.token_usage.items():
-                        if isinstance(v, (int, float)):
+                        if isinstance(v, (int, float)) and k != "cost_usd":
                             accumulator[k] = accumulator.get(k, 0) + int(v)

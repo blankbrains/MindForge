@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useSettingsStore, type LLMProvider } from "@/store/settings-store";
-import { Save, RotateCcw, Trash2, CheckCircle2 } from "lucide-react";
+import { Save, RotateCcw, Trash2, CheckCircle2, Eye, EyeOff } from "lucide-react";
 
 type TabId = "llm" | "retrieval" | "agent";
 
@@ -32,7 +32,7 @@ export function SettingsPage() {
     s.clearLLMApiKey();
     s.setRetrievalTopK(20);
     s.setRerankTopK(6);
-    s.setMaxIterations(8);
+    s.setMaxIterations(3);
     s.setCriticThreshold(7.0);
   };
 
@@ -76,10 +76,30 @@ function LLMTab() {
   const setProvider = useSettingsStore((s) => s.setLLMProvider);
   const setApiKey = useSettingsStore((s) => s.setLLMApiKey);
   const clearKey = useSettingsStore((s) => s.clearLLMApiKey);
+  const saveSettings = useSettingsStore((s) => s.saveSettings);
   const [editing, setEditing] = useState(false);
+  const [showKey, setShowKey] = useState(false);
 
   const startEdit = () => { setApiKey(""); setEditing(true); };
-  const cancelEdit = () => { setApiKey(hasLLMKey ? "" : ""); setEditing(false); };
+  const cancelEdit = () => {
+    const s = useSettingsStore.getState();
+    // restore masked key from store (was loaded from backend)
+    const masked = s.llmApiKey || "";
+    const hasKey = s.hasLLMKey;
+    if (hasKey && masked) {
+      setApiKey(masked);
+    } else {
+      setApiKey("");
+    }
+    setEditing(false);
+  };
+
+  const handleDelete = async () => {
+    clearKey();
+    setEditing(false);
+    // immediately save empty key to backend
+    await saveSettings();
+  };
 
   return (
     <div className="rounded-xl border border-border bg-surface p-6 space-y-5" role="tabpanel">
@@ -113,20 +133,28 @@ function LLMTab() {
               className="rounded-lg border border-border px-3 py-2 text-sm hover:bg-surface-alt transition-colors">
               修改
             </button>
-            <button type="button" onClick={clearKey}
+            <button type="button" onClick={handleDelete}
               className="rounded-lg border border-red-200 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:hover:bg-red-950 transition-colors" title="删除 Key">
               <Trash2 className="h-4 w-4" />
             </button>
           </div>
         ) : (
           <div className="flex items-center gap-2">
-            <input id="llm-api-key"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-..."
-              className="flex-1 rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:outline-none"
-            />
+            <div className="relative flex-1">
+              <input id="llm-api-key"
+                type={showKey ? "text" : "password"}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-..."
+                className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 pr-10 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:outline-none"
+              />
+              <button type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-text-muted hover:text-text transition-colors"
+                title={showKey ? "隐藏 Key" : "显示 Key"}>
+                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
             {editing && (
               <button type="button" onClick={cancelEdit}
                 className="rounded-lg border border-border px-3 py-2 text-sm text-text-muted hover:bg-surface-alt transition-colors">

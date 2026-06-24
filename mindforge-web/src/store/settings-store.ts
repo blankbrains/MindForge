@@ -33,7 +33,7 @@ export const useSettingsStore = create<SettingsState>()(
       hasLLMKey: false,
       retrievalTopK: 20,
       rerankTopK: 6,
-      maxIterations: 8,
+      maxIterations: 3,
       criticThreshold: 7.0,
       loaded: false,
 

@@ -1,6 +1,6 @@
 services:
   qdrant:
-    image: docker.m.daocloud.io/qdrant/qdrant:v1.10.0
+    image: docker.m.daocloud.io/qdrant/qdrant:v1.13.5
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -16,7 +16,7 @@ services:
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6377:6379"
     volumes:
       - redis_data:/data
     command: >

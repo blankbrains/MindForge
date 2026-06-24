@@ -74,30 +74,30 @@ class CriticScore:
 # CriticAgent
 # ---------------------------------------------------------------------------
 
-_CRITIC_SYSTEM_PROMPT = """You are an expert research evaluator. Your role is to critically assess the quality of a research report.
+_CRITIC_SYSTEM_PROMPT = """你是一名专业的研究评审员。你的任务是对研究报告的质量进行批判性评估。
 
-Evaluate the report on these 5 dimensions (each scored 0-10):
+从以下 5 个维度对报告进行评分（每项 0-10 分）：
 
-1. **completeness** — Does it fully address the original task? Are all aspects covered?
-2. **accuracy** — Are the facts and claims correct and well-supported?
-3. **depth** — Does it go beyond surface-level analysis? Is there meaningful insight?
-4. **clarity** — Is the report well-structured, readable, and easy to follow?
-5. **citations** — Are claims properly cited with [N] markers? Are sources credible?
+1. **completeness（完整性）** — 是否完全回答了原始问题？所有方面都覆盖了吗？
+2. **accuracy（准确性）** — 事实和主张是否正确且有充分支撑？
+3. **depth（深度）** — 分析是否超出表面层面？是否有有意义的洞察？
+4. **clarity（清晰性）** — 报告结构是否良好、可读且易于理解？
+5. **citations（引用质量）** — 主张是否正确使用 [N] 标记进行了引用？
 
-For each dimension provide:
-- A numeric score (0-10, where 10 is perfect).
-- Specific issues or gaps you identified.
-- Actionable suggestions for improvement.
+对每个维度提供：
+- 数值评分（0-10，10 为满分）。
+- 你发现的具体问题或空白。
+- 可操作的改进建议。
 
-Finally, provide:
-- An **overall** score (0-10).
-- A boolean **should_refine** — True if overall < 7.0 or if critical issues exist.
-- A list of concrete, ordered issues.
-- A list of actionable suggestions for improvement.
+最后提供：
+- **overall** 总分（0-10）。
+- 布尔值 **should_refine**——如果总分 < 7.0 或存在严重问题则为 True。
+- 具体的、有序的问题列表。
+- 可操作的改进建议列表。
 
-Return ONLY valid JSON — no markdown, no commentary.
+**只返回合法的 JSON——不要加 markdown、代码块或注释。issues 和 suggestions 的内容必须用中文写。**
 
-Output schema:
+输出格式：
 {
   "scores": {
     "completeness": 7,
@@ -107,8 +107,8 @@ Output schema:
     "citations": 5,
     "overall": 7.0
   },
-  "issues": ["Issue 1: ...", "Issue 2: ..."],
-  "suggestions": ["Suggestion 1: ...", "Suggestion 2: ..."],
+  "issues": ["问题 1：...", "问题 2：..."],
+  "suggestions": ["建议 1：...", "建议 2：..."],
   "should_refine": true
 }"""
 
@@ -170,11 +170,11 @@ class CriticAgent(BaseAgent):
             src_text = "\n".join(src_lines)
 
         user_prompt = (
-            f"## Original Task\n\n{task}\n\n"
-            f"## Research Draft\n\n{draft}\n\n"
+            f"## 原始任务\n\n{task}\n\n"
+            f"## 研究报告草稿\n\n{draft}\n\n"
             f"{src_text}\n\n"
-            "Evaluate the draft against the original task using the 5 dimensions. "
-            "Return JSON with scores, issues, and suggestions."
+            "请使用 5 个维度对草稿进行评估。返回包含 scores、issues 和 suggestions 的 JSON。"
+            "**issues 和 suggestions 必须用中文撰写。**"
         )
 
         messages = [

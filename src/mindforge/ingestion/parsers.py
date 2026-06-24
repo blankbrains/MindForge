@@ -1,5 +1,7 @@
 """多格式文档解析器 — 支持 PDF/DOCX/HTML/MD/TXT"""
 from __future__ import annotations
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List
 from dataclasses import dataclass, field
@@ -57,12 +59,41 @@ class DocumentParser:
 
     def _parse_pdf(self, path: Path):
         import pdfplumber
+        import warnings
+        # pdfminer 对某些嵌入字体会输出 FontBBox 警告，不影响内容提取
+        warnings.filterwarnings("ignore", message=".*FontBBox.*")
+        warnings.filterwarnings("ignore", message=".*font descriptor.*")
         content_parts, sections = [], []
+
         with pdfplumber.open(str(path)) as pdf:
-            for i, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
-                content_parts.append(text)
-                sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+            total = len(pdf.pages)
+            if total <= 10:
+                # 小 PDF 直接串行
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text() or ""
+                    content_parts.append(text)
+                    sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+            else:
+                # 大 PDF 并行解析 — 线程数取 min(8, CPU 核数)
+                workers = min(8, os.cpu_count() or 4)
+                logger.info("PDF 并行解析: %d 页, %d 线程", total, workers)
+
+                def _extract_page(i: int) -> tuple[int, str]:
+                    try:
+                        return i, pdf.pages[i].extract_text() or ""
+                    except Exception:
+                        return i, ""
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    results = list(pool.map(_extract_page, range(total)))
+
+                # Sort by page index to preserve order
+                results.sort(key=lambda x: x[0])
+                for i, text in results:
+                    content_parts.append(text)
+                    sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+                logger.info("PDF 解析完成: %d 页, %d 字符", total, sum(len(t) for _, t in results))
+
         return "\n".join(content_parts), sections, {"pages": len(content_parts)}
 
     def _parse_docx(self, path: Path):

@@ -68,19 +68,31 @@ export function useResearchSession() {
         (err) => {
           clearTimeout(timeoutId);
           const msg = err.message || "";
+          // 分类错误信息，提供用户友好的中文提示
           if (err instanceof Error && "status" in err) {
             const status = (err as unknown as Record<string, unknown>).status as number;
             if (status === 401 || status === 403) {
-              store.setStatus("error", "API Key 无效或已过期，请在设置中更新。");
+              store.setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
+              return;
+            }
+            if (status >= 500) {
+              store.setStatus("error", "服务器繁忙，请稍后重试。若持续出现请检查 API Key 余额。");
               return;
             }
           }
-          if (msg.includes("401") || msg.includes("403") || msg.includes("auth")) {
-            store.setStatus("error", "API Key 无效或已过期，请在设置中更新。");
-          } else if (msg.includes("timeout") || msg.includes("abort")) {
-            store.setStatus("error", "研究超时，请尝试简化问题");
+          const lower = msg.toLowerCase();
+          if (lower.includes("401") || lower.includes("403") || lower.includes("auth")) {
+            store.setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
+          } else if (lower.includes("timeout") || lower.includes("abort")) {
+            store.setStatus("error", "研究超时，请尝试简化问题或减少问题范围。");
+          } else if (lower.includes("network") || lower.includes("fetch") || lower.includes("connect")) {
+            store.setStatus("error", "网络连接失败，请检查网络后重试。");
+          } else if (msg && msg.length < 80) {
+            // 简短的后端消息，可能是中文错误，直接展示
+            store.setStatus("error", msg);
           } else {
-            store.setStatus("error", `研究失败: ${msg}`);
+            // 长错误/未知错误，给通用提示
+            store.setStatus("error", "研究请求失败，请稍后重试。如持续出现请检查 API Key 余额。");
           }
         },
       );

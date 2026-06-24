@@ -6,7 +6,25 @@ import os
 import hashlib
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+
+# Load .env so APP_SECRET is available for API key encryption/decryption
+# even when this module is imported standalone (e.g. CLI scripts).
+# Prefer CWD (most portable), fall back to __file__-based project root.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _env_candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent.parent.parent / ".env",  # db.py → mindforge → src → MindForge
+        Path(os.getenv("MINDFORGE_ENV_FILE", "")) if os.getenv("MINDFORGE_ENV_FILE") else None,
+    ]
+    for _env in _env_candidates:
+        if _env and _env.exists():
+            _load_dotenv(str(_env), encoding="utf-8")
+            break
+except Exception:
+    pass
 
 from sqlalchemy import (
     String, Text, Float, DateTime, ForeignKey, UniqueConstraint,

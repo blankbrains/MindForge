@@ -8,6 +8,9 @@ import { PlanDAG } from "@/components/research/plan-dag";
 import { SubtaskProgressList } from "@/components/research/subtask-progress-list";
 import { CriticFeedbackPanel } from "@/components/research/critic-feedback-panel";
 import { ReportViewer } from "@/components/research/report-viewer";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Search, Loader2, XCircle, AlertTriangle, KeyRound, FileSearch } from "lucide-react";
 
@@ -68,6 +71,16 @@ export function ResearchPage() {
       {session.isStreaming && (
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
           <div className="xl:col-span-2 space-y-6">
+            {/* 流式答案：逐字渲染，在报告完成前就给用户看到内容 */}
+            {session.streamingAnswer && (
+              <div className="rounded-xl border border-border bg-surface p-6">
+                <div className="prose prose-sm dark:prose-invert max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                    {session.streamingAnswer}
+                  </ReactMarkdown>
+                </div>
+              </div>
+            )}
             <div><h4 className="mb-2 text-sm font-semibold">任务 DAG</h4><PlanDAG plan={session.plan} /></div>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <SubtaskProgressList subtasks={session.subtasks} />

@@ -1,5 +1,6 @@
 """RAPTOR 层次化索引 — 自底向上构建摘要树"""
 from __future__ import annotations
+import asyncio
 from typing import List, Optional
 from dataclasses import dataclass, field
 import hashlib
@@ -39,20 +40,24 @@ class RAPTORIndexer:
             if len(current_level) <= 3:
                 break
             clusters = self._cluster_nodes(current_level)
-            next_level = []
-            for i, cluster in enumerate(clusters):
+            # 同层所有 cluster 并行 LLM 摘要（独立无依赖）
+            async def _summarize_one(i: int, cluster: list) -> RAPTORNode:
                 summary = await self._summarize_cluster(cluster, level)
                 node = RAPTORNode(
                     node_id=f"raptor_l{level}_c{i}_{hashlib.md5(summary.encode()).hexdigest()[:8]}",
                     content=summary, summary=summary, level=level, children=cluster,
                 )
-                # 立即为摘要节点生成 embedding，保证上层聚类时可复用
                 if self.embedder:
                     try:
                         node.embedding = self.embedder.embed_single(summary[:512])
                     except Exception:
                         pass
-                next_level.append(node)
+                return node
+
+            batch = await asyncio.gather(*[
+                _summarize_one(i, cluster) for i, cluster in enumerate(clusters)
+            ])
+            next_level = list(batch)
             if not next_level:
                 break
             all_nodes.append(next_level)

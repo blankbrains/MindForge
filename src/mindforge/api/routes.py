@@ -139,9 +139,16 @@ async def index_document(body: IndexRequest):
 
     embedder = get_embedder()
     store = get_vector_store()
+    store.ensure_collection()
+
+    # Batch embed all chunks at once (GPU-friendly)
+    texts = [ch.content for ch in chunks]
+    logger.info("嵌入 %d 个文本块...", len(texts))
+    vectors = embedder.embed(texts)
+    logger.info("嵌入完成，写入 Qdrant...")
+
     points = []
-    for ch in chunks:
-        vec = embedder.embed_single(ch.content)
+    for ch, vec in zip(chunks, vectors):
         points.append(PointStruct(
             id=int(_hashlib.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63),
             vector=vec,
@@ -153,11 +160,16 @@ async def index_document(body: IndexRequest):
             },
         ))
 
-    for i in range(0, len(points), 100):
-        batch = points[i:i+100]
+    for i in range(0, len(points), 500):
+        batch = points[i:i+500]
         await store.upsert(batch)
 
-    # LLM for enrichment (shared by RAPTOR and GraphRAG)
+    # LLM for enrichment — skip for tiny docs
+    if (body.use_raptor or body.use_graphrag) and len(chunks) <= 5:
+        logger.info("Skipping RAPTOR/GraphRAG — only %d chunks.", len(chunks))
+        body.use_raptor = False
+        body.use_graphrag = False
+
     enrichment_llm = None
     if body.use_raptor or body.use_graphrag:
         try:
@@ -379,11 +391,11 @@ async def upload_document(
     safe_name = _re.sub(r'[\\/]', '_', safe_name)  # strip path separators
     safe_name = _re.sub(r'\.\.+', '', safe_name)     # strip double dots
 
-    # Size limit: 50 MB
-    MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+    # Size limit: 200 MB
+    MAX_UPLOAD_BYTES = 200 * 1024 * 1024
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File too large (max 50 MB)")
+        raise HTTPException(status_code=413, detail="文件过大（最大 200MB）")
 
     upload_dir = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "data")
     _os.makedirs(upload_dir, exist_ok=True)
@@ -398,7 +410,15 @@ async def upload_document(
         splitter = TextSplitter()
         chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
 
-        # RAPTOR / GraphRAG enrichment (same pattern as /index)
+        # RAPTOR / GraphRAG enrichment — skip for tiny docs (≤5 chunks, no value)
+        if (use_raptor or use_graphrag) and len(chunks) <= 5:
+            logger.info(
+                "Skipping RAPTOR/GraphRAG for '%s' (%d chunks) — document too short.",
+                file.filename, len(chunks),
+            )
+            use_raptor = False
+            use_graphrag = False
+
         enrichment_llm = None
         if use_raptor or use_graphrag:
             try:
@@ -460,24 +480,29 @@ async def upload_document(
         store.ensure_collection()
 
         from qdrant_client.models import PointStruct
+        import hashlib as _hl
+
+        # Batch embed all chunks at once (GPU-friendly)
+        texts = [ch.content for ch in chunks]
+        logger.info("嵌入 %d 个文本块...", len(texts))
+        vectors = embedder.embed(texts)
+        logger.info("嵌入完成，写入 Qdrant...")
+
         points = []
-        for ch in chunks:
-            vec = embedder.embed_single(ch.content)
-            # Use a stable ID based on hashlib, not Python's hash()
-            import hashlib as _hl
+        for ch, vec in zip(chunks, vectors):
             stable_id = int(_hl.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63)
             points.append(PointStruct(
                 id=stable_id,
-            vector=vec,
-            payload={
-                "chunk_id": ch.chunk_id,
-                "doc_id": parsed.doc_id,
-                "content": ch.content[:2000],
-                "source": file.filename or parsed.filename,
-            },
-        ))
-        for i in range(0, len(points), 100):
-            await store.upsert(points[i:i+100])
+                vector=vec,
+                payload={
+                    "chunk_id": ch.chunk_id,
+                    "doc_id": parsed.doc_id,
+                    "content": ch.content[:2000],
+                    "source": file.filename or parsed.filename,
+                },
+            ))
+        for i in range(0, len(points), 500):
+            await store.upsert(points[i:i+500])
 
         return IndexResponse(
             doc_id=parsed.doc_id,
@@ -602,13 +627,27 @@ def update_settings_api(body: SettingsUpdateRequest):
                     db.delete(existing)
                 _os.environ.pop(_env_key_map[provider], None)
                 env_updates[_env_key_map[provider]] = ""
-        # Update env for current session
+        # Update env for current session — LLM
         if body.llm_provider:
             _os.environ["LLM_LLM_PROVIDER"] = body.llm_provider
             env_updates["LLM_LLM_PROVIDER"] = body.llm_provider
         if body.embedding_provider:
             _os.environ["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
             env_updates["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
+        # — Retrieval config
+        if body.retrieval_top_k is not None:
+            _os.environ["RETRIEVAL_VECTOR_TOP_K"] = str(body.retrieval_top_k)
+            env_updates["RETRIEVAL_VECTOR_TOP_K"] = str(body.retrieval_top_k)
+        if body.rerank_top_k is not None:
+            _os.environ["RETRIEVAL_RERANK_TOP_K"] = str(body.rerank_top_k)
+            env_updates["RETRIEVAL_RERANK_TOP_K"] = str(body.rerank_top_k)
+        # — Agent config
+        if body.max_iterations is not None:
+            _os.environ["AGENT_MAX_ITERATIONS"] = str(body.max_iterations)
+            env_updates["AGENT_MAX_ITERATIONS"] = str(body.max_iterations)
+        if body.critic_threshold is not None:
+            _os.environ["AGENT_CRITIC_THRESHOLD"] = str(body.critic_threshold)
+            env_updates["AGENT_CRITIC_THRESHOLD"] = str(body.critic_threshold)
         # 刷新缓存的 Settings 实例
         from mindforge.config import reload_settings
         reload_settings()
@@ -633,15 +672,18 @@ def update_settings_api(body: SettingsUpdateRequest):
 # ------------------------------------------------------------------
 
 @router.get("/history")
-def list_history():
-    """Return research history entries."""
+def list_history(page: int = 1, page_size: int = 20):
+    """Return paginated research history entries."""
     from mindforge.db import SessionLocal, ResearchHistory
     db = SessionLocal()
     try:
+        offset = max(0, (page - 1)) * page_size
+        total = db.query(ResearchHistory).count()
         entries = (
             db.query(ResearchHistory)
             .order_by(ResearchHistory.created_at.desc())
-            .limit(50)
+            .offset(offset)
+            .limit(page_size)
             .all()
         )
         return {
@@ -656,7 +698,9 @@ def list_history():
                 ).model_dump()
                 for e in entries
             ],
-            "total": len(entries),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
         }
     finally:
         db.close()
@@ -779,12 +823,27 @@ def set_mcp_registry(registry: Any) -> None:
     _mcp_registry = registry
 
 
+def _serialize_event(event: dict) -> dict:
+    """Convert dataclass values in an event dict to plain dicts for JSON serialization."""
+    import dataclasses as _dc
+    serialized: dict[str, Any] = {}
+    for key, val in event.items():
+        if _dc.is_dataclass(val) and not isinstance(val, type):
+            if hasattr(val, "to_dict"):
+                serialized[key] = val.to_dict()
+            else:
+                serialized[key] = _dc.asdict(val)
+        else:
+            serialized[key] = val
+    return serialized
+
+
 async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[bytes, None]:
     """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
     try:
         async for event in orch.stream_run(task):
             try:
-                payload = json.dumps(event, ensure_ascii=False)
+                payload = json.dumps(_serialize_event(event), ensure_ascii=False)
             except TypeError:
                 payload = json.dumps({"event": "info", "content": str(event)[:200]}, ensure_ascii=False)
             yield f"data: {payload}\n\n".encode("utf-8")

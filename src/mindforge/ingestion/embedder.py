@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_FALLBACK_DIM = 384
+_FALLBACK_DIM = 1024  # must match LLMConfig.embedding_dim (BGE-M3)
 
 
 class EmbeddingManager:
@@ -32,7 +32,7 @@ class EmbeddingManager:
     dim : int, optional
         Embedding vector dimension. Inferred from the loaded model by default.
     model_name : str, optional
-        Override the model to load. Defaults to ``"all-MiniLM-L6-v2"`` for
+        Override the model to load. Defaults to ``"BAAI/bge-m3"`` for
         sentence-transformers, or ``"text-embedding-3-small"`` for OpenAI.
     provider : str, optional
         Force a specific provider: ``"sentence-transformers"``, ``"openai"``,
@@ -58,9 +58,15 @@ class EmbeddingManager:
 
     def _init_backend(self) -> None:
         """Try backends in order: sentence-transformers → OpenAI → fallback."""
-        explicit = bool(self._provider)
+        # Normalize provider aliases
+        _provider_map = {
+            "bge": "sentence-transformers",
+            "st": "sentence-transformers",
+        }
+        resolved = _provider_map.get(self._provider or "", self._provider)
+        explicit = bool(resolved)
         if explicit:
-            backends = [self._provider]
+            backends = [resolved]
         else:
             backends = ["sentence-transformers", "openai", "fallback"]
 
@@ -75,24 +81,40 @@ class EmbeddingManager:
                 if self._model is not None or self._client is not None or self._provider == "fallback":
                     return
             except Exception as exc:
-                logger.debug("Embedding backend %s unavailable: %s", backend, exc)
+                logger.warning("Embedding backend %s unavailable: %s", backend, exc)
 
-        # 显式指定 provider 时失败不应静默降级
+        # 显式指定 provider 时失败——记录警告并降级到 hash fallback
         if explicit:
-            raise RuntimeError(
-                f"Embedding provider '{self._provider}' was explicitly requested "
-                "but could not be initialised."
+            logger.warning(
+                "Embedding provider '%s' unavailable — falling back to hash-based embedding. "
+                "Install sentence-transformers or configure OpenAI API key for semantic search.",
+                self._provider,
             )
 
-        # Ultimate fallback (仅自动探测模式)
+        # Ultimate fallback
         self._init_fallback()
 
     def _init_st(self) -> None:
-        """Initialize sentence-transformers backend."""
+        """Initialize sentence-transformers backend.
+
+        Uses HuggingFace mirror (hf-mirror.com) for China access.
+        Cached models load instantly with local_files_only.
+        """
+        # Route HF requests through Chinese mirror (fast, unblocked)
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        # If mirror is also slow, set short timeout
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "10")
+
         from sentence_transformers import SentenceTransformer
 
-        model_name = self._model_name or os.getenv("EMBEDDING_ST_MODEL", "all-MiniLM-L6-v2")
-        self._model = SentenceTransformer(model_name)
+        model_name = self._model_name or os.getenv("EMBEDDING_ST_MODEL", "BAAI/bge-m3")
+
+        # Try local cache first (instant), then download from HF mirror
+        try:
+            self._model = SentenceTransformer(model_name, local_files_only=True)
+        except Exception:
+            logger.info("Model '%s' not cached — downloading from mirror...", model_name)
+            self._model = SentenceTransformer(model_name, local_files_only=False)
         if self._dim is None:
             try:
                 self._dim = self._model.get_embedding_dimension()
@@ -244,5 +266,11 @@ _embedder: Optional[EmbeddingManager] = None
 def get_embedder() -> EmbeddingManager:
     global _embedder
     if _embedder is None:
-        _embedder = EmbeddingManager()
+        from mindforge.config import get_settings
+        settings = get_settings()
+        _embedder = EmbeddingManager(
+            model_name=settings.llm.local_embedding_model or "BAAI/bge-m3",
+            provider=settings.llm.embedding_provider or None,
+            dim=settings.llm.local_embedding_dim or settings.vector_store.embedding_dim or 1024,
+        )
     return _embedder

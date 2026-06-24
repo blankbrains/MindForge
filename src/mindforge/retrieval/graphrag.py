@@ -86,22 +86,21 @@ class GraphRAGEngine:
             logger.warning("No documents provided; graph will be empty.")
             return
 
-        sem = asyncio.Semaphore(5)
-
-        async def _bounded_extract(text, doc_id):
-            async with sem:
-                return await self._extract_entities_and_relations(text, doc_id)
-
-        tasks = []
+        # Batch all chunks into a single LLM call for speed
+        texts_parts: list[str] = []
         for doc in documents:
             text = doc.get("text", "")
             doc_id = doc.get("id", "")
             if not text:
                 continue
-            tasks.append(_bounded_extract(text, doc_id))
-
-        if tasks:
-            await asyncio.gather(*tasks)
+            texts_parts.append(f"[doc:{doc_id}]\n{text[:1000]}")
+        if not texts_parts:
+            return
+        # Merge all chunks, cap total length to avoid token overflow
+        combined = "\n\n---\n\n".join(texts_parts)
+        if len(combined) > 8000:
+            combined = combined[:8000] + "\n\n[...truncated]"
+        await self._extract_entities_and_relations(combined, "batch")
 
         self._build_adjacency()
         self._discover_communities()
