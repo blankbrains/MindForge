@@ -65,7 +65,7 @@ flowchart TD
     subgraph E[🎯 Critic]
         E1[5 维度评分] --> E2{"≥ 7.0 分?"}
         E2 -- ✅ 是 --> E3[输出最终报告]
-        E2 -- 🔄 否 --> E4[返回精炼 · 最多 2 轮]
+        E2 -- 🔄 否 --> E4[返回精炼 · 最多 1 轮]
     end
     E4 -.-> D1
 ```
@@ -84,9 +84,9 @@ flowchart TD
 | 🔌 **工具协议** | MCP（Model Context Protocol）— 标准化工具接入 |
 | 🧩 **模型** | OpenAI GPT-4o / DeepSeek（deepseek-chat / deepseek-reasoner）一键切换 |
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
-| 🔤 **Embedding** | BGE-M3 (1024维) / BGE-small-zh (512维) / OpenAI / hash fallback 四级回退 |
-| 🗄️ **数据库** | PostgreSQL 16 优先 · SQLite 自动回退 · SQLAlchemy ORM |
-| ⚡ **API** | FastAPI + SSE 流式 + Pydantic v2 |
+| 🔤 **Embedding** | BGE-M3 (1024维) · 国内 hf-mirror 镜像 · hash fallback 兜底 |
+| 🗄️ **数据库** | PostgreSQL 16 · SQLAlchemy ORM |
+| ⚡ **API** | FastAPI + SSE 流式 + Pydantic v2 + streaming answer_chunk |
 | 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
 | 🐳 **部署** | Docker Compose（Qdrant + Redis + PostgreSQL）· 前端构建后 FastAPI 托管 |
 | 🔧 **一键启动** | `bash start.sh`（关旧→基础设施→依赖→前端→后端→健康检查） |
@@ -141,7 +141,7 @@ MindForge/
 │
 ├── src/mindforge/                  # Python 后端
 │   ├── config.py                   # 统一配置管理（Pydantic Settings）
-│   ├── db.py                       # 数据库层（SQLAlchemy + PostgreSQL/SQLite）
+│   ├── db.py                       # 数据库层（SQLAlchemy + PostgreSQL）
 │   ├── ingestion/                  # 文档处理流水线
 │   │   ├── parsers.py              # 多格式解析（PDF/DOCX/HTML/MD/TXT）
 │   │   ├── chunker.py              # 文本分块（递归分割 + 语义分割）
