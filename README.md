@@ -59,7 +59,7 @@ flowchart TD
     subgraph E[🎯 Critic]
         E1[5 维度评分] --> E2{"≥ 7.0 分?"}
         E2 -- ✅ 是 --> E3[输出最终报告]
-        E2 -- 🔄 否 --> E4[返回精炼 · 最多 2 轮]
+        E2 -- 🔄 否 --> E4[返回精炼 · 最多 1 轮]
     end
     E4 -.-> D1
 ```
@@ -77,8 +77,7 @@ flowchart TD
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
 | ⚡ **配置** | pydantic-settings + .env 环境变量 |
 | 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
-| 🔤 **Embedding** | BGE-M3 (1024维) / BGE-small-zh (512维) / OpenAI / hash fallback |
-| 🗄️ **数据库** | PostgreSQL 16 优先 · SQLite 回退 · SQLAlchemy ORM |
+| 🔤 **Embedding** | BGE-M3 (1024维) · 国内 hf-mirror 镜像 · hash fallback 兜底 |
 | 🐳 **部署** | Docker Compose（Qdrant + Redis + PostgreSQL） |
 
 ## 📁 项目结构
