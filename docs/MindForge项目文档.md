@@ -593,7 +593,7 @@ done             →  { type, result: AgentResult }
 
 GitHub Actions 自动运行：
 - **ruff check**：Python 代码风格检查（替代 flake8 + isort）。
-- **pytest + coverage**：74 项单元与回归测试（跳过带 `integration` 标记的外部依赖测试）。
+- **pytest + coverage**：75 项单元与回归测试（跳过带 `integration` 标记的外部依赖测试）。
 - **前端门禁**：ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -627,9 +627,10 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 静态检查 | 通过 | `python -m ruff check src tests scripts` |
-| Python 测试 | 74 项通过 | `python -m pytest tests -m "not integration"` |
+| Python 测试 | 75 项通过 | `python -m pytest tests -m "not integration"` |
 | 前端静态检查 | 通过 | `npm run lint` |
 | 前端生产构建 | 通过 | `npm run build` |
+| 前端依赖审计 | 0 个已知漏洞 | `npm audit --audit-level=moderate` |
 | 配置完整性 | 176 个 `.env.example` 键 | Pydantic、Vite、Compose 和脚本共用根目录 `.env` |
 
 尚未在仓库中固化可复现的 NDCG、召回率、BLEU/Rouge-L 或幻觉率基准，因此不把历史估算值作为当前项目结论。

@@ -18,5 +18,5 @@
 - 根目录 `.env` 是运行和部署参数的唯一配置源。
 - API 前缀为 `/api/v1`，当前包含 18 个 REST/JSON-RPC 路由。
 - 研究流支持 `answer_chunk` 增量事件，默认最多精炼 1 轮。
-- CI 执行 Ruff、74 项 pytest、前端 ESLint/构建和 Compose 配置校验。
+- CI 执行 Ruff、75 项 pytest、前端 ESLint/构建和 Compose 配置校验。
 - 生产部署使用 Docker Compose，FastAPI 单端口托管 API 与前端静态资源。

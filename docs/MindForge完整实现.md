@@ -6515,7 +6515,7 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-27 本地基线：Ruff 通过、74 项 pytest 通过、ESLint 通过、Vite 生产构建通过。
+2026-07-27 本地基线：Ruff 通过、75 项 pytest 通过、npm audit 0 漏洞、ESLint 通过、Vite 生产构建通过。
 
 ---
 ## 第十四章：前端模块（React 19 SPA）

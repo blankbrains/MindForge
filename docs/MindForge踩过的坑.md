@@ -51,6 +51,26 @@ GET /settings → "***abcd" → 前端存为 llmApiKey
 
 **修复**：添加 `reload_settings()` 函数：`get_settings.cache_clear()`。
 
+### 3.1 Docker 单文件挂载导致 `.env` 保存返回 500
+
+**现象**：容器内 `/app/.env` 可写，文件和目录 UID/GID 也与运行用户一致，但 `PUT /api/v1/settings` 仍返回 500，日志出现：
+
+```text
+OSError: [Errno 16] Device or resource busy:
+'/app/.tmp_xxx' -> '/app/.env'
+```
+
+**根因**：Compose 使用 `./.env:/app/.env` 单文件 bind mount。`python-dotenv.set_key()` 默认先写临时文件，再用 `os.replace()` 原子替换目标；Docker 不允许替换挂载点本身，因此权限检查全部通过仍会触发 `EBUSY`。
+
+**修复**：
+
+1. 在 `/app` 中创建普通暂存文件，并在暂存文件上调用 `set_key()` / `unset_key()`。
+2. 更新完成后加锁，以二进制方式原地覆盖已挂载的 `.env`，执行 `flush()` 和 `fsync()`，不替换 inode。
+3. 保持文件权限为 `0600`，异常时清理暂存文件，并沿用数据库事务回滚逻辑。
+4. 增加回归测试，模拟目标 `.env` 禁止 `os.replace()`，确认配置仍能保存且原有键不丢失。
+
+**教训**：文件“可写”不等于文件“可被替换”。遇到容器挂载点时，需要区分内容写入、重命名和 inode 替换三种文件系统语义。
+
 ---
 
 ## 二、Agent 编排系统
