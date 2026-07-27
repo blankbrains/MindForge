@@ -1,0 +1,16 @@
+.git
+.env
+*.env
+.claude
+CLAUDE.md
+mcp.json
+.mcp.json
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+data
+mindforge-web/dist
+mindforge-web/node_modules
+tests

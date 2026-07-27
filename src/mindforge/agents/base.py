@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -11,7 +12,9 @@ from typing import Any, Optional
 
 from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, LLMFactory
 from mindforge.config import get_settings
-from mindforge.tools.base import BaseTool, ToolResult
+from mindforge.tools.base import BaseTool
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +112,7 @@ class BaseAgent(ABC):
         self._temperature = temperature
         self._settings = settings
         self._model_name: str = getattr(self._llm, "_model", model or "unknown")
+        self._tracer: Any = None
 
     # -- Properties ---------------------------------------------------------
 
@@ -140,12 +144,52 @@ class BaseAgent(ABC):
 
         for attempt in range(3):
             try:
-                return await llm.chat(
-                    messages=messages,
-                    tools=tools,
-                    response_format=response_format,
-                    temperature=temp,
+                tracer = self._get_tracer()
+                if tracer is None:
+                    return await llm.chat(
+                        messages=messages,
+                        tools=tools,
+                        response_format=response_format,
+                        temperature=temp,
+                    )
+                model_name = getattr(
+                    llm,
+                    "_model",
+                    getattr(llm, "model", self._model_name),
                 )
+                with tracer.span(
+                    "llm.chat",
+                    metadata={
+                        "agent": self.name,
+                        "model": model_name,
+                        "attempt": attempt + 1,
+                    },
+                ) as span:
+                    span.input = {
+                        "messages": [
+                            {
+                                "role": message.role,
+                                "content": message.content[:4000],
+                            }
+                            for message in messages
+                        ],
+                        "tools": [
+                            tool.get("function", {}).get("name", "")
+                            for tool in (tools or [])
+                        ],
+                    }
+                    result = await llm.chat(
+                        messages=messages,
+                        tools=tools,
+                        response_format=response_format,
+                        temperature=temp,
+                    )
+                    span.output = {
+                        "content": result.content[:4000],
+                        "tool_call_count": len(result.tool_calls or []),
+                        "usage": result.usage,
+                    }
+                    return result
             except Exception as exc:
                 last_exc = exc
                 # 401/400/403 等客户端错误不重试；仅 429/5xx/超时等可恢复错误重试
@@ -159,6 +203,18 @@ class BaseAgent(ABC):
         raise RuntimeError(
             f"LLM chat failed after 3 attempts: {last_exc}"
         ) from last_exc
+
+    def _get_tracer(self) -> Any:
+        if not self._settings.observability.enable_tracing:
+            return None
+        if self._tracer is None:
+            try:
+                from mindforge.observability.tracer import get_tracer
+
+                self._tracer = get_tracer()
+            except Exception:
+                return None
+        return self._tracer
 
     # -- Tool helpers -------------------------------------------------------
 
@@ -205,15 +261,44 @@ class BaseAgent(ABC):
                 "success": False,
                 "error": str(exc),
             }
-
-        try:
-            result: ToolResult = await tool.execute_async(**args)
-        except Exception as exc:
+        if not isinstance(args, dict):
             return {
                 "tool_call_id": tc_id,
-                "output": f"Tool {tool_name} raised: {type(exc).__name__}: {exc}",
+                "output": f"Arguments for {tool_name} must be a JSON object.",
                 "success": False,
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": "Tool arguments must be an object",
+            }
+
+        started = time.perf_counter()
+        try:
+            tracer = self._get_tracer()
+            if tracer is None:
+                result = await tool.execute_async(**args)
+            else:
+                with tracer.span(
+                    "tool.execute",
+                    metadata={
+                        "agent": self.name,
+                        "tool": tool_name,
+                    },
+                ) as span:
+                    span.input = args
+                    result = await tool.execute_async(**args)
+                    span.output = {
+                        "success": result.success,
+                        "output": (result.output or "")[:4000],
+                        "error": result.error,
+                    }
+        except Exception as exc:
+            logger.exception("Tool execution failed: %s", tool_name)
+            return {
+                "tool_call_id": tc_id,
+                "output": f"Tool {tool_name} failed internally.",
+                "success": False,
+                "error": f"{type(exc).__name__}",
+                "execution_time_ms": (
+                    time.perf_counter() - started
+                ) * 1000,
             }
 
         output = result.output or (result.error or "")
@@ -226,6 +311,9 @@ class BaseAgent(ABC):
             "success": result.success,
             "error": result.error,
             "data": result.data if result.data else None,
+            "execution_time_ms": result.execution_time_ms or (
+                time.perf_counter() - started
+            ) * 1000,
         }
 
     # -- Tool-calling loop --------------------------------------------------
@@ -281,12 +369,20 @@ class BaseAgent(ABC):
         aggregated_usage: dict[str, int] = {}
         final_content = ""
         tool_calls_made = 0
+        tool_calls_rejected = 0
         collected_sources: list[dict[str, Any]] = []  # aggregate source metadata from tool calls
+        tool_call_details: list[dict[str, Any]] = []
 
         for round_idx in range(max_rounds):
             result = await self._chat(
                 conv,
-                tools=tool_schemas if use_tools else None,
+                tools=(
+                    tool_schemas
+                    if use_tools
+                    and tool_calls_made
+                    < self._settings.agent.max_tool_calls_total
+                    else None
+                ),
                 _llm_override=_llm_override,
             )
 
@@ -303,7 +399,20 @@ class BaseAgent(ABC):
                 break
 
             # --- Has tool calls → execute in parallel ---
-            tool_calls_made += len(result.tool_calls)
+            remaining = max(
+                0,
+                self._settings.agent.max_tool_calls_total
+                - tool_calls_made,
+            )
+            allowed_count = min(
+                len(result.tool_calls),
+                self._settings.agent.max_tool_calls_per_round,
+                remaining,
+            )
+            selected_calls = result.tool_calls[:allowed_count]
+            rejected_calls = result.tool_calls[allowed_count:]
+            tool_calls_made += len(selected_calls)
+            tool_calls_rejected += len(rejected_calls)
 
             # 1. Add assistant message with tool_calls to conversation
             assistant_content = result.content or ""
@@ -317,8 +426,20 @@ class BaseAgent(ABC):
 
             # 2. Execute all tools concurrently
             tool_results = await asyncio.gather(
-                *[self._execute_tool(tc) for tc in result.tool_calls],
+                *[self._execute_tool(tc) for tc in selected_calls],
                 return_exceptions=True,
+            )
+            tool_results.extend(
+                {
+                    "tool_call_id": tc.get("id", ""),
+                    "output": (
+                        "Tool call rejected because the configured per-round "
+                        "or total tool-call limit was reached."
+                    ),
+                    "success": False,
+                    "error": "Tool-call limit reached",
+                }
+                for tc in rejected_calls
             )
 
             # 3. Feed tool results back (pair with original tool_call for id)
@@ -346,6 +467,16 @@ class BaseAgent(ABC):
                         for src in tool_data["sources"]:
                             if isinstance(src, dict):
                                 collected_sources.append(src)
+                    tool_call_details.append(
+                        {
+                            "tool": tc.get("function", {}).get("name", ""),
+                            "success": exec_result.get("success", False),
+                            "latency_ms": exec_result.get(
+                                "execution_time_ms",
+                                0.0,
+                            ),
+                        }
+                    )
 
         # --- Determine final output ---
         # If we exited because of max rounds, force one final non-tool call
@@ -386,11 +517,13 @@ class BaseAgent(ABC):
             data={
                 "rounds": min(round_idx + 1, max_rounds),
                 "tool_calls": tool_calls_made,
+                "tool_calls_rejected": tool_calls_rejected,
                 "messages": len(conv),
                 "sources": collected_sources,
+                "tool_call_details": tool_call_details,
             },
             metadata={
-                "model": self._model_name,
+                "model": model_used,
             },
             token_usage=aggregated_usage,
             latency_ms=elapsed_ms,

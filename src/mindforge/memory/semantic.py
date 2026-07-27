@@ -13,17 +13,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Directory where semantic memory files are stored (relative to user home / project)
+# Directory where semantic memory files are stored within the configured base.
 STORAGE_DIR = ".semantic_memory"
 
 # Categories recognised by the semantic memory store
 VALID_CATEGORIES = frozenset(
     {"code", "api", "concept", "workflow", "preference", "general"}
 )
-
-# Maximum age (seconds) before a fact is considered stale for confidence decay
-STALE_AFTER = 90 * 86400  # 90 days
-
 
 @dataclass
 class Fact:
@@ -56,8 +52,16 @@ class SemanticMemory:
     """
 
     def __init__(self, storage_dir: str | Path | None = None) -> None:
+        from mindforge.config import get_settings
+
+        config = get_settings().memory
         self._base = Path(storage_dir or Path.cwd())
         self._store_path = self._base / STORAGE_DIR
+        self._max_facts = config.max_semantic_facts
+        self._max_patterns = config.max_semantic_patterns
+        self._max_fact_chars = config.max_semantic_fact_chars
+        self._retention_seconds = config.semantic_retention_days * 86400
+        self._max_file_bytes = config.semantic_max_file_bytes
 
         self._facts: dict[str, Fact] = {}
         self._patterns: list[QueryPattern] = []
@@ -81,6 +85,8 @@ class SemanticMemory:
         Returns the fact_id.
         """
         import hashlib as _hashlib
+        content = content[: self._max_fact_chars]
+        sources = [str(source)[:1000] for source in sources[:100]]
         fact_id = _hashlib.sha256(content.encode()).hexdigest()[:16]
 
         if fact_id in self._facts:
@@ -101,6 +107,7 @@ class SemanticMemory:
             category=category,
         )
         self._facts[fact_id] = fact
+        self._prune()
         self._save()
         return fact_id
 
@@ -119,6 +126,7 @@ class SemanticMemory:
             quality_score=quality_score,
         )
         self._patterns.append(pattern)
+        self._prune()
         self._save()
 
     def get_strategy_stats(self) -> dict[str, dict[str, Any]]:
@@ -180,6 +188,7 @@ class SemanticMemory:
         Matches against the ``content`` field of stored facts. Results are
         ranked by a combination of keyword overlap and confidence.
         """
+        top_k = min(max(1, top_k), 50)
         query_words = set(query.lower().split())
         scored: list[tuple[Fact, float]] = []
 
@@ -213,6 +222,7 @@ class SemanticMemory:
         """
         import uuid as _uuid
         try:
+            self._prune()
             facts_data = {
                 fid: {
                     "fact_id": f.fact_id, "content": f.content,
@@ -240,14 +250,20 @@ class SemanticMemory:
     def _load(self) -> None:
         """Load facts and patterns from disk JSON files."""
         facts_file = self._store_path / "facts.json"
-        if facts_file.exists():
+        if (
+            facts_file.exists()
+            and facts_file.stat().st_size <= self._max_file_bytes
+        ):
             try:
                 data = json.loads(facts_file.read_text(encoding="utf-8"))
                 for fid, d in data.items():
                     self._facts[fid] = Fact(
                         fact_id=d["fact_id"],
-                        content=d["content"],
-                        sources=d.get("sources", []),
+                        content=str(d["content"])[: self._max_fact_chars],
+                        sources=[
+                            str(source)[:1000]
+                            for source in d.get("sources", [])[:100]
+                        ],
                         confidence=d.get("confidence", 0.5),
                         timestamp=d.get("timestamp", 0.0),
                         category=d.get("category", "general"),
@@ -256,7 +272,10 @@ class SemanticMemory:
                 logger.exception("Failed to load facts from %s", facts_file)
 
         patterns_file = self._store_path / "patterns.json"
-        if patterns_file.exists():
+        if (
+            patterns_file.exists()
+            and patterns_file.stat().st_size <= self._max_file_bytes
+        ):
             try:
                 data = json.loads(patterns_file.read_text(encoding="utf-8"))
                 for d in data:
@@ -271,10 +290,31 @@ class SemanticMemory:
                     )
             except Exception:
                 logger.exception("Failed to load patterns from %s", patterns_file)
+        self._prune()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _prune(self) -> None:
+        cutoff = time.time() - self._retention_seconds
+        self._facts = {
+            fact_id: fact
+            for fact_id, fact in self._facts.items()
+            if fact.timestamp >= cutoff
+        }
+        if len(self._facts) > self._max_facts:
+            newest = sorted(
+                self._facts.values(),
+                key=lambda fact: fact.timestamp,
+                reverse=True,
+            )[: self._max_facts]
+            self._facts = {fact.fact_id: fact for fact in newest}
+        self._patterns = [
+            pattern
+            for pattern in self._patterns
+            if pattern.timestamp >= cutoff
+        ][-self._max_patterns :]
 
     @staticmethod
     def _infer_category(content: str) -> str:

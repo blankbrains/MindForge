@@ -1,18 +1,34 @@
-import { useCallback, useRef } from "react";
+import { lazy, Suspense, useCallback, useRef } from "react";
 import { useResearchSession } from "@/hooks/use-research-session";
 import { useResearchStore } from "@/store/research-store";
 import { useSettingsStore } from "@/store/settings-store";
 import { Link } from "@tanstack/react-router";
 import { QueryInput } from "@/components/research/query-input";
-import { PlanDAG } from "@/components/research/plan-dag";
 import { SubtaskProgressList } from "@/components/research/subtask-progress-list";
-import { CriticFeedbackPanel } from "@/components/research/critic-feedback-panel";
-import { ReportViewer } from "@/components/research/report-viewer";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { EmptyState } from "@/components/shared/empty-state";
+import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
 import { Search, Loader2, XCircle, AlertTriangle, KeyRound, FileSearch } from "lucide-react";
+
+const PlanDAG = lazy(() =>
+  import("@/components/research/plan-dag").then((module) => ({
+    default: module.PlanDAG,
+  })),
+);
+const CriticFeedbackPanel = lazy(() =>
+  import("@/components/research/critic-feedback-panel").then(
+    (module) => ({ default: module.CriticFeedbackPanel }),
+  ),
+);
+const ReportViewer = lazy(() =>
+  import("@/components/research/report-viewer").then((module) => ({
+    default: module.ReportViewer,
+  })),
+);
+const StreamingMarkdown = lazy(() =>
+  import("@/components/research/streaming-markdown").then(
+    (module) => ({ default: module.StreamingMarkdown }),
+  ),
+);
 
 export function ResearchPage() {
   const session = useResearchSession();
@@ -74,17 +90,22 @@ export function ResearchPage() {
             {/* 流式答案：逐字渲染，在报告完成前就给用户看到内容 */}
             {session.streamingAnswer && (
               <div className="rounded-xl border border-border bg-surface p-6">
-                <div className="prose prose-sm dark:prose-invert max-w-none">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                    {session.streamingAnswer}
-                  </ReactMarkdown>
-                </div>
+                <Suspense fallback={<LoadingSkeleton variant="text" count={4} />}>
+                  <StreamingMarkdown content={session.streamingAnswer} />
+                </Suspense>
               </div>
             )}
-            <div><h4 className="mb-2 text-sm font-semibold">任务 DAG</h4><PlanDAG plan={session.plan} /></div>
+            <div>
+              <h4 className="mb-2 text-sm font-semibold">任务 DAG</h4>
+              <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
+                <PlanDAG plan={session.plan} />
+              </Suspense>
+            </div>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <SubtaskProgressList subtasks={session.subtasks} />
-              <CriticFeedbackPanel score={session.criticScore} />
+              <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
+                <CriticFeedbackPanel score={session.criticScore} />
+              </Suspense>
             </div>
             {session.refineRound > 0 && (
               <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
@@ -103,7 +124,9 @@ export function ResearchPage() {
       )}
 
       {session.isCompleted && session.finalResult && (
-        <ReportViewer result={session.finalResult} />
+        <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
+          <ReportViewer result={session.finalResult} />
+        </Suspense>
       )}
     </div>
   );

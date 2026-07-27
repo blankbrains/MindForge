@@ -27,12 +27,19 @@ class RAPTORIndexer:
         cfg = get_settings().raptor
         self.num_levels = cfg.raptor_levels
         self.threshold = cfg.raptor_threshold
+        self.max_nodes = cfg.max_nodes
+        self.summary_concurrency = cfg.summary_concurrency
         self.embedder = embedder
         self.llm = llm  # 应为 BaseLLM 实例或兼容的 async callable
 
     async def build_tree(self, chunks: List[DocumentChunk]) -> List[RAPTORNode]:
         if not chunks:
             return []
+        if len(chunks) > self.max_nodes:
+            raise ValueError(
+                f"RAPTOR input exceeds the configured {self.max_nodes}-node "
+                "limit."
+            )
         leaves = [RAPTORNode(node_id=ch.chunk_id, content=ch.content, level=0, embedding=ch.embedding) for ch in chunks]
         all_nodes = [leaves]
         current_level = leaves
@@ -40,9 +47,11 @@ class RAPTORIndexer:
             if len(current_level) <= 3:
                 break
             clusters = self._cluster_nodes(current_level)
+            semaphore = asyncio.Semaphore(self.summary_concurrency)
             # 同层所有 cluster 并行 LLM 摘要（独立无依赖）
             async def _summarize_one(i: int, cluster: list) -> RAPTORNode:
-                summary = await self._summarize_cluster(cluster, level)
+                async with semaphore:
+                    summary = await self._summarize_cluster(cluster, level)
                 node = RAPTORNode(
                     node_id=f"raptor_l{level}_c{i}_{hashlib.md5(summary.encode()).hexdigest()[:8]}",
                     content=summary, summary=summary, level=level, children=cluster,
@@ -58,6 +67,10 @@ class RAPTORIndexer:
                 _summarize_one(i, cluster) for i, cluster in enumerate(clusters)
             ])
             next_level = list(batch)
+            if sum(len(nodes) for nodes in all_nodes) + len(next_level) > self.max_nodes:
+                raise ValueError(
+                    "RAPTOR tree exceeds the configured node limit."
+                )
             if not next_level:
                 break
             all_nodes.append(next_level)

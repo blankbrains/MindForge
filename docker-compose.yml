@@ -1,48 +1,98 @@
 services:
   qdrant:
-    image: docker.m.daocloud.io/qdrant/qdrant:v1.13.5
+    image: ${QDRANT_IMAGE}
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${DOCKER_INFRA_BIND_ADDRESS}:${QDRANT_HTTP_PORT}:6333"
+      - "${DOCKER_INFRA_BIND_ADDRESS}:${QDRANT_GRPC_PORT}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333; echo -e \"GET /readyz HTTP/1.0\r\n\r\n\" >&3; grep -q ready <&3'"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
 
   redis:
-    image: docker.m.daocloud.io/library/redis:7-alpine
+    image: ${REDIS_IMAGE}
     ports:
-      - "6377:6379"
+      - "${DOCKER_INFRA_BIND_ADDRESS}:${REDIS_PORT}:6379"
     volumes:
       - redis_data:/data
-    command: >
-      redis-server --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - "${REDIS_MAXMEMORY}"
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   postgres:
-    image: docker.m.daocloud.io/library/postgres:16-alpine
+    image: ${POSTGRES_IMAGE}
     ports:
-      - "5432:5432"
+      - "${DOCKER_INFRA_BIND_ADDRESS}:${POSTGRES_PORT}:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-mindforge}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindforge}
-      POSTGRES_DB: ${POSTGRES_DB:-mindforge}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "mindforge"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
+
+  mindforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_UID: ${APP_UID}
+        APP_GID: ${APP_GID}
+        VITE_API_TIMEOUT_MS: ${VITE_API_TIMEOUT_MS}
+        VITE_RESEARCH_TIMEOUT_MS: ${VITE_RESEARCH_TIMEOUT_MS}
+    env_file:
+      - .env
+    environment:
+      API_HOST: ${CONTAINER_API_HOST}
+      API_PORT: ${CONTAINER_API_PORT}
+      MINDFORGE_PROJECT_ROOT: /app
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${CONTAINER_POSTGRES_HOST}:${CONTAINER_POSTGRES_PORT}/${POSTGRES_DB}
+      VECTOR_QDRANT_URL: http://${CONTAINER_QDRANT_HOST}:${CONTAINER_QDRANT_HTTP_PORT}
+      CACHE_REDIS_URL: redis://${CONTAINER_REDIS_HOST}:${CONTAINER_REDIS_PORT}
+      MINDFORGE_DATA_DIR: ${CONTAINER_DATA_DIR}
+      MINDFORGE_TRACES_DIR: ${CONTAINER_TRACES_DIR}
+      MINDFORGE_SEMANTIC_MEMORY_DIR: ${CONTAINER_SEMANTIC_MEMORY_DIR}
+      RETRIEVAL_BM25_INDEX_DIR: ${CONTAINER_BM25_INDEX_DIR}
+      GRAPH_GRAPH_STORE_PATH: ${CONTAINER_GRAPH_STORE_PATH}
+    ports:
+      - "${DOCKER_API_BIND_ADDRESS}:${API_PORT}:${CONTAINER_API_PORT}"
+    volumes:
+      - ./.env:/app/.env
+      - mindforge_data:/app/data
+      - model_cache:/home/appuser/.cache
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   qdrant_data:
+    name: ${QDRANT_VOLUME_NAME}
   redis_data:
   postgres_data:
+  mindforge_data:
+  model_cache:

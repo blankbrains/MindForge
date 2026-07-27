@@ -9,28 +9,62 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
-# 加载 .env 文件 — 优先从 CWD 查找，兜底从项目根目录（__file__ 推导）查找
-# 这样无论从哪个目录启动、部署在哪台服务器上都能正确加载
-_candidates: list[Path] = []
-# 1) 当前工作目录（最常见：从项目根目录启动）
-_candidates.append(Path.cwd() / ".env")
-# 2) 项目根目录（从 src/ 启动时通过 __file__ 推导）
-_candidates.append(Path(__file__).resolve().parent.parent.parent / ".env")
-# 3) 环境变量显式指定
-_env_override = os.getenv("MINDFORGE_ENV_FILE")
-if _env_override:
-    _candidates.insert(0, Path(_env_override))
+def _resolve_project_root() -> Path:
+    explicit = os.getenv("MINDFORGE_PROJECT_ROOT", "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        return (
+            path.resolve()
+            if path.is_absolute()
+            else (Path.cwd() / path).resolve()
+        )
 
+    cwd = Path.cwd().resolve()
+    if (
+        (cwd / "pyproject.toml").is_file()
+        and (cwd / "src" / "mindforge").is_dir()
+    ):
+        return cwd
+
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "pyproject.toml").is_file():
+        return source_root
+    return cwd
+
+
+_PROJECT_ROOT = _resolve_project_root()
+_env_override = os.getenv("MINDFORGE_ENV_FILE", "").strip()
+_env_path = (
+    Path(_env_override).expanduser().resolve()
+    if _env_override
+    else _PROJECT_ROOT / ".env"
+)
 _dotenv_loaded = False
-for _env_path in _candidates:
-    if _env_path.exists():
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(str(_env_path), encoding="utf-8")
-            _dotenv_loaded = True
-            break
-        except Exception:
-            pass
+if _env_path.is_file():
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(str(_env_path), encoding="utf-8")
+        _dotenv_loaded = True
+    except Exception:
+        pass
+
+
+def get_project_root() -> Path:
+    """Return the verified runtime project root."""
+    return _PROJECT_ROOT
+
+
+def resolve_project_path(
+    value: str | Path,
+    *,
+    root: Path | None = None,
+) -> Path:
+    """Resolve an absolute or project-relative runtime path."""
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return ((root or _PROJECT_ROOT) / path).resolve()
 
 class LLMConfig(BaseSettings):
     """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
@@ -52,7 +86,15 @@ class LLMConfig(BaseSettings):
     deepseek_embedding: str = "BAAI/bge-m3"
     embedding_dim: int = 1024
     local_embedding_model: str = "BAAI/bge-m3"
+    local_embedding_revision: str = Field(
+        default="5617a9f61b028005a4858fdac845db406aefb181",
+        pattern=r"^[0-9a-fA-F]{40}$",
+        description="Immutable Hugging Face commit SHA for local embeddings.",
+    )
     local_embedding_dim: int = 1024
+    sentence_transformers_device: str = "cpu"
+    hf_endpoint: str = "https://hf-mirror.com"
+    hf_hub_download_timeout: int = Field(default=30, ge=1)
 
     def get_model(self, role: str) -> str:
         if self.llm_provider == "deepseek":
@@ -69,10 +111,44 @@ class LLMConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 
 
+class AppConfig(BaseSettings):
+    data_dir: str = Field(default="data")
+    traces_dir: Optional[str] = Field(default=None)
+    semantic_memory_dir: str = Field(default="data/semantic-memory")
+    log_level: str = Field(default="INFO")
+    model_config = SettingsConfigDict(env_prefix="MINDFORGE_", extra="ignore")
+
+
+class APIConfig(BaseSettings):
+    host: str = Field(default="127.0.0.1")
+    port: int = Field(default=8000, ge=1, le=65535)
+    cors_origins: str = Field(default="http://localhost:5173")
+    max_upload_mb: int = Field(default=200, ge=1, le=2048)
+    max_text_file_mb: int = Field(default=20, ge=1, le=512)
+    max_parsed_chars: int = Field(default=5_000_000, ge=10_000)
+    max_pdf_pages: int = Field(default=500, ge=1, le=10_000)
+    max_docx_uncompressed_mb: int = Field(default=100, ge=1, le=2048)
+    max_docx_parts: int = Field(default=5000, ge=10, le=100_000)
+    max_chunks_per_document: int = Field(default=2000, ge=1, le=100_000)
+    index_batch_size: int = Field(default=128, ge=1, le=1000)
+    max_history_entries: int = Field(default=1000, ge=1, le=100_000)
+    allow_local_file_index: bool = Field(default=False)
+    model_config = SettingsConfigDict(env_prefix="API_", extra="ignore")
+
+    def get_cors_origins(self) -> list[str]:
+        values = [
+            origin.strip()
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
+        return values or ["http://localhost:5173"]
+
+
 class VectorStoreConfig(BaseSettings):
     qdrant_url: str = Field(default="http://localhost:6333")
     qdrant_api_key: Optional[str] = Field(default=None)
     collection_name: str = Field(default="mindforge_docs")
+    max_scroll_records: int = Field(default=100_000, ge=100, le=10_000_000)
     embedding_dim: int = Field(
         default=1536,
         description="Must match the embedding model dimension. "
@@ -85,6 +161,22 @@ class RetrievalConfig(BaseSettings):
     vector_top_k: int = Field(default=20)
     bm25_top_k: int = Field(default=20)
     rerank_top_k: int = Field(default=6)
+    max_request_top_k: int = Field(default=50, ge=1, le=500)
+    reranker_max_candidates: int = Field(default=100, ge=1, le=1000)
+    bm25_max_chunks: int = Field(default=100_000, ge=100)
+    reranker_model: Optional[str] = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        description="CrossEncoder model name. Set to an empty value to disable.",
+    )
+    reranker_model_revision: str = Field(
+        default="953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+        pattern=r"^[0-9a-fA-F]{40}$",
+        description="Immutable Hugging Face revision for the reranker model.",
+    )
+    bm25_index_dir: Optional[str] = Field(
+        default=None,
+        description="Persistent BM25 corpus directory.",
+    )
     min_score: float = Field(default=0.35, ge=0.0, le=1.0)
     model_config = SettingsConfigDict(env_prefix="RETRIEVAL_", extra="ignore")
 
@@ -100,6 +192,8 @@ class RAPTORConfig(BaseSettings):
     raptor_levels: int = Field(default=3, ge=1, le=5)
     raptor_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     summary_model: str = Field(default="gpt-4o-mini")
+    max_nodes: int = Field(default=2000, ge=10, le=100_000)
+    summary_concurrency: int = Field(default=4, ge=1, le=32)
     model_config = SettingsConfigDict(env_prefix="RAPTOR_", extra="ignore")
 
 
@@ -110,6 +204,13 @@ class GraphRAGConfig(BaseSettings):
     max_entities_per_doc: int = Field(default=20)
     min_community_size: int = Field(default=3)
     graph_embedding_dim: int = Field(default=1536)
+    graph_store_path: Optional[str] = Field(
+        default=None,
+        description="Persistent GraphRAG JSON file path.",
+    )
+    max_total_entities: int = Field(default=10_000, ge=100)
+    max_communities: int = Field(default=500, ge=1)
+    summary_concurrency: int = Field(default=4, ge=1, le=32)
     model_config = SettingsConfigDict(env_prefix="GRAPH_", extra="ignore")
 
 
@@ -127,16 +228,47 @@ class AgentConfig(BaseSettings):
         default=180, ge=30,
         description="研究全流程超时（秒）。Set via AGENT_RESEARCH_TIMEOUT env var."
     )
+    max_subtasks: int = Field(default=5, ge=1, le=20)
+    max_tool_calls_per_round: int = Field(default=4, ge=1, le=20)
+    max_tool_calls_total: int = Field(default=12, ge=1, le=100)
+    stream_chunk_size: int = Field(default=512, ge=64, le=8192)
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
 
 class MCPConfig(BaseSettings):
     mcp_config_path: str = Field(
-        default=os.path.expanduser("~/.claude/mcp.json"),
+        default="",
+        description=(
+            "Optional legacy JSON config path. Prefer MCP_MCP_SERVERS_JSON "
+            "in the project-root .env."
+        ),
     )
+    mcp_servers_json: str = Field(default="")
     mcp_auto_discover: bool = Field(default=True)
     mcp_tool_timeout: int = Field(default=30, ge=5)
+    mcp_max_response_bytes: int = Field(
+        default=1024 * 1024,
+        ge=64 * 1024,
+        le=100 * 1024 * 1024,
+    )
+    agent_tools_enabled: bool = Field(default=False)
+    agent_allowed_tools: str = Field(default="")
+    agent_allowed_servers: str = Field(default="")
     model_config = SettingsConfigDict(env_prefix="MCP_", extra="ignore")
+
+    def allowed_agent_tools(self) -> set[str]:
+        return {
+            value.strip()
+            for value in self.agent_allowed_tools.split(",")
+            if value.strip()
+        }
+
+    def allowed_agent_servers(self) -> set[str]:
+        return {
+            value.strip()
+            for value in self.agent_allowed_servers.split(",")
+            if value.strip()
+        }
 
 
 class CacheConfig(BaseSettings):
@@ -146,17 +278,46 @@ class CacheConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CACHE_", extra="ignore")
 
 
+class MemoryConfig(BaseSettings):
+    working_capacity_tokens: int = Field(default=8000, ge=1000)
+    chars_per_token: int = Field(default=4, ge=1)
+    max_episodes: int = Field(default=200, ge=1)
+    episodic_ttl_seconds: int = Field(default=2592000, ge=60)
+    max_episode_chars: int = Field(default=100_000, ge=1000)
+    max_semantic_facts: int = Field(default=500, ge=1)
+    max_semantic_patterns: int = Field(default=1000, ge=1)
+    max_semantic_fact_chars: int = Field(default=50_000, ge=1000)
+    semantic_retention_days: int = Field(default=30, ge=1, le=3650)
+    semantic_max_file_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        ge=1024 * 1024,
+    )
+    model_config = SettingsConfigDict(env_prefix="MEMORY_", extra="ignore")
+
+
 class ObservabilityConfig(BaseSettings):
     langfuse_public_key: Optional[str] = Field(default=None)
     langfuse_secret_key: Optional[str] = Field(default=None)
     langfuse_host: str = Field(default="https://cloud.langfuse.com")
     enable_tracing: bool = Field(default=True)
+    capture_content: bool = Field(default=False)
+    max_record_chars: int = Field(default=20_000, ge=1000, le=1_000_000)
+    max_trace_file_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=64 * 1024,
+        le=1024 * 1024 * 1024,
+    )
+    trace_retention_days: int = Field(default=7, ge=1, le=3650)
     model_config = SettingsConfigDict(env_prefix="OBSERVABILITY_", extra="ignore")
 
 
 class SandboxConfig(BaseSettings):
     sandbox_timeout: int = Field(default=15, ge=5, le=60)
+    temp_dir: str = Field(default="data/sandbox-tmp")
     max_output_length: int = Field(default=5000)
+    max_code_length: int = Field(default=50_000, ge=100, le=1_000_000)
+    max_vars_bytes: int = Field(default=100_000, ge=1024, le=10_000_000)
+    memory_mb: int = Field(default=512, ge=64, le=4096)
     allowed_modules: list[str] = Field(default=[
         "numpy", "pandas", "scipy", "sklearn",
         "math", "json", "collections", "itertools",
@@ -165,7 +326,22 @@ class SandboxConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SANDBOX_", extra="ignore")
 
 
+class QAGenerationConfig(BaseSettings):
+    output_dir: str = Field(default="data/qa")
+    model: str = Field(default="deepseek-chat")
+    batch_size: int = Field(default=15, ge=1, le=100)
+    concurrency: int = Field(default=3, ge=1, le=32)
+    client_max_retries: int = Field(default=5, ge=0, le=20)
+    request_attempts: int = Field(default=3, ge=1, le=10)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    retry_base_seconds: float = Field(default=3.0, ge=0.1, le=60.0)
+    model_config = SettingsConfigDict(env_prefix="QA_", extra="ignore")
+
+
 class Settings(BaseSettings):
+    app: AppConfig = Field(default_factory=AppConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
@@ -175,8 +351,12 @@ class Settings(BaseSettings):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    qa_generation: QAGenerationConfig = Field(
+        default_factory=QAGenerationConfig
+    )
 
     model_config = SettingsConfigDict(extra="ignore")
 

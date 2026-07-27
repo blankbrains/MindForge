@@ -4,15 +4,17 @@ import type { DocumentItem } from "@/types/document";
 
 /** 将后端原始错误转为用户友好的中文提示 */
 function friendlyError(status: number, raw: string): string {
-  if (status === 413) return "文件过大，请压缩后重试（最大支持 200MB）";
-  if (status === 400) return "文件格式不支持，请上传 PDF、DOCX、TXT 或 Markdown 文件";
-  if (status === 422) return "上传参数有误，请刷新页面后重试";
   if (status >= 500) return "服务器繁忙，请稍后重试";
-  // 尝试从原始响应中提取有意义的信息
+  // Prefer the server's validated detail, including the configured size limit.
   try {
     const parsed = JSON.parse(raw);
     if (parsed.detail) return String(parsed.detail);
-  } catch {}
+  } catch {
+    // Non-JSON error responses are handled by the raw-text fallback below.
+  }
+  if (status === 413) return "文件过大，请压缩后重试";
+  if (status === 400) return "文件格式不支持，请上传 PDF、DOCX、TXT、HTML 或 Markdown 文件";
+  if (status === 422) return "上传参数有误，请刷新页面后重试";
   if (raw && raw.length < 100) return raw;
   return "上传失败，请检查网络连接后重试";
 }

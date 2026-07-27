@@ -2,6 +2,17 @@ import { createParser, type EventSourceMessage } from "eventsource-parser";
 
 export type SSECallback<T> = (event: T) => void;
 
+function positiveEnvInt(name: string, fallback: number): number {
+  const value = Number.parseInt(import.meta.env[name] || "", 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const MAX_SSE_BYTES = positiveEnvInt("VITE_MAX_SSE_BYTES", 5 * 1024 * 1024);
+const MAX_SSE_EVENT_CHARS = positiveEnvInt(
+  "VITE_MAX_SSE_EVENT_CHARS",
+  2_000_000,
+);
+
 export function createSSEConnection<T>(
   url: string,
   body: unknown,
@@ -34,9 +45,15 @@ export function createSSEConnection<T>(
 
       reader = response.body.getReader();
       const decoder = new TextDecoder();
+      let receivedBytes = 0;
 
       const parser = createParser({
         onEvent: (event: EventSourceMessage) => {
+          if (event.data.length > MAX_SSE_EVENT_CHARS) {
+            controller.abort();
+            onError(new Error("SSE event exceeded the configured size limit"));
+            return;
+          }
           // 兼容尾部空白：trim 后比较
           if (!event.data || event.data.trim() === "[DONE]") {
             if (!completed) { completed = true; onComplete(); }
@@ -57,6 +74,10 @@ export function createSSEConnection<T>(
         if (done) {
           if (!completed) { completed = true; onComplete(); }
           break;
+        }
+        receivedBytes += value.byteLength;
+        if (receivedBytes > MAX_SSE_BYTES) {
+          throw new Error("SSE response exceeded the configured size limit");
         }
         parser.feed(decoder.decode(value, { stream: !done }));
       }

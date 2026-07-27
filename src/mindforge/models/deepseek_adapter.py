@@ -7,7 +7,6 @@ DeepSeek 不提供原生 Embedding API，因此使用本地 sentence-transformer
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
 import asyncio
-import os
 
 import openai
 
@@ -27,10 +26,12 @@ def _get_embedder():
             if _EMBEDDER is None:  # double-check
                 from mindforge.config import get_settings
                 from sentence_transformers import SentenceTransformer
-                model_name = get_settings().llm.local_embedding_model or "BAAI/bge-m3"
+                settings = get_settings().llm
+                model_name = settings.local_embedding_model or "BAAI/bge-m3"
                 _EMBEDDER = SentenceTransformer(
                     model_name,
-                    device=os.getenv("SENTENCE_TRANSFORMERS_DEVICE", "cpu"),
+                    device=settings.sentence_transformers_device,
+                    revision=settings.local_embedding_revision,
                 )
     return _EMBEDDER
 
@@ -50,11 +51,11 @@ class DeepSeekAdapter(BaseLLM):
     def __init__(self, model: str = "deepseek-chat", api_key: Optional[str] = None,
                  base_url: str = DEEPSEEK_BASE_URL, max_retries: int = 3, **kwargs):
         self.model = model
-        key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        key = api_key or ""
         if not key or not key.strip():
             raise ValueError(
                 "DeepSeek API key is not configured. "
-                "Set DEEPSEEK_API_KEY env var or pass api_key parameter."
+                "Set LLM_DEEPSEEK_API_KEY in .env or pass api_key."
             )
         self.client = openai.AsyncOpenAI(
             api_key=key,

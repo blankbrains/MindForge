@@ -3,10 +3,20 @@
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+def safe_terminal_text(value: object, limit: int) -> str:
+    text = re.sub(
+        r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]",
+        "",
+        str(value),
+    )
+    return text[:limit]
 
 
 async def main():
@@ -17,18 +27,28 @@ async def main():
 
     # Step 1: Load MCP configuration
     print("\n[1/5] 加载 MCP 配置...")
-    mcp_config_path = Path(__file__).parent.parent / "mcp.json"
-    if not mcp_config_path.exists():
-        print(f"   ❌ 未找到 MCP 配置文件: {mcp_config_path}")
+    from mindforge.config import get_settings
+
+    settings = get_settings()
+    config_json = settings.mcp.mcp_servers_json.strip()
+    if not config_json:
+        print("   未在根目录 .env 的 MCP_MCP_SERVERS_JSON 中配置 MCP Server")
         return
 
-    with open(mcp_config_path) as f:
-        config = json.load(f)
+    try:
+        config = json.loads(config_json)
+    except json.JSONDecodeError as exc:
+        print(f"   MCP_MCP_SERVERS_JSON 格式错误: {exc}")
+        return
 
     servers = config.get("mcpServers", {})
     print(f"   发现 {len(servers)} 个 MCP 服务器配置:")
     for name, cfg in servers.items():
-        print(f"      - {name}: {cfg.get('command')} {' '.join(cfg.get('args', []))}")
+        print(
+            f"      - {safe_terminal_text(name, 100)}: "
+            f"{safe_terminal_text(cfg.get('command', ''), 200)} "
+            f"({len(cfg.get('args', []))} args)"
+        )
 
     # Step 2: Test MCP Registry initialization
     print("\n[2/5] 初始化 MCP Registry...")
@@ -36,48 +56,44 @@ async def main():
 
     registry = MCPRegistry()
     try:
-        registry.load_config(str(mcp_config_path))
+        registry.load_config_json(config_json)
         print(f"   加载完成: {len(registry.servers)} 个服务器")
     except Exception as e:
         print(f"   加载失败: {e}")
         print("   (非关键错误，继续演示...)")
 
-    # Step 3: Test MCPToolAdapter
-    print("\n[3/5] 测试 MCPToolAdapter...")
     try:
-        from mindforge.tools.mcp_adapter import MCPToolAdapter
+        await registry.start_all(timeout=settings.mcp.mcp_tool_timeout)
+        tools = await registry.discover_all_tools()
 
-        adapter = MCPToolAdapter(config_path=str(mcp_config_path))
-        available = adapter.list_available_tools()
-        if available:
-            print(f"   可用工具 ({len(available)}):")
-            for t in available:
-                print(f"      - {t['name']}: {t.get('description', '无描述')[:60]}")
+        # Step 3: Test discovered MCP tools
+        print("\n[3/5] 测试 MCP 工具发现...")
+        if tools:
+            print(f"   可用工具 ({len(tools)}):")
+            for tool in tools:
+                print(
+                    f"      - {safe_terminal_text(tool.name, 100)}: "
+                    f"{safe_terminal_text(tool.description, 60)}"
+                )
         else:
             print("   未发现 MCP 工具 (MCP 服务器可能未运行)")
             print("   提示: MCP 服务器通过 npx/uvx 按需启动，需要 Node.js/Python 环境")
-    except Exception as e:
-        print(f"   MCPToolAdapter 初始化: {e}")
 
-    # Step 4: Verify OpenAI function format conversion
-    print("\n[4/5] 验证 OpenAI Function Calling 格式转换...")
-    try:
-        adapter = MCPToolAdapter(config_path=str(mcp_config_path))
-        functions = adapter.to_openai_functions()
+        # Step 4: Verify OpenAI function format conversion
+        print("\n[4/5] 验证 OpenAI Function Calling 格式转换...")
+        functions = registry.get_openai_tools()
         print(f"   转换 {len(functions)} 个函数:")
         for func in functions:
             name = func.get("function", {}).get("name", "unknown")
-            print(f"      - {name}")
+            print(f"      - {safe_terminal_text(name, 100)}")
         if functions:
             print("   ✅ Function Calling 格式转换正常")
         else:
             print("   ⚠️ 无可用工具 (MCP 服务器需先连接)")
-    except Exception as e:
-        print(f"   ❌ 格式转换失败: {e}")
 
-    # Step 5: Integration — MCP in the Agent pipeline
-    print("\n[5/5] MCP 集成验证...")
-    print("""
+        # Step 5: Integration — MCP in the Agent pipeline
+        print("\n[5/5] MCP 集成验证...")
+        print("""
    当 MCP 服务器正常运行后，Researcher Agent 的流程:
 
    ┌─ Researcher Agent ────────────────────────────┐
@@ -94,13 +110,15 @@ async def main():
 
    MCP 协议优势:
    • 工具标准化: 所有外部工具通过统一 JSON-RPC 协议接入
-   • 动态发现: 启动时自动扫描 mcp.json，无需硬编码
+   • 动态发现: 启动时读取根目录 .env，无需额外配置文件
    • 运行时注册: 支持动态添加/移除工具
    • 自动适配: MCP 工具自动转为 OpenAI Function Calling 格式
    """)
-    print("=" * 60)
-    print("演示完成")
-    print("=" * 60)
+        print("=" * 60)
+        print("演示完成")
+        print("=" * 60)
+    finally:
+        await registry.stop_all()
 
 
 if __name__ == "__main__":

@@ -4,25 +4,60 @@ import { API_BASE } from "@/lib/constants";
 
 export type LLMProvider = "openai" | "deepseek";
 
+type ProviderValues = Record<LLMProvider, string>;
+type ProviderFlags = Record<LLMProvider, boolean>;
+
+interface SettingsPayload {
+  llm_provider?: LLMProvider;
+  deepseek_api_key?: string;
+  openai_api_key?: string;
+  embedding_provider?: "openai" | "bge";
+  retrieval_top_k?: number;
+  rerank_top_k?: number;
+  max_iterations?: number;
+  max_refine_rounds?: number;
+  critic_threshold?: number;
+  subtask_timeout?: number;
+  research_timeout?: number;
+}
+
 export interface SettingsState {
   llmProvider: LLMProvider;
   llmApiKey: string;
-  hasLLMKey: boolean;  // 后端是否已保存 key（从 masked 值判断）
+  hasLLMKey: boolean;
+  maskedKeys: ProviderValues;
+  apiKeyDrafts: Partial<ProviderValues>;
+  hasLLMKeys: ProviderFlags;
   retrievalTopK: number;
   rerankTopK: number;
   maxIterations: number;
+  maxRefineRounds: number;
   criticThreshold: number;
+  subtaskTimeout: number;
+  researchTimeout: number;
   loaded: boolean;
 
-  setLLMProvider: (p: LLMProvider) => void;
-  setLLMApiKey: (k: string) => void;
+  setLLMProvider: (provider: LLMProvider) => void;
+  setLLMApiKey: (key: string) => void;
   clearLLMApiKey: () => void;
-  setRetrievalTopK: (k: number) => void;
-  setRerankTopK: (k: number) => void;
-  setMaxIterations: (n: number) => void;
-  setCriticThreshold: (n: number) => void;
+  restoreLLMApiKey: () => void;
+  setRetrievalTopK: (value: number) => void;
+  setRerankTopK: (value: number) => void;
+  setMaxIterations: (value: number) => void;
+  setMaxRefineRounds: (value: number) => void;
+  setCriticThreshold: (value: number) => void;
+  setSubtaskTimeout: (value: number) => void;
+  setResearchTimeout: (value: number) => void;
   loadSettings: () => Promise<void>;
   saveSettings: () => Promise<boolean>;
+  deleteLLMApiKey: () => Promise<boolean>;
+}
+
+const EMPTY_KEYS: ProviderValues = { openai: "", deepseek: "" };
+const EMPTY_FLAGS: ProviderFlags = { openai: false, deepseek: false };
+
+function providerKeyName(provider: LLMProvider) {
+  return provider === "deepseek" ? "deepseek_api_key" : "openai_api_key";
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -31,39 +66,109 @@ export const useSettingsStore = create<SettingsState>()(
       llmProvider: "deepseek",
       llmApiKey: "",
       hasLLMKey: false,
+      maskedKeys: { ...EMPTY_KEYS },
+      apiKeyDrafts: {},
+      hasLLMKeys: { ...EMPTY_FLAGS },
       retrievalTopK: 20,
       rerankTopK: 6,
       maxIterations: 3,
-      criticThreshold: 7.0,
+      maxRefineRounds: 1,
+      criticThreshold: 7,
+      subtaskTimeout: 30,
+      researchTimeout: 180,
       loaded: false,
 
-      setLLMProvider: (p) => set({ llmProvider: p }),
-      setLLMApiKey: (k) => set({ llmApiKey: k, hasLLMKey: k.length > 0 }),
-      clearLLMApiKey: () => set({ llmApiKey: "", hasLLMKey: false }),
-      setRetrievalTopK: (k) => set({ retrievalTopK: k }),
-      setRerankTopK: (k) => set({ rerankTopK: k }),
-      setMaxIterations: (n) => set({ maxIterations: n }),
-      setCriticThreshold: (n) => set({ criticThreshold: n }),
+      setLLMProvider: (provider) => {
+        const state = get();
+        const displayedKey =
+          state.apiKeyDrafts[provider] ?? state.maskedKeys[provider];
+        set({
+          llmProvider: provider,
+          llmApiKey: displayedKey,
+          hasLLMKey: state.hasLLMKeys[provider],
+        });
+      },
+
+      setLLMApiKey: (key) =>
+        set((state) => ({
+          llmApiKey: key,
+          apiKeyDrafts: {
+            ...state.apiKeyDrafts,
+            [state.llmProvider]: key,
+          },
+        })),
+
+      clearLLMApiKey: () =>
+        set((state) => ({
+          llmApiKey: "",
+          maskedKeys: {
+            ...state.maskedKeys,
+            [state.llmProvider]: "",
+          },
+          apiKeyDrafts: {
+            ...state.apiKeyDrafts,
+            [state.llmProvider]: "",
+          },
+          hasLLMKey: false,
+          hasLLMKeys: {
+            ...state.hasLLMKeys,
+            [state.llmProvider]: false,
+          },
+        })),
+
+      restoreLLMApiKey: () =>
+        set((state) => {
+          const drafts = { ...state.apiKeyDrafts };
+          delete drafts[state.llmProvider];
+          return {
+            apiKeyDrafts: drafts,
+            llmApiKey: state.maskedKeys[state.llmProvider],
+            hasLLMKey: state.hasLLMKeys[state.llmProvider],
+          };
+        }),
+
+      setRetrievalTopK: (value) => set({ retrievalTopK: value }),
+      setRerankTopK: (value) => set({ rerankTopK: value }),
+      setMaxIterations: (value) => set({ maxIterations: value }),
+      setMaxRefineRounds: (value) => set({ maxRefineRounds: value }),
+      setCriticThreshold: (value) => set({ criticThreshold: value }),
+      setSubtaskTimeout: (value) => set({ subtaskTimeout: value }),
+      setResearchTimeout: (value) => set({ researchTimeout: value }),
 
       loadSettings: async () => {
         try {
-          const res = await fetch(`${API_BASE}/settings`);
-          if (res.ok) {
-            const data = await res.json();
-            // 后端返回的 masked key：non-empty 表示已配置，empty 表示未配置
-            const maskedKey =
-              get().llmProvider === "deepseek"
-                ? (data.deepseek_api_key || "")
-                : (data.openai_api_key || "");
-            const hasKey = maskedKey.length > 0;
-            set({
-              llmProvider: data.llm_provider || "deepseek",
-              // 如果后端已有 key，显示脱敏值；否则保留 localStorage 值
-              llmApiKey: hasKey ? maskedKey : get().llmApiKey,
-              hasLLMKey: hasKey,
-              loaded: true,
-            });
+          const response = await fetch(`${API_BASE}/settings`);
+          if (!response.ok) {
+            throw new Error(`Settings request failed with ${response.status}`);
           }
+
+          const data = (await response.json()) as SettingsPayload;
+          const provider = data.llm_provider ?? "deepseek";
+          const maskedKeys: ProviderValues = {
+            deepseek: data.deepseek_api_key ?? "",
+            openai: data.openai_api_key ?? "",
+          };
+          const hasLLMKeys: ProviderFlags = {
+            deepseek: maskedKeys.deepseek.length > 0,
+            openai: maskedKeys.openai.length > 0,
+          };
+
+          set({
+            llmProvider: provider,
+            llmApiKey: maskedKeys[provider],
+            hasLLMKey: hasLLMKeys[provider],
+            maskedKeys,
+            apiKeyDrafts: {},
+            hasLLMKeys,
+            retrievalTopK: data.retrieval_top_k ?? 20,
+            rerankTopK: data.rerank_top_k ?? 6,
+            maxIterations: data.max_iterations ?? 3,
+            maxRefineRounds: data.max_refine_rounds ?? 1,
+            criticThreshold: data.critic_threshold ?? 7,
+            subtaskTimeout: data.subtask_timeout ?? 30,
+            researchTimeout: data.research_timeout ?? 180,
+            loaded: true,
+          });
         } catch {
           set({ loaded: true });
         }
@@ -71,31 +176,61 @@ export const useSettingsStore = create<SettingsState>()(
 
       saveSettings: async () => {
         const state = get();
+        const payload: SettingsPayload = {
+          llm_provider: state.llmProvider,
+          embedding_provider:
+            state.llmProvider === "openai" ? "openai" : "bge",
+          retrieval_top_k: state.retrievalTopK,
+          rerank_top_k: state.rerankTopK,
+          max_iterations: state.maxIterations,
+          max_refine_rounds: state.maxRefineRounds,
+          critic_threshold: state.criticThreshold,
+          subtask_timeout: state.subtaskTimeout,
+          research_timeout: state.researchTimeout,
+        };
+
+        if (!state.llmApiKey.startsWith("***")) {
+          payload[providerKeyName(state.llmProvider)] = state.llmApiKey;
+        }
+
         try {
-          // 脱敏 key 不发送（保护已配置的 key）；用户输入新 key 时正常发送；空字符串 = 删除
-          const isMasked = state.llmApiKey.startsWith("***");
-          const deepseekKey = isMasked ? undefined : (state.llmProvider === "deepseek" ? state.llmApiKey : "");
-          const openaiKey = isMasked ? undefined : (state.llmProvider === "openai" ? state.llmApiKey : "");
-          const res = await fetch(`${API_BASE}/settings`, {
+          const response = await fetch(`${API_BASE}/settings`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              llm_provider: state.llmProvider,
-              deepseek_api_key: deepseekKey,
-              openai_api_key: openaiKey,
-              embedding_provider: state.llmProvider === "openai" ? "openai" : "bge",
-              retrieval_top_k: state.retrievalTopK,
-              rerank_top_k: state.rerankTopK,
-              max_iterations: state.maxIterations,
-              critic_threshold: state.criticThreshold,
-            }),
+            body: JSON.stringify(payload),
           });
-          if (res.ok) {
-            // 保存成功后刷新，确保 hasLLMKey 与后端一致
-            await get().loadSettings();
-            return true;
-          }
+          if (!response.ok) return false;
+          await get().loadSettings();
+          return true;
+        } catch {
           return false;
+        }
+      },
+
+      deleteLLMApiKey: async () => {
+        const state = get();
+        const payload: SettingsPayload = {
+          llm_provider: state.llmProvider,
+          embedding_provider:
+            state.llmProvider === "openai" ? "openai" : "bge",
+          retrieval_top_k: state.retrievalTopK,
+          rerank_top_k: state.rerankTopK,
+          max_iterations: state.maxIterations,
+          max_refine_rounds: state.maxRefineRounds,
+          critic_threshold: state.criticThreshold,
+          subtask_timeout: state.subtaskTimeout,
+          research_timeout: state.researchTimeout,
+          [providerKeyName(state.llmProvider)]: "",
+        };
+        try {
+          const response = await fetch(`${API_BASE}/settings`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) return false;
+          await get().loadSettings();
+          return true;
         } catch {
           return false;
         }
@@ -106,11 +241,14 @@ export const useSettingsStore = create<SettingsState>()(
       partialize: (state) => ({
         llmProvider: state.llmProvider,
         hasLLMKey: state.hasLLMKey,
+        hasLLMKeys: state.hasLLMKeys,
         retrievalTopK: state.retrievalTopK,
         rerankTopK: state.rerankTopK,
         maxIterations: state.maxIterations,
+        maxRefineRounds: state.maxRefineRounds,
         criticThreshold: state.criticThreshold,
-        // llmApiKey is NOT persisted (security); hasLLMKey persists for UI gating
+        subtaskTimeout: state.subtaskTimeout,
+        researchTimeout: state.researchTimeout,
       }),
     },
   ),

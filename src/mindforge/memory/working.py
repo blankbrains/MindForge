@@ -10,12 +10,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Approximate token budget for the working memory context
-CAPACITY_TOKENS = 8000
-# Rough char-to-token ratio for estimation
-CHARS_PER_TOKEN = 4
-
-
 @dataclass
 class MemoryEntry:
     """A single entry in working memory."""
@@ -35,8 +29,24 @@ class WorkingMemory:
     the budget is exceeded.
     """
 
-    def __init__(self, capacity_tokens: int = CAPACITY_TOKENS) -> None:
-        self._capacity_tokens = capacity_tokens
+    def __init__(
+        self,
+        capacity_tokens: int | None = None,
+        chars_per_token: int | None = None,
+    ) -> None:
+        from mindforge.config import get_settings
+
+        config = get_settings().memory
+        self._capacity_tokens = (
+            capacity_tokens
+            if capacity_tokens is not None
+            else config.working_capacity_tokens
+        )
+        self._chars_per_token = (
+            chars_per_token
+            if chars_per_token is not None
+            else config.chars_per_token
+        )
         self._entries: dict[str, MemoryEntry] = {}  # key -> entry (dedup key)
         self._last_cleanup: float = time.time()
         self._lock = asyncio.Lock()
@@ -122,7 +132,7 @@ class WorkingMemory:
             ``capacity_tokens * CHARS_PER_TOKEN``).
         """
         if max_chars is None:
-            max_chars = self._capacity_tokens * CHARS_PER_TOKEN
+            max_chars = self._capacity_tokens * self._chars_per_token
 
         # Group and sort
         tool_results: list[MemoryEntry] = []
@@ -174,7 +184,10 @@ class WorkingMemory:
     def _estimate_tokens(self) -> int:
         """Rough token estimate based on character length."""
         total_chars = sum(len(e.content) for e in self._entries.values())
-        return total_chars // CHARS_PER_TOKEN + len(self._entries) * 2  # overhead
+        return (
+            total_chars // self._chars_per_token
+            + len(self._entries) * 2
+        )
 
     def _manage_capacity(self) -> None:
         """Evict low-value entries when the token budget is exceeded.

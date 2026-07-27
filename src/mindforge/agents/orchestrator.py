@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import traceback
 from typing import Any, AsyncIterator, Optional
 
 from mindforge.agents.base import AgentResult
@@ -13,6 +12,8 @@ from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
 from mindforge.agents.researcher import ResearcherAgent
 from mindforge.agents.critic import CriticAgent, CriticScore
 from mindforge.agents.synthesizer import SynthesizerAgent
+from mindforge.tools.citation_verifier import CitationVerifier
+from mindforge.tools.code_executor import CodeExecutor
 from mindforge.tools.rag_tool import RAGTool
 from mindforge.tools.web_search import WebSearchTool
 from mindforge.tools.mcp_adapter import MCPToolAdapter
@@ -82,11 +83,17 @@ class Orchestrator:
         self._planner = planner or PlannerAgent()
 
         # Build default tool set for ResearcherAgent
-        _tools: list = [RAGTool(), WebSearchTool()]
-        try:
-            _tools.append(MCPToolAdapter())
-        except Exception:
-            pass  # MCP not available — non-fatal
+        _tools: list = [
+            RAGTool(),
+            WebSearchTool(),
+            CodeExecutor(),
+            CitationVerifier(),
+        ]
+        if self._settings.mcp.agent_tools_enabled:
+            try:
+                _tools.append(MCPToolAdapter())
+            except Exception:
+                pass  # MCP not available — non-fatal
         _researcher_tools = _tools
 
         self._researcher = researcher or ResearcherAgent(tools=_researcher_tools)
@@ -110,6 +117,7 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         total_usage: dict[str, int] = {}
+        total_cost = {"usd": 0.0}
         pipeline_log: dict[str, Any] = {}
 
         # ------------------------------------------------------------------
@@ -136,7 +144,13 @@ class Orchestrator:
         timeout_seconds = self._settings.agent.research_timeout
         try:
             core_result = await asyncio.wait_for(
-                self._run_pipeline(task, total_usage, pipeline_log, start_time),
+                self._run_pipeline(
+                    task,
+                    total_usage,
+                    total_cost,
+                    pipeline_log,
+                    start_time,
+                ),
                 timeout=timeout_seconds,
             )
             return core_result
@@ -176,6 +190,7 @@ class Orchestrator:
         self,
         task: str,
         total_usage: dict[str, int],
+        total_cost: dict[str, float],
         pipeline_log: dict[str, Any],
         start_time: float,
     ) -> AgentResult:
@@ -191,7 +206,7 @@ class Orchestrator:
         }
 
         # Track usage
-        self._accumulate_usage(total_usage, plan.planner_usage)
+        self._accumulate_usage(total_usage, plan.planner_usage, total_cost)
 
         # ------------------------------------------------------------------
         # Step 2: Execute DAG (parallel where dependencies allow)
@@ -205,6 +220,24 @@ class Orchestrator:
                 for st in plan.subtasks:
                     if st.status == "pending":
                         st.status = "failed"
+                        st.result = AgentResult(
+                            agent_name="researcher",
+                            success=False,
+                            output=(
+                                f"Subtask {st.task_id} deadlocked: "
+                                "unmet dependencies."
+                            ),
+                        )
+                        subtask_outputs.append(
+                            {
+                                "task_id": st.task_id,
+                                "description": st.description,
+                                "task_type": st.task_type,
+                                "output": st.result.output,
+                                "sources": [],
+                                "success": False,
+                            }
+                        )
                 break
 
             # Mark in-progress
@@ -213,7 +246,7 @@ class Orchestrator:
 
             # Execute ready tasks in parallel
             results = await asyncio.gather(
-                *[self._execute_subtask(st) for st in ready],
+                *[self._execute_subtask(st, plan) for st in ready],
                 return_exceptions=True,
             )
 
@@ -229,7 +262,7 @@ class Orchestrator:
                 else:
                     st.status = "completed" if result.success else "failed"
                     st.result = result
-                    self._accumulate_usage(total_usage, result)
+                    self._accumulate_usage(total_usage, result, total_cost)
 
                 subtask_outputs.append(
                     {
@@ -251,6 +284,38 @@ class Orchestrator:
             "subtasks_failed": sum(1 for s in plan.subtasks if s.status == "failed"),
         }
 
+        if not any(
+            output.get("success")
+            for output in subtask_outputs
+        ):
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            failure_output = self._format_pipeline_failure(
+                subtask_outputs
+            )
+            return AgentResult(
+                agent_name="orchestrator",
+                success=False,
+                output=failure_output,
+                data={
+                    "pipeline": pipeline_log,
+                    "plan": plan.to_dict(),
+                    "subtask_outputs": subtask_outputs,
+                    "sources": [],
+                    "critic_score": None,
+                    "refine_rounds": 0,
+                },
+                metadata={
+                    "quality": 0.0,
+                    "cost": total_cost["usd"],
+                    "subtask_count": len(plan.subtasks),
+                    "refine_rounds": 0,
+                    "model": self._settings.llm.llm_provider,
+                },
+                token_usage=total_usage,
+                latency_ms=elapsed_ms,
+                cost_usd=total_cost["usd"],
+            )
+
         # ------------------------------------------------------------------
         # Step 3: Synthesize (skip for single-subtask)
         # ------------------------------------------------------------------
@@ -268,7 +333,7 @@ class Orchestrator:
                 subtask_results=subtask_outputs,
                 all_sources=all_sources,
             )
-            self._accumulate_usage(total_usage, draft_result)
+            self._accumulate_usage(total_usage, draft_result, total_cost)
             pipeline_log["synthesize"] = {"status": "completed"}
 
         # ------------------------------------------------------------------
@@ -299,7 +364,11 @@ class Orchestrator:
                     sources=all_sources,
                 )
                 final_critic = critic_score
-                self._accumulate_usage(total_usage, critic_score.token_usage)
+                self._accumulate_usage(
+                    total_usage,
+                    critic_score.token_usage,
+                    total_cost,
+                )
 
                 if not critic_score.should_refine:
                     pipeline_log["critic"] = {
@@ -316,13 +385,27 @@ class Orchestrator:
                     all_sources=all_sources,
                     critic_feedback=critic_score,
                 )
-                self._accumulate_usage(total_usage, current_draft)
+                self._accumulate_usage(total_usage, current_draft, total_cost)
                 current_draft = current_draft.output
                 refine_count = refine_round + 1
 
+            # The score shown to users must describe the final refined draft,
+            # not the pre-refinement version that triggered the rewrite.
+            if refine_count > 0:
+                final_critic = await self._critic.evaluate(
+                    task=task,
+                    draft=current_draft,
+                    sources=all_sources,
+                )
+                self._accumulate_usage(
+                    total_usage,
+                    final_critic.token_usage,
+                    total_cost,
+                )
+
             if final_critic is not None and refine_count > 0:
                 pipeline_log["critic"] = {
-                    "rounds": refine_round + 1,
+                    "rounds": refine_count,
                     "overall_score": final_critic.overall,
                     "refined": True,
                 }
@@ -355,7 +438,7 @@ class Orchestrator:
         # Done
         # ------------------------------------------------------------------
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        total_cost = total_usage.get("cost_usd", 0)
+        total_cost_usd = total_cost["usd"]
 
         return AgentResult(
             agent_name="orchestrator",
@@ -365,19 +448,20 @@ class Orchestrator:
                 "pipeline": pipeline_log,
                 "plan": plan.to_dict(),
                 "subtask_outputs": subtask_outputs,
+                "sources": all_sources,
                 "critic_score": final_critic.to_dict() if final_critic else None,
                 "refine_rounds": refine_count,
             },
             metadata={
                 "quality": final_critic.overall if final_critic else 0.0,
-                "cost": total_cost,
+                "cost": total_cost_usd,
                 "subtask_count": len(plan.subtasks),
                 "refine_rounds": refine_count,
                 "model": self._settings.llm.llm_provider,
             },
             token_usage=total_usage,
             latency_ms=elapsed_ms,
-            cost_usd=total_cost,
+            cost_usd=total_cost_usd,
         )
 
     # ------------------------------------------------------------------
@@ -385,6 +469,37 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def stream_run(self, task: str) -> AsyncIterator[dict[str, Any]]:
+        """Stream the research pipeline under the configured overall timeout."""
+        iterator = self._stream_pipeline(task).__aiter__()
+        deadline = time.monotonic() + self._settings.agent.research_timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    event = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=remaining,
+                    )
+                except StopAsyncIteration:
+                    return
+                yield event
+        except asyncio.TimeoutError:
+            yield {
+                "type": "error",
+                "content": (
+                    "研究任务超过 "
+                    f"{self._settings.agent.research_timeout} 秒，已终止。"
+                ),
+            }
+        finally:
+            await iterator.aclose()
+
+    async def _stream_pipeline(
+        self,
+        task: str,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Execute the pipeline and yield events for streaming UIs.
 
         Yields events:
@@ -398,6 +513,7 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         total_usage: dict[str, int] = {}
+        total_cost = {"usd": 0.0}
 
         # --- Step 0: Memory check ---
         if self._episodic_memory is not None:
@@ -419,7 +535,7 @@ class Orchestrator:
 
         # --- Step 1: Plan ---
         plan: ResearchPlan = await self._planner.run(task)
-        self._accumulate_usage(total_usage, plan.planner_usage)
+        self._accumulate_usage(total_usage, plan.planner_usage, total_cost)
         yield {"type": "plan_ready", "plan": plan}
 
         # --- Step 2: Execute DAG ---
@@ -431,14 +547,28 @@ class Orchestrator:
                 for st in plan.subtasks:
                     if st.status == "pending":
                         st.status = "failed"
+                        st.result = AgentResult(
+                            agent_name="researcher",
+                            success=False,
+                            output=(
+                                f"Subtask {st.task_id} deadlocked: "
+                                "unmet dependencies."
+                            ),
+                        )
+                        subtask_outputs.append(
+                            {
+                                "task_id": st.task_id,
+                                "description": st.description,
+                                "task_type": st.task_type,
+                                "output": st.result.output,
+                                "sources": [],
+                                "success": False,
+                            }
+                        )
                         yield {
                             "type": "subtask_result",
                             "task_id": st.task_id,
-                            "result": AgentResult(
-                                agent_name="researcher",
-                                success=False,
-                                output=f"Subtask {st.task_id} deadlocked: unmet dependencies.",
-                            ),
+                            "result": st.result,
                         }
                 break
 
@@ -447,7 +577,7 @@ class Orchestrator:
                 yield {"type": "subtask_start", "task_id": st.task_id, "description": st.description}
 
             results = await asyncio.gather(
-                *[self._execute_subtask(st) for st in ready],
+                *[self._execute_subtask(st, plan) for st in ready],
                 return_exceptions=True,
             )
 
@@ -463,7 +593,7 @@ class Orchestrator:
                     st.status = "completed" if result.success else "failed"
                     st.result = result
 
-                self._accumulate_usage(total_usage, st.result)
+                self._accumulate_usage(total_usage, st.result, total_cost)
 
                 subtask_outputs.append(
                     {
@@ -486,6 +616,38 @@ class Orchestrator:
                     "result": st.result,
                 }
 
+        if not any(
+            output.get("success")
+            for output in subtask_outputs
+        ):
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            result = AgentResult(
+                agent_name="orchestrator",
+                success=False,
+                output=self._format_pipeline_failure(
+                    subtask_outputs
+                ),
+                data={
+                    "plan": plan.to_dict(),
+                    "subtask_outputs": subtask_outputs,
+                    "sources": [],
+                    "critic_score": None,
+                    "refine_rounds": 0,
+                },
+                metadata={
+                    "quality": 0.0,
+                    "cost": total_cost["usd"],
+                    "subtask_count": len(plan.subtasks),
+                    "refine_rounds": 0,
+                    "model": self._settings.llm.llm_provider,
+                },
+                token_usage=total_usage,
+                latency_ms=elapsed_ms,
+                cost_usd=total_cost["usd"],
+            )
+            yield {"type": "done", "result": result}
+            return
+
         # --- Step 3: Synthesize (skip for single-subtask — use Researcher output directly) ---
         all_sources = self._collect_sources(subtask_outputs)
         skip_synthesizer = len(subtask_outputs) == 1 and subtask_outputs[0].get("success")
@@ -493,22 +655,27 @@ class Orchestrator:
         if skip_synthesizer:
             logger.info("单子任务，跳过 Synthesizer（流式输出 Researcher 结果）")
             researcher_text = subtask_outputs[0].get("output", "")
-            # 流式推送 Researcher 的输出，实现逐字渲染
-            chunk_size = 8
+            chunk_size = self._settings.agent.stream_chunk_size
             for i in range(0, len(researcher_text), chunk_size):
                 yield {"type": "answer_chunk", "content": researcher_text[i:i+chunk_size]}
-                await asyncio.sleep(0.02)  # 模拟流式速度，让前端有时间渲染
             yield {"type": "synthesizing", "status": "done"}
             current_draft = researcher_text
             draft_result = AgentResult(agent_name="synthesizer", success=True, output=researcher_text)
         else:
             yield {"type": "synthesizing", "status": "start"}
-            draft_result = await self._synthesizer.synthesize(
+            draft_chunks: list[str] = []
+            async for chunk in self._synthesizer.synthesize_stream(
                 task=task,
                 subtask_results=subtask_outputs,
                 all_sources=all_sources,
+            ):
+                draft_chunks.append(chunk)
+                yield {"type": "answer_chunk", "content": chunk}
+            draft_result = AgentResult(
+                agent_name="synthesizer",
+                success=True,
+                output="".join(draft_chunks),
             )
-            self._accumulate_usage(total_usage, draft_result)
             yield {"type": "synthesizing", "status": "done"}
 
         # --- Step 4: Critic + refine ---
@@ -535,7 +702,11 @@ class Orchestrator:
                     sources=all_sources,
                 )
                 final_critic = critic_score
-                self._accumulate_usage(total_usage, critic_score.token_usage)
+                self._accumulate_usage(
+                    total_usage,
+                    critic_score.token_usage,
+                    total_cost,
+                )
 
                 yield {
                     "type": "critic_feedback",
@@ -554,9 +725,21 @@ class Orchestrator:
                     all_sources=all_sources,
                     critic_feedback=critic_score,
                 )
-                self._accumulate_usage(total_usage, current_draft)
+                self._accumulate_usage(total_usage, current_draft, total_cost)
                 current_draft = current_draft.output
                 refine_count = refine_round + 1
+
+            if refine_count > 0:
+                final_critic = await self._critic.evaluate(
+                    task=task,
+                    draft=current_draft,
+                    sources=all_sources,
+                )
+                self._accumulate_usage(
+                    total_usage,
+                    final_critic.token_usage,
+                    total_cost,
+                )
 
         # --- Step 5: Memory ---
         if self._episodic_memory is not None:
@@ -582,7 +765,7 @@ class Orchestrator:
 
         # --- Done ---
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        total_cost = total_usage.get("cost_usd", 0)
+        total_cost_usd = total_cost["usd"]
 
         result = AgentResult(
             agent_name="orchestrator",
@@ -591,12 +774,24 @@ class Orchestrator:
             data={
                 "plan": plan.to_dict(),
                 "subtask_outputs": subtask_outputs,
+                "sources": all_sources,
                 "critic_score": final_critic.to_dict() if final_critic else None,
                 "refine_rounds": refine_count,
             },
+            metadata={
+                "quality": (
+                    final_critic.overall
+                    if final_critic
+                    else 0.0
+                ),
+                "cost": total_cost_usd,
+                "subtask_count": len(plan.subtasks),
+                "refine_rounds": refine_count,
+                "model": self._settings.llm.llm_provider,
+            },
             token_usage=total_usage,
             latency_ms=elapsed_ms,
-            cost_usd=total_cost,
+            cost_usd=total_cost_usd,
         )
         yield {"type": "done", "result": result}
 
@@ -604,7 +799,11 @@ class Orchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _execute_subtask(self, subtask: SubTask) -> AgentResult:
+    async def _execute_subtask(
+        self,
+        subtask: SubTask,
+        plan: ResearchPlan,
+    ) -> AgentResult:
         """Execute a single subtask with a timeout.
 
         The timeout is read from ``settings.agent.subtask_timeout`` (default 45 s).
@@ -612,8 +811,12 @@ class Orchestrator:
         timeout = self._settings.agent.subtask_timeout
 
         try:
+            context = self._build_dependency_context(subtask, plan)
             result = await asyncio.wait_for(
-                self._researcher.run(subtask.description),
+                self._researcher.run(
+                    subtask.description,
+                    context=context or None,
+                ),
                 timeout=timeout,
             )
             return result
@@ -625,39 +828,115 @@ class Orchestrator:
                 data={"task_id": subtask.task_id},
             )
         except Exception as exc:
+            logger.exception(
+                "Subtask execution failed: %s",
+                subtask.task_id,
+            )
             return AgentResult(
                 agent_name="researcher",
                 success=False,
-                output=f"Subtask '{subtask.task_id}' failed: {type(exc).__name__}: {exc}",
-                data={"task_id": subtask.task_id, "traceback": traceback.format_exc()},
+                output=f"Subtask '{subtask.task_id}' failed internally.",
+                data={
+                    "task_id": subtask.task_id,
+                    "error_type": type(exc).__name__,
+                },
             )
+
+    @staticmethod
+    def _format_pipeline_failure(
+        subtask_outputs: list[dict[str, Any]],
+    ) -> str:
+        details = [
+            str(output.get("output", "")).strip()
+            for output in subtask_outputs
+            if str(output.get("output", "")).strip()
+        ]
+        if not details:
+            return "Research failed because no subtask completed successfully."
+        return (
+            "Research failed because all subtasks failed:\n\n"
+            + "\n".join(f"- {detail}" for detail in details)
+        )
 
     @staticmethod
     def _collect_sources(
         subtask_outputs: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Aggregate unique sources across all subtask outputs."""
-        seen: set[int] = set()
+        seen: set[str] = set()
         all_sources: list[dict[str, Any]] = []
         for so in subtask_outputs:
             sources = so.get("sources", [])
             if not isinstance(sources, list):
                 continue
             for src in sources:
-                idx = src.get("index") if isinstance(src, dict) else None
-                if idx is not None and idx not in seen:
-                    seen.add(idx)
-                    all_sources.append(src)
+                if not isinstance(src, dict):
+                    continue
+                identity = str(
+                    src.get("url")
+                    or src.get("chunk_id")
+                    or src.get("id")
+                    or (
+                        f"{src.get('title', src.get('source', ''))}:"
+                        f"{src.get('content', src.get('text', ''))[:200]}"
+                    )
+                )
+                if not identity or identity in seen:
+                    continue
+                seen.add(identity)
+                all_sources.append({**src, "index": len(all_sources) + 1})
         return all_sources
+
+    @staticmethod
+    def _build_dependency_context(
+        subtask: SubTask,
+        plan: ResearchPlan,
+    ) -> str:
+        """Build grounded context from completed dependency results."""
+        if not subtask.dependencies:
+            return ""
+        by_id = {task.task_id: task for task in plan.subtasks}
+        sections: list[str] = []
+        for dependency_id in subtask.dependencies:
+            dependency = by_id.get(dependency_id)
+            if (
+                dependency is None
+                or dependency.status != "completed"
+                or dependency.result is None
+                or not dependency.result.output
+            ):
+                continue
+            sections.append(
+                f"## 前置子任务 {dependency.task_id}: "
+                f"{dependency.description}\n\n{dependency.result.output}"
+            )
+        return "\n\n".join(sections)
 
     @staticmethod
     def _accumulate_usage(
         accumulator: dict[str, int],
         result: Any,
+        cost_accumulator: Optional[dict[str, float]] = None,
     ) -> None:
         """Merge token usage from an AgentResult or other result objects."""
         if result is None:
             return
+        if isinstance(result, dict):
+            for key, value in result.items():
+                if (
+                    isinstance(value, (int, float))
+                    and key != "cost_usd"
+                ):
+                    accumulator[key] = (
+                        accumulator.get(key, 0) + int(value)
+                    )
+            return
+        if cost_accumulator is not None:
+            cost = getattr(result, "cost_usd", 0.0)
+            if isinstance(cost, (int, float)):
+                cost_accumulator["usd"] = (
+                    cost_accumulator.get("usd", 0.0) + float(cost)
+                )
         if hasattr(result, "token_usage") and result.token_usage:
             for k, v in result.token_usage.items():
                 if isinstance(v, (int, float)) and k != "cost_usd":
@@ -665,6 +944,12 @@ class Orchestrator:
         # Handle list of subtasks (from planner)
         if isinstance(result, list):
             for item in result:
+                if cost_accumulator is not None:
+                    cost = getattr(item, "cost_usd", 0.0)
+                    if isinstance(cost, (int, float)):
+                        cost_accumulator["usd"] = (
+                            cost_accumulator.get("usd", 0.0) + float(cost)
+                        )
                 if hasattr(item, "token_usage") and item.token_usage:
                     for k, v in item.token_usage.items():
                         if isinstance(v, (int, float)) and k != "cost_usd":

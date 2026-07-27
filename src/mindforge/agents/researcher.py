@@ -131,11 +131,19 @@ class ResearcherAgent(BaseAgent):
         tool_schemas = self._get_tool_schemas()
         use_tools = bool(tool_schemas)
         aggregated_usage: dict[str, int] = {}
+        tool_calls_made = 0
+        tool_calls_rejected = 0
 
         for _round in range(max_rounds):
             result = await self._chat(
                 conv,
-                tools=tool_schemas if use_tools else None,
+                tools=(
+                    tool_schemas
+                    if use_tools
+                    and tool_calls_made
+                    < settings.agent.max_tool_calls_total
+                    else None
+                ),
                 _llm_override=_llm_override,
             )
 
@@ -160,8 +168,23 @@ class ResearcherAgent(BaseAgent):
                     agent_name=self.name,
                     success=True,
                     output=final_content,
-                    data={"rounds": _round + 1, "messages": len(conv)},
-                    metadata={"model": self._model_name},
+                    data={
+                        "rounds": _round + 1,
+                        "messages": len(conv),
+                        "tool_calls": tool_calls_made,
+                        "tool_calls_rejected": tool_calls_rejected,
+                    },
+                    metadata={
+                        "model": getattr(
+                            _llm_override,
+                            "_model",
+                            getattr(
+                                _llm_override,
+                                "model",
+                                self._model_name,
+                            ),
+                        )
+                    },
                     token_usage=aggregated_usage,
                     latency_ms=elapsed_ms,
                     cost_usd=cost,
@@ -181,6 +204,20 @@ class ResearcherAgent(BaseAgent):
 
             import asyncio
 
+            remaining = max(
+                0,
+                settings.agent.max_tool_calls_total - tool_calls_made,
+            )
+            allowed_count = min(
+                len(result.tool_calls),
+                settings.agent.max_tool_calls_per_round,
+                remaining,
+            )
+            selected_calls = result.tool_calls[:allowed_count]
+            rejected_calls = result.tool_calls[allowed_count:]
+            tool_calls_made += len(selected_calls)
+            tool_calls_rejected += len(rejected_calls)
+
             for tc in result.tool_calls:
                 func = tc.get("function", {})
                 yield {
@@ -190,8 +227,20 @@ class ResearcherAgent(BaseAgent):
                 }
 
             tool_results = await asyncio.gather(
-                *[self._execute_tool(tc) for tc in result.tool_calls],
+                *[self._execute_tool(tc) for tc in selected_calls],
                 return_exceptions=True,
+            )
+            tool_results.extend(
+                {
+                    "tool_call_id": tc.get("id", ""),
+                    "output": (
+                        "Tool call rejected because the configured per-round "
+                        "or total tool-call limit was reached."
+                    ),
+                    "success": False,
+                    "error": "Tool-call limit reached",
+                }
+                for tc in rejected_calls
             )
 
             for tc, exec_result in zip(result.tool_calls, tool_results):
@@ -236,8 +285,23 @@ class ResearcherAgent(BaseAgent):
             agent_name=self.name,
             success=True,
             output=final_content,
-            data={"rounds": max_rounds, "messages": len(conv)},
-            metadata={"model": self._model_name},
+            data={
+                "rounds": max_rounds,
+                "messages": len(conv),
+                "tool_calls": tool_calls_made,
+                "tool_calls_rejected": tool_calls_rejected,
+            },
+            metadata={
+                "model": getattr(
+                    _llm_override,
+                    "_model",
+                    getattr(
+                        _llm_override,
+                        "model",
+                        self._model_name,
+                    ),
+                )
+            },
             token_usage=aggregated_usage,
             latency_ms=elapsed_ms,
             cost_usd=cost,

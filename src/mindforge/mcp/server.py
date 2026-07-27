@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time as _time
-import traceback
 from typing import Any, Optional
 
 try:
@@ -32,6 +32,7 @@ except ImportError:
 JSON_RPC_VERSION = "2.0"
 MCP_PROTOCOL_VERSION = "2025-03-26"
 DEFAULT_TOOL_TIMEOUT = 120  # seconds
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,8 @@ _TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Number of results to return.",
                     "default": 5,
+                    "minimum": 1,
+                    "maximum": 50,
                 },
             },
             "required": ["query"],
@@ -84,6 +87,8 @@ _TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Maximum number of sources to gather.",
                     "default": 10,
+                    "minimum": 1,
+                    "maximum": 50,
                 },
             },
             "required": ["topic"],
@@ -219,10 +224,10 @@ class MindForgeMCPServer:
                 return self._error(req_id, -32601, f"Method not found: {method}")
 
             return self._success(req_id, result)
-        except Exception as exc:
+        except Exception:
+            logger.exception("MCP request failed: method=%s", method)
             return self._error(
-                req_id, -32603, f"Internal error: {exc}",
-                data={"traceback": traceback.format_exc()},
+                req_id, -32603, "Internal MCP service error.",
             )
 
     # ------------------------------------------------------------------
@@ -266,8 +271,12 @@ class MindForgeMCPServer:
 
     async def _handle_tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         """Execute a tool call."""
+        if not isinstance(params, dict):
+            raise ValueError("tools/call params must be an object.")
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise ValueError("Tool arguments must be an object.")
 
         handlers: dict[str, Any] = {
             "search_knowledge_base": self._exec_search_knowledge_base,
@@ -294,6 +303,21 @@ class MindForgeMCPServer:
         self, query: str, mode: str = "hybrid", top_k: int = 5, **kwargs: Any
     ) -> str:
         """Search the internal knowledge base."""
+        from mindforge.config import get_settings
+
+        max_top_k = get_settings().retrieval.max_request_top_k
+        if not isinstance(query, str) or not query.strip():
+            return "Search failed: query must be a non-empty string."
+        if len(query) > 20_000:
+            return "Search failed: query exceeds 20000 characters."
+        if mode not in {"semantic", "hybrid", "keyword"}:
+            return "Search failed: unsupported retrieval mode."
+        if (
+            isinstance(top_k, bool)
+            or not isinstance(top_k, int)
+            or not 1 <= top_k <= max_top_k
+        ):
+            return f"Search failed: top_k must be between 1 and {max_top_k}."
         if self._rag_tool is None:
             if RAGTool is not None:
                 self._rag_tool = RAGTool()
@@ -315,11 +339,24 @@ class MindForgeMCPServer:
         **kwargs: Any,
     ) -> str:
         """Execute a multi-step research task."""
+        if not isinstance(topic, str) or not topic.strip():
+            return "Research task failed: topic must be a non-empty string."
+        if len(topic) > 20_000:
+            return "Research task failed: topic exceeds 20000 characters."
+        if depth not in {"quick", "standard", "deep"}:
+            return "Research task failed: unsupported depth."
+        if (
+            isinstance(max_sources, bool)
+            or not isinstance(max_sources, int)
+            or not 1 <= max_sources <= 50
+        ):
+            return "Research task failed: max_sources must be between 1 and 50."
         if self._research_agent is None and ResearchAgent is not None:
             try:
                 self._research_agent = ResearchAgent()
-            except Exception as exc:
-                return f"Could not initialize research agent: {exc}"
+            except Exception:
+                logger.exception("Could not initialize MCP research agent.")
+                return "Could not initialize research agent."
 
         if self._research_agent is None:
             # Fallback: use web search and compile report
@@ -336,8 +373,9 @@ class MindForgeMCPServer:
             if isinstance(report, str):
                 return report
             return str(report)
-        except Exception as exc:
-            return f"Research task failed: {exc}"
+        except Exception:
+            logger.exception("MCP research task failed.")
+            return "Research task failed."
 
     async def _fallback_research(
         self, topic: str, depth: str, max_sources: int
@@ -361,6 +399,10 @@ class MindForgeMCPServer:
         self, report_text: str, sources: list[dict[str, Any]], **kwargs: Any
     ) -> str:
         """Verify citation markers against a source list."""
+        if not isinstance(report_text, str) or len(report_text) > 2_000_000:
+            return "Verification failed: invalid report_text."
+        if not isinstance(sources, list) or len(sources) > 1000:
+            return "Verification failed: invalid sources."
         if self._citation_verifier is None:
             if CitationVerifier is not None:
                 self._citation_verifier = CitationVerifier()
@@ -396,8 +438,9 @@ class MindForgeMCPServer:
             lines.append(f"  - {tdef['name']}: {tdef['description'][:60]}")
 
         if include_memory:
-            import psutil  # optional
             try:
+                import psutil  # optional
+
                 process = psutil.Process(os.getpid())
                 mem = process.memory_info()
                 lines.append("")

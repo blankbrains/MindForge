@@ -1,6 +1,13 @@
 import { API_BASE } from "./constants";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+const configuredTimeout = Number.parseInt(
+  import.meta.env.VITE_API_TIMEOUT_MS || "",
+  10,
+);
+const DEFAULT_TIMEOUT_MS =
+  Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : 30_000;
 
 export class ApiError extends Error {
   status: number;

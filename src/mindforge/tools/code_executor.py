@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-import io
-import signal
+import ast
+import json
+import os
+import site
+import subprocess
+import sys
+import tempfile
 import textwrap
 import time
-import traceback
-from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from typing import Any, Optional
 
 from mindforge.tools.base import BaseTool, ToolResult
+from mindforge.config import get_settings, resolve_project_path
 
 
 # Forbidden keywords / imports that could be dangerous in a sandbox
@@ -46,6 +51,51 @@ FORBIDDEN_MODULES: tuple[str, ...] = (
     "ctypes",
     "signal",
     "ptty",
+)
+
+FORBIDDEN_FILE_API_NAMES: frozenset[str] = frozenset(
+    {
+        "open",
+        "load",
+        "dump",
+        "save",
+        "savez",
+        "savez_compressed",
+        "fromfile",
+        "tofile",
+        "memmap",
+        "loadtxt",
+        "genfromtxt",
+        "savetxt",
+        "read_csv",
+        "read_excel",
+        "read_feather",
+        "read_fwf",
+        "read_hdf",
+        "read_html",
+        "read_json",
+        "read_orc",
+        "read_parquet",
+        "read_pickle",
+        "read_sas",
+        "read_spss",
+        "read_sql",
+        "read_stata",
+        "read_table",
+        "read_xml",
+        "to_csv",
+        "to_excel",
+        "to_feather",
+        "to_hdf",
+        "to_html",
+        "to_json",
+        "to_orc",
+        "to_parquet",
+        "to_pickle",
+        "to_sql",
+        "to_stata",
+        "to_xml",
+    }
 )
 
 SAFE_BUILTINS: dict[str, Any] = {
@@ -151,9 +201,9 @@ class CodeExecutor(BaseTool):
             "timeout": {
                 "type": "integer",
                 "description": "Maximum execution time in seconds.",
-                "default": 30,
+                "default": 15,
                 "minimum": 1,
-                "maximum": 120,
+                "maximum": 60,
             },
             "vars": {
                 "type": "object",
@@ -166,21 +216,49 @@ class CodeExecutor(BaseTool):
 
     def __init__(self, forbidden_keywords: Optional[list[str]] = None) -> None:
         super().__init__()
+        self._settings = get_settings()
         self._forbidden_keywords = forbidden_keywords or FORBIDDEN_KEYWORDS
 
     def execute(
         self,
         code: str,
-        timeout: int = 30,
+        timeout: Optional[int] = None,
         vars: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> ToolResult:
         start = time.perf_counter()
+        effective_timeout = (
+            self._settings.sandbox.sandbox_timeout
+            if timeout is None
+            else timeout
+        )
 
         if not code or not code.strip():
             return ToolResult(
                 success=False,
                 error="Code must be a non-empty string.",
+            )
+        if len(code) > self._settings.sandbox.max_code_length:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Code exceeds the configured maximum length of "
+                    f"{self._settings.sandbox.max_code_length} characters."
+                ),
+            )
+        if (
+            isinstance(effective_timeout, bool)
+            or not isinstance(effective_timeout, int)
+            or not 1
+            <= effective_timeout
+            <= self._settings.sandbox.sandbox_timeout
+        ):
+            return ToolResult(
+                success=False,
+                error=(
+                    "Timeout must be an integer between 1 and "
+                    f"{self._settings.sandbox.sandbox_timeout} seconds."
+                ),
             )
 
         # --- Pre-execution checks ---
@@ -191,33 +269,33 @@ class CodeExecutor(BaseTool):
                 error=f"Sandbox violation: {violation}",
             )
 
-        # --- Prepare sandbox globals ---
-        sandbox_globals: dict[str, Any] = {
-            "__builtins__": SAFE_BUILTINS,
-            "__name__": "__sandbox__",
-        }
-        if vars:
-            # Only inject safe, serializable types
-            for k, v in vars.items():
-                if isinstance(k, str) and k.isidentifier():
-                    sandbox_globals[k] = v
-
-        # --- Execute ---
-        stdout_capture = io.StringIO()
-        stderr_capture = io.StringIO()
-
         compiled = self._compile_code(code)
         if isinstance(compiled, ToolResult):
             return compiled  # Compilation error
 
         try:
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                self._run_with_timeout(compiled, sandbox_globals, timeout)
+            safe_vars = self._validate_vars(vars or {})
+            vars_json = json.dumps(safe_vars, ensure_ascii=False)
+            if (
+                len(vars_json.encode("utf-8"))
+                > self._settings.sandbox.max_vars_bytes
+            ):
+                raise SandboxViolation(
+                    "Injected variables exceed the configured byte limit."
+                )
+            completed = self._run_in_subprocess(
+                code=textwrap.dedent(code),
+                timeout=effective_timeout,
+                variables=safe_vars,
+            )
         except SandboxTimeout:
             elapsed = (time.perf_counter() - start) * 1000
             return ToolResult(
                 success=False,
-                error=f"Code execution timed out after {timeout}s.",
+                error=(
+                    "Code execution timed out after "
+                    f"{effective_timeout}s."
+                ),
                 execution_time_ms=elapsed,
             )
         except SandboxViolation as exc:
@@ -227,39 +305,33 @@ class CodeExecutor(BaseTool):
                 error=f"Sandbox violation during execution: {exc}",
                 execution_time_ms=elapsed,
             )
-        except Exception as exc:
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             elapsed = (time.perf_counter() - start) * 1000
-            stderr_capture.write(f"{type(exc).__name__}: {exc}\n")
-            stderr_capture.write(traceback.format_exc())
             return ToolResult(
                 success=False,
-                error=str(exc),
-                output=stdout_capture.getvalue(),
-                data={"stderr": stderr_capture.getvalue()},
+                error=f"Sandbox process failed: {exc}",
                 execution_time_ms=elapsed,
             )
 
         elapsed = (time.perf_counter() - start) * 1000
-        stdout = stdout_capture.getvalue()
-        stderr = stderr_capture.getvalue()
-
-        # Check for truncated output
-        truncated = False
-        if len(stdout) > 100_000:
-            stdout = stdout[:100_000] + "\n... [stdout truncated at 100KB]"
+        stdout = str(completed.get("stdout", ""))
+        stderr = str(completed.get("stderr", ""))
+        max_output = self._settings.sandbox.max_output_length
+        truncated = bool(completed.get("truncated", False))
+        if len(stdout) > max_output:
+            stdout = stdout[:max_output] + "\n... [stdout truncated]"
+            truncated = True
+        if len(stderr) > max_output:
+            stderr = stderr[:max_output] + "\n... [stderr truncated]"
             truncated = True
 
         return ToolResult(
-            success=True,
+            success=bool(completed.get("success", False)),
             output=stdout,
+            error=completed.get("error"),
             data={
                 "stderr": stderr,
-                "return_value": sandbox_globals.get("_return", None),
-                "sandbox_vars": {
-                    k: v
-                    for k, v in sandbox_globals.items()
-                    if not k.startswith("_") and k != "None"
-                },
+                "return_value": completed.get("return_value"),
             },
             truncated=truncated,
             execution_time_ms=elapsed,
@@ -302,6 +374,32 @@ class CodeExecutor(BaseTool):
             if pattern.search(lower_code):
                 return msg
 
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return None
+
+        allowed_modules = set(self._settings.sandbox.allowed_modules)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id.startswith("__"):
+                return f"Forbidden private name: {node.id}"
+            if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+                return f"Forbidden private attribute: {node.attr}"
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in FORBIDDEN_FILE_API_NAMES
+            ):
+                return f"File API not allowed: {node.attr}"
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".", 1)[0]
+                    if root not in allowed_modules:
+                        return f"Module not allowed: {root}"
+            if isinstance(node, ast.ImportFrom):
+                root = (node.module or "").split(".", 1)[0]
+                if not root or root not in allowed_modules:
+                    return f"Module not allowed: {root or '<relative>'}"
+
         return None
 
     def _compile_code(self, code: str) -> Any:
@@ -323,73 +421,266 @@ class CodeExecutor(BaseTool):
                 },
             )
 
-    def _run_with_timeout(
-        self,
-        compiled: Any,
-        sandbox_globals: dict[str, Any],
-        timeout: int,
-    ) -> None:
-        """Run compiled code with a timeout using signal.SIGALRM.
-
-        On Windows (where SIGALRM is unavailable), falls back to a
-        threading-based timeout.
-        """
-        if hasattr(signal, "SIGALRM"):
-            self._run_with_sigalrm(compiled, sandbox_globals, timeout)
-        else:
-            self._run_with_thread_timeout(compiled, sandbox_globals, timeout)
-
-    def _run_with_sigalrm(
-        self,
-        compiled: Any,
-        sandbox_globals: dict[str, Any],
-        timeout: int,
-    ) -> None:
-        """Unix: use SIGALRM for timeout."""
-
-        def handler(signum: int, frame: Any) -> None:
-            raise SandboxTimeout()
-
-        old_handler = signal.signal(signal.SIGALRM, handler)
-        signal.alarm(timeout)
-        try:
-            exec(compiled, sandbox_globals)
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-
-    def _run_with_thread_timeout(
-        self,
-        compiled: Any,
-        sandbox_globals: dict[str, Any],
-        timeout: int,
-    ) -> None:
-        """Windows fallback: use threading.Timer to enforce timeout.
-
-        Note: This approach cannot forcibly kill a stuck thread, but
-        if the code completes within the window it works correctly.
-        For true isolation, spawn a subprocess.
-        """
-        import threading
-
-        result: list[Any] = []
-        exception: list[Optional[BaseException]] = [None]
-        finished = threading.Event()
-
-        def target() -> None:
+    @staticmethod
+    def _validate_vars(variables: dict[str, Any]) -> dict[str, Any]:
+        safe: dict[str, Any] = {}
+        for key, value in variables.items():
+            if not isinstance(key, str) or not key.isidentifier():
+                raise SandboxViolation(f"Invalid variable name: {key!r}")
             try:
-                exec(compiled, sandbox_globals)
-                result.append(True)
-            except BaseException as exc:
-                exception[0] = exc
-            finally:
-                finished.set()
+                json.dumps(value)
+            except (TypeError, ValueError) as exc:
+                raise SandboxViolation(
+                    f"Variable '{key}' must be JSON-serializable"
+                ) from exc
+            safe[key] = value
+        return safe
 
-        t = threading.Thread(target=target, daemon=True)
-        t.start()
+    def _run_in_subprocess(
+        self,
+        code: str,
+        timeout: int,
+        variables: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute code in an isolated child process with a hard timeout."""
+        trusted_roots = {
+            str(Path(sys.base_prefix).resolve()),
+            str(Path(sys.prefix).resolve()),
+        }
+        for path in site.getsitepackages():
+            trusted_roots.add(str(Path(path).resolve()))
+        user_site = site.getusersitepackages()
+        if user_site:
+            trusted_roots.add(str(Path(user_site).resolve()))
 
-        if not finished.wait(timeout=timeout):
-            raise SandboxTimeout()
+        payload = json.dumps(
+            {
+                "code": code,
+                "vars": variables,
+                "allowed_modules": self._settings.sandbox.allowed_modules,
+                "cpu_seconds": max(1, timeout),
+                "memory_bytes": (
+                    self._settings.sandbox.memory_mb * 1024 * 1024
+                ),
+                "max_output_length": (
+                    self._settings.sandbox.max_output_length
+                ),
+                "trusted_read_roots": sorted(trusted_roots),
+            }
+        )
+        sandbox_base = resolve_project_path(
+            self._settings.sandbox.temp_dir
+        )
+        sandbox_base.mkdir(parents=True, exist_ok=True)
+        child_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper()
+            in {
+                "PATH",
+                "PATHEXT",
+                "SYSTEMROOT",
+                "WINDIR",
+                "COMSPEC",
+                "TMP",
+                "TEMP",
+                "LANG",
+                "LC_ALL",
+            }
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="exec-",
+            dir=sandbox_base,
+        ) as work_dir:
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-c", _SUBPROCESS_RUNNER],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                cwd=work_dir,
+                env=child_env,
+            )
+            try:
+                stdout, stderr = process.communicate(
+                    payload,
+                    timeout=timeout + 1,
+                )
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise SandboxTimeout()
+        if process.returncode != 0:
+            raise OSError(
+                stderr.strip()
+                or f"sandbox exited with code {process.returncode}"
+            )
+        return json.loads(stdout)
 
-        if exception[0] is not None:
-            raise exception[0]  # type: ignore[operator]
+
+_SUBPROCESS_RUNNER = r"""
+import contextlib
+import io
+import json
+import os
+import sys
+import traceback
+
+payload = json.loads(sys.stdin.read())
+sys.dont_write_bytecode = True
+
+try:
+    import resource
+    resource.setrlimit(
+        resource.RLIMIT_CPU,
+        (payload["cpu_seconds"], payload["cpu_seconds"] + 1),
+    )
+    resource.setrlimit(
+        resource.RLIMIT_AS,
+        (payload["memory_bytes"], payload["memory_bytes"]),
+    )
+except (ImportError, ValueError, OSError):
+    pass
+
+trusted_read_roots = [
+    os.path.realpath(path)
+    for path in payload["trusted_read_roots"]
+]
+
+def is_within_trusted_root(path):
+    try:
+        resolved = os.path.realpath(os.fspath(path))
+    except TypeError:
+        return False
+    for root in trusted_read_roots:
+        try:
+            if os.path.commonpath([resolved, root]) == root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+def deny_unsafe_audit_event(event, args):
+    if event == "open":
+        path = args[0]
+        if isinstance(path, int):
+            return
+        mode = args[1] if len(args) > 1 else "r"
+        flags = args[2] if len(args) > 2 else 0
+        write_flags = (
+            getattr(os, "O_WRONLY", 0)
+            | getattr(os, "O_RDWR", 0)
+            | getattr(os, "O_CREAT", 0)
+            | getattr(os, "O_TRUNC", 0)
+            | getattr(os, "O_APPEND", 0)
+        )
+        if (
+            any(char in str(mode) for char in "wax+")
+            or (isinstance(flags, int) and flags & write_flags)
+            or not is_within_trusted_root(path)
+        ):
+            raise PermissionError("sandbox file access denied")
+    elif event in {
+        "os.system",
+        "os.spawn",
+        "subprocess.Popen",
+        "socket.bind",
+        "socket.connect",
+        "socket.getaddrinfo",
+    }:
+        raise PermissionError(f"sandbox operation denied: {event}")
+
+sys.addaudithook(deny_unsafe_audit_event)
+
+allowed_modules = set(payload["allowed_modules"])
+real_import = __import__
+
+def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if level:
+        raise ImportError("relative imports are disabled")
+    root = name.split(".", 1)[0]
+    if root not in allowed_modules:
+        raise ImportError(f"module not allowed: {root}")
+    return real_import(name, globals, locals, fromlist, level)
+
+safe_builtins = {
+    "abs": abs, "all": all, "any": any, "ascii": ascii, "bin": bin,
+    "bool": bool, "bytearray": bytearray, "bytes": bytes, "chr": chr,
+    "complex": complex, "dict": dict, "dir": dir, "divmod": divmod,
+    "enumerate": enumerate, "filter": filter, "float": float,
+    "format": format, "frozenset": frozenset, "hasattr": hasattr,
+    "hash": hash, "hex": hex, "id": id, "int": int,
+    "isinstance": isinstance, "iter": iter, "len": len, "list": list,
+    "map": map, "max": max, "min": min, "next": next, "oct": oct,
+    "ord": ord, "pow": pow, "print": print, "range": range,
+    "repr": repr, "reversed": reversed, "round": round, "set": set,
+    "slice": slice, "sorted": sorted, "str": str, "sum": sum,
+    "tuple": tuple, "zip": zip, "Exception": Exception,
+    "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
+    "IndexError": IndexError, "AttributeError": AttributeError,
+    "ImportError": ImportError, "RuntimeError": RuntimeError,
+    "StopIteration": StopIteration, "ZeroDivisionError": ZeroDivisionError,
+    "ArithmeticError": ArithmeticError, "LookupError": LookupError,
+    "__import__": safe_import,
+}
+
+sandbox_globals = {
+    "__builtins__": safe_builtins,
+    "__name__": "__sandbox__",
+    **payload["vars"],
+}
+
+class CappedTextIO(io.TextIOBase):
+    def __init__(self, limit):
+        self.limit = limit
+        self.parts = []
+        self.length = 0
+        self.truncated = False
+
+    def writable(self):
+        return True
+
+    def write(self, value):
+        text = str(value)
+        remaining = max(0, self.limit - self.length)
+        if remaining:
+            chunk = text[:remaining]
+            self.parts.append(chunk)
+            self.length += len(chunk)
+        if len(text) > remaining:
+            self.truncated = True
+        return len(text)
+
+    def getvalue(self):
+        return "".join(self.parts)
+
+stdout_buffer = CappedTextIO(payload["max_output_length"])
+stderr_buffer = CappedTextIO(payload["max_output_length"])
+success = True
+error = None
+
+try:
+    compiled = compile(payload["code"], "<sandbox>", "exec")
+    with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+        exec(compiled, sandbox_globals)
+except BaseException as exc:
+    success = False
+    error = f"{type(exc).__name__}: {exc}"
+    traceback.print_exc(file=stderr_buffer)
+
+return_value = sandbox_globals.get("_return")
+try:
+    json.dumps(return_value)
+except (TypeError, ValueError):
+    return_value = repr(return_value)
+
+print(json.dumps({
+    "success": success,
+    "stdout": stdout_buffer.getvalue(),
+    "stderr": stderr_buffer.getvalue(),
+    "error": error,
+    "return_value": return_value,
+    "truncated": stdout_buffer.truncated or stderr_buffer.truncated,
+}, ensure_ascii=False))
+"""

@@ -3,6 +3,7 @@ import { useDocuments } from "@/hooks/use-documents";
 import { useStats } from "@/hooks/use-stats";
 import { EmptyState } from "@/components/shared/empty-state";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
+import { Modal } from "@/components/shared/modal";
 import { FileText, Upload, X, XCircle, Database, HardDrive, Eye, Loader2, Trash2 } from "lucide-react";
 import { API_BASE } from "@/lib/constants";
 
@@ -26,6 +27,7 @@ export function KnowledgeBasePage() {
   // Upload cancel confirmation
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [uploadAbortController, setUploadAbortController] = useState<AbortController | null>(null);
+  const maxUploadMb = stats?.max_upload_mb ?? 200;
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
@@ -44,6 +46,10 @@ export function KnowledgeBasePage() {
 
   const handleUpload = () => {
     if (!selectedFile) return;
+    if (selectedFile.size > maxUploadMb * 1024 * 1024) {
+      setUploadError(`文件过大，最大支持 ${maxUploadMb}MB`);
+      return;
+    }
     setUploadError(null);
     const formData = new FormData();
     formData.append("file", selectedFile);
@@ -115,7 +121,7 @@ export function KnowledgeBasePage() {
           </div>
           <div className="flex items-center gap-3 rounded-xl border border-border bg-surface p-4">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent/10 text-accent"><HardDrive className="h-5 w-5" /></div>
-            <div><p className="text-sm text-text-muted">向量数据库</p><p className="text-xl font-bold">{stats.qdrant_url ? "已连接" : "未连接"}</p></div>
+            <div><p className="text-sm text-text-muted">向量数据库</p><p className="text-xl font-bold">{stats.qdrant_connected ? "已连接" : "未连接"}</p></div>
           </div>
         </div>
       )}
@@ -156,50 +162,70 @@ export function KnowledgeBasePage() {
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDeleteTarget(null)}>
-          <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <Modal
+          titleId="delete-document-title"
+          descriptionId="delete-document-description"
+          onClose={() => {
+            if (!remove.isPending) setDeleteTarget(null);
+          }}
+          closeOnBackdrop={!remove.isPending}
+        >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">确认删除</h3>
-              <button type="button" onClick={() => setDeleteTarget(null)} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
+              <h2 id="delete-document-title" className="text-lg font-semibold">确认删除</h2>
+              <button type="button" onClick={() => setDeleteTarget(null)} disabled={remove.isPending} aria-label="关闭删除确认" className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors disabled:opacity-50"><X className="h-5 w-5" aria-hidden="true" /></button>
             </div>
-            <p className="text-sm text-text-muted mb-2">将永久删除文档及其所有索引数据：</p>
+            <p id="delete-document-description" className="text-sm text-text-muted mb-2">将永久删除文档及其所有索引数据：</p>
             <p className="text-sm font-medium text-text mb-4 truncate">{deleteTarget.filename}</p>
             {deleteError && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">{deleteError}</div>}
             <div className="flex gap-3">
               <button type="button" onClick={() => setDeleteTarget(null)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">取消</button>
               <button type="button" onClick={handleDelete} disabled={remove.isPending} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50 transition-colors">{remove.isPending ? "删除中…" : "确认删除"}</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Cancel Upload Confirmation */}
       {cancelConfirmOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setCancelConfirmOpen(false)}>
-          <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-2">确认停止上传</h3>
-            <p className="text-sm text-text-muted mb-4">文档正在索引中，停止后已上传的部分可能不完整。确定要停止吗？</p>
+        <Modal
+          titleId="cancel-upload-title"
+          descriptionId="cancel-upload-description"
+          onClose={() => setCancelConfirmOpen(false)}
+        >
+            <h2 id="cancel-upload-title" className="text-lg font-semibold mb-2">确认停止上传</h2>
+            <p id="cancel-upload-description" className="text-sm text-text-muted mb-4">文档正在索引中，停止后已上传的部分可能不完整。确定要停止吗？</p>
             <div className="flex gap-3">
               <button type="button" onClick={() => setCancelConfirmOpen(false)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">继续上传</button>
               <button type="button" onClick={confirmCancelUpload} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 transition-colors">停止上传</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Upload Modal */}
       {uploadOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget && !upload.isPending) handleCancelUpload(); }}>
-          <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-2xl">
+        <Modal
+          titleId="upload-document-title"
+          onClose={handleCancelUpload}
+          closeOnBackdrop={!upload.isPending}
+          className="max-w-md"
+        >
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">上传文档</h3>
-              <button type="button" onClick={handleCancelUpload} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
+              <h2 id="upload-document-title" className="text-lg font-semibold">上传文档</h2>
+              <button type="button" onClick={handleCancelUpload} aria-label="关闭上传窗口" className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" aria-hidden="true" /></button>
             </div>
             <div className="mt-5 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-text mb-1.5">选择文件</label>
-                <input ref={fileRef} type="file" accept=".pdf,.docx,.md,.txt,.html" disabled={upload.isPending} onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-white hover:file:bg-primary-dark focus:ring-2 focus:ring-primary/20 focus:border-primary/50 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed" />
+                <input ref={fileRef} type="file" accept=".pdf,.docx,.md,.txt,.html,.htm" disabled={upload.isPending} onChange={(e) => {
+                  const nextFile = e.target.files?.[0] || null;
+                  setSelectedFile(nextFile);
+                  setUploadError(
+                    nextFile && nextFile.size > maxUploadMb * 1024 * 1024
+                      ? `文件过大，最大支持 ${maxUploadMb}MB`
+                      : null,
+                  );
+                }} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-white hover:file:bg-primary-dark focus:ring-2 focus:ring-primary/20 focus:border-primary/50 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed" />
                 {selectedFile && <p className="mt-1 text-xs text-text-muted">已选择: {selectedFile.name} ({(selectedFile.size / 1024).toFixed(1)} KB)</p>}
+                <p className="mt-1 text-xs text-text-muted">单个文件最大 {maxUploadMb}MB</p>
               </div>
               <div className="flex items-center gap-5">
                 <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={useRaptor} onChange={(e) => setUseRaptor(e.target.checked)} className="rounded border-border" /><span className="font-medium">RAPTOR</span><span className="text-xs text-text-muted">层次索引</span></label>
@@ -208,17 +234,22 @@ export function KnowledgeBasePage() {
               {uploadError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">{uploadError}</div>}
               <button type="button" onClick={handleUpload} disabled={!selectedFile || upload.isPending} className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors">{upload.isPending ? "索引中…" : "开始索引"}</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Document Content Modal */}
       {viewingDoc && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) { setViewingDoc(null); setDocContent(""); } }}>
-          <div className="w-full max-w-3xl max-h-[80vh] rounded-2xl border border-border bg-surface p-6 shadow-2xl overflow-hidden flex flex-col">
+        <Modal
+          titleId="document-content-title"
+          onClose={() => {
+            setViewingDoc(null);
+            setDocContent("");
+          }}
+          className="flex max-h-[80vh] max-w-3xl flex-col overflow-hidden"
+        >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold truncate">{viewingDoc.filename}</h3>
-              <button type="button" onClick={() => { setViewingDoc(null); setDocContent(""); }} className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" /></button>
+              <h2 id="document-content-title" className="text-lg font-semibold truncate">{viewingDoc.filename}</h2>
+              <button type="button" onClick={() => { setViewingDoc(null); setDocContent(""); }} aria-label="关闭文档内容" className="rounded-lg p-1 text-text-muted hover:bg-surface-alt transition-colors"><X className="h-5 w-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 overflow-y-auto">
               {docLoading ? (
@@ -227,8 +258,7 @@ export function KnowledgeBasePage() {
                 <pre className="whitespace-pre-wrap text-sm leading-relaxed font-sans">{docContent}</pre>
               )}
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

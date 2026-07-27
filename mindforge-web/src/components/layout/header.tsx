@@ -5,7 +5,11 @@ import { useHealth } from "@/hooks/use-health";
 function Header({ title }: { title: string }) {
   const { toggleSidebar, theme, setTheme } = useUIStore();
   const { data: health } = useHealth();
-  const isOnline = health?.status === "ok";
+  const connectionState = !health
+    ? "checking"
+    : health.status === "ok"
+      ? "online"
+      : "degraded";
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-border bg-surface/95 px-6 backdrop-blur">
@@ -14,7 +18,7 @@ function Header({ title }: { title: string }) {
         type="button"
         onClick={toggleSidebar}
         aria-label="切换侧边栏"
-        className="rounded-lg p-2 text-text-muted hover:bg-surface-alt xl:hidden"
+        className="rounded-lg p-2 text-text-muted hover:bg-surface-alt md:hidden"
       >
         <Menu className="h-5 w-5" aria-hidden="true" />
       </button>
@@ -39,13 +43,21 @@ function Header({ title }: { title: string }) {
 
       {/* Connection indicator — driven by /health polling */}
       <div
-        className={isOnline
-          ? "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
-          : "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"}
+        className={
+          connectionState === "online"
+            ? "flex items-center gap-1.5 rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300"
+            : connectionState === "degraded"
+              ? "flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+              : "flex items-center gap-1.5 rounded-full bg-surface-alt px-3 py-1 text-xs font-medium text-text-muted"
+        }
         aria-live="polite"
       >
         <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
-        {isOnline ? "在线" : "离线"}
+        {connectionState === "online"
+          ? "在线"
+          : connectionState === "degraded"
+            ? "部分服务异常"
+            : "检测中"}
       </div>
     </header>
   );

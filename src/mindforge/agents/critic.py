@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -42,17 +43,19 @@ class CriticScore:
         issues = data.get("issues", data.get("weaknesses", []))
         suggestions = data.get("suggestions", data.get("improvements", []))
 
-        overall = float(scores.get("overall", 0))
+        if not isinstance(scores, dict):
+            scores = {}
+        overall = _bounded_score(scores.get("overall", 0))
 
         return cls(
-            completeness=float(scores.get("completeness", 0)),
-            accuracy=float(scores.get("accuracy", 0)),
-            depth=float(scores.get("depth", 0)),
-            clarity=float(scores.get("clarity", 0)),
-            citations=float(scores.get("citations", 0)),
+            completeness=_bounded_score(scores.get("completeness", 0)),
+            accuracy=_bounded_score(scores.get("accuracy", 0)),
+            depth=_bounded_score(scores.get("depth", 0)),
+            clarity=_bounded_score(scores.get("clarity", 0)),
+            citations=_bounded_score(scores.get("citations", 0)),
             overall=overall,
-            issues=issues if isinstance(issues, list) else [],
-            suggestions=suggestions if isinstance(suggestions, list) else [],
+            issues=_bounded_text_list(issues),
+            suggestions=_bounded_text_list(suggestions),
             should_refine=bool(data.get("should_refine", False)),
         )
 
@@ -215,3 +218,21 @@ class CriticAgent(BaseAgent):
                 suggestions=["Manual review recommended."],
                 should_refine=False,
             )
+def _bounded_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(score):
+        return 0.0
+    return min(10.0, max(0.0, score))
+
+
+def _bounded_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        item[:2000]
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ][:20]

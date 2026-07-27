@@ -33,7 +33,10 @@ export function SettingsPage() {
     s.setRetrievalTopK(20);
     s.setRerankTopK(6);
     s.setMaxIterations(3);
+    s.setMaxRefineRounds(1);
     s.setCriticThreshold(7.0);
+    s.setSubtaskTimeout(30);
+    s.setResearchTimeout(180);
   };
 
   return (
@@ -75,30 +78,36 @@ function LLMTab() {
   const hasLLMKey = useSettingsStore((s) => s.hasLLMKey);
   const setProvider = useSettingsStore((s) => s.setLLMProvider);
   const setApiKey = useSettingsStore((s) => s.setLLMApiKey);
-  const clearKey = useSettingsStore((s) => s.clearLLMApiKey);
-  const saveSettings = useSettingsStore((s) => s.saveSettings);
+  const restoreKey = useSettingsStore((s) => s.restoreLLMApiKey);
+  const deleteKey = useSettingsStore((s) => s.deleteLLMApiKey);
   const [editing, setEditing] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   const startEdit = () => { setApiKey(""); setEditing(true); };
   const cancelEdit = () => {
-    const s = useSettingsStore.getState();
-    // restore masked key from store (was loaded from backend)
-    const masked = s.llmApiKey || "";
-    const hasKey = s.hasLLMKey;
-    if (hasKey && masked) {
-      setApiKey(masked);
-    } else {
-      setApiKey("");
-    }
+    restoreKey();
     setEditing(false);
   };
 
-  const handleDelete = async () => {
-    clearKey();
+  const handleProviderChange = (nextProvider: LLMProvider) => {
     setEditing(false);
-    // immediately save empty key to backend
-    await saveSettings();
+    setShowKey(false);
+    setProvider(nextProvider);
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    setDeleteError("");
+    const deleted = await deleteKey();
+    setDeleting(false);
+    if (deleted) {
+      setEditing(false);
+      setShowKey(false);
+    } else {
+      setDeleteError("删除失败，服务器中的 API Key 未确认移除，请重试。");
+    }
   };
 
   return (
@@ -107,7 +116,7 @@ function LLMTab() {
 
       <div>
         <label htmlFor="llm-provider" className="block text-sm font-medium text-text mb-1.5">供应商</label>
-        <select id="llm-provider" value={provider} onChange={(e) => setProvider(e.target.value as LLMProvider)}
+        <select id="llm-provider" value={provider} onChange={(e) => handleProviderChange(e.target.value as LLMProvider)}
           className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none">
           <option value="deepseek">DeepSeek</option>
           <option value="openai">OpenAI</option>
@@ -133,7 +142,7 @@ function LLMTab() {
               className="rounded-lg border border-border px-3 py-2 text-sm hover:bg-surface-alt transition-colors">
               修改
             </button>
-            <button type="button" onClick={handleDelete}
+            <button type="button" onClick={handleDelete} disabled={deleting}
               className="rounded-lg border border-red-200 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:hover:bg-red-950 transition-colors" title="删除 Key">
               <Trash2 className="h-4 w-4" />
             </button>
@@ -168,6 +177,11 @@ function LLMTab() {
             ? "API Key 已保存。出于安全考虑，完整 Key 不会回显。点击「修改」可更换，点击垃圾桶可删除。"
             : "请输入 API Key。若留空则降级为文档检索模式。"}
         </p>
+        {deleteError && (
+          <p className="mt-2 text-xs text-red-600" role="alert">
+            {deleteError}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -200,14 +214,20 @@ function RetrievalTab() {
 
 function AgentTab() {
   const maxIter = useSettingsStore((s) => s.maxIterations);
+  const maxRefineRounds = useSettingsStore((s) => s.maxRefineRounds);
   const threshold = useSettingsStore((s) => s.criticThreshold);
+  const subtaskTimeout = useSettingsStore((s) => s.subtaskTimeout);
+  const researchTimeout = useSettingsStore((s) => s.researchTimeout);
   const setMaxIter = useSettingsStore((s) => s.setMaxIterations);
+  const setMaxRefineRounds = useSettingsStore((s) => s.setMaxRefineRounds);
   const setThreshold = useSettingsStore((s) => s.setCriticThreshold);
+  const setSubtaskTimeout = useSettingsStore((s) => s.setSubtaskTimeout);
+  const setResearchTimeout = useSettingsStore((s) => s.setResearchTimeout);
 
   return (
     <div className="rounded-xl border border-border bg-surface p-6 space-y-5" role="tabpanel">
       <h3 className="font-semibold">Agent 参数</h3>
-      <div className="grid grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
         <div>
           <label htmlFor="agent-max-iter" className="block text-sm font-medium text-text mb-1.5">最大迭代次数</label>
           <input id="agent-max-iter" type="number" value={maxIter} onChange={(e) => setMaxIter(Number(e.target.value))} min={1} max={20} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none" />
@@ -217,6 +237,21 @@ function AgentTab() {
           <label htmlFor="agent-threshold" className="block text-sm font-medium text-text mb-1.5">评判阈值</label>
           <input id="agent-threshold" type="number" value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} min={0} max={10} step={0.1} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none" />
           <p className="mt-1 text-xs text-text-muted">Critic 评分低于此值将触发报告精炼</p>
+        </div>
+        <div>
+          <label htmlFor="agent-refine-rounds" className="block text-sm font-medium text-text mb-1.5">最大精炼轮次</label>
+          <input id="agent-refine-rounds" type="number" value={maxRefineRounds} onChange={(e) => setMaxRefineRounds(Number(e.target.value))} min={0} max={5} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none" />
+          <p className="mt-1 text-xs text-text-muted">Critic 触发报告重写的最大轮数</p>
+        </div>
+        <div>
+          <label htmlFor="agent-subtask-timeout" className="block text-sm font-medium text-text mb-1.5">子任务超时（秒）</label>
+          <input id="agent-subtask-timeout" type="number" value={subtaskTimeout} onChange={(e) => setSubtaskTimeout(Number(e.target.value))} min={10} max={600} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none" />
+          <p className="mt-1 text-xs text-text-muted">单个研究子任务允许执行的最长时间</p>
+        </div>
+        <div>
+          <label htmlFor="agent-research-timeout" className="block text-sm font-medium text-text mb-1.5">研究总超时（秒）</label>
+          <input id="agent-research-timeout" type="number" value={researchTimeout} onChange={(e) => setResearchTimeout(Number(e.target.value))} min={30} max={3600} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none" />
+          <p className="mt-1 text-xs text-text-muted">规划、研究、综合和精炼流程的总时间上限</p>
         </div>
       </div>
     </div>

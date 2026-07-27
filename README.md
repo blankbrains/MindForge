@@ -6,13 +6,13 @@
 
 ## 项目概述
 
-MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由 **Python 后端**（FastAPI + Multi-Agent RAG）和 **React 前端**（TypeScript + Tailwind CSS + shadcn/ui）构成。它能够接收用户提出的复杂研究问题，自动将问题分解为 DAG 子任务，并行检索知识库和互联网信息，综合多源信息生成结构化的研究报告，并通过自我批评机制迭代优化输出质量。
+MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由 **Python 后端**（FastAPI + Multi-Agent RAG）和 **React 前端**（TypeScript + Tailwind CSS）构成。它能够接收用户提出的复杂研究问题，自动将问题分解为 DAG 子任务，并行检索知识库和互联网信息，综合多源信息生成结构化的研究报告，并通过自我批评机制迭代优化输出质量。
 
 ### 🖥️ 前端界面
 
 | 页面 | 功能 |
 |------|------|
-| 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / MCP）+ 快捷操作入口 |
+| 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / PostgreSQL / MCP）+ 快捷操作入口 |
 | 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
 | 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
 | 🕐 **研究历史** | 自动捕获研究结果、可展开预览、删除 / 清空管理 |
@@ -65,7 +65,7 @@ flowchart TD
     subgraph E[🎯 Critic]
         E1[5 维度评分] --> E2{"≥ 7.0 分?"}
         E2 -- ✅ 是 --> E3[输出最终报告]
-        E2 -- 🔄 否 --> E4[返回精炼 · 最多 1 轮]
+        E2 -- 🔄 否 --> E4[返回精炼 · 轮次由 .env 配置]
     end
     E4 -.-> D1
 ```
@@ -74,7 +74,7 @@ flowchart TD
 
 | 层 | 技术 |
 |---|------|
-| 🖥️ **前端框架** | React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Vite |
+| 🖥️ **前端框架** | React 19 · TypeScript · Tailwind CSS v4 · Vite |
 | 🗂️ **前端状态** | TanStack Router · TanStack Query · Zustand |
 | 📈 **前端可视化** | React Flow（DAG）· Recharts（雷达图）· react-markdown（报告渲染） |
 | 🤖 **Agent 框架** | Multi-Agent（Planner → Researcher → Synthesizer → Critic） |
@@ -100,7 +100,9 @@ MindForge/
 ├── docker-compose.yml              # Docker 编排（Qdrant + Redis + PostgreSQL）
 ├── Dockerfile                      # 容器构建
 ├── .env.example                    # 环境变量模板
-├── .github/workflows/ci.yml        # CI/CD（ruff + pytest）
+├── .github/workflows/ci.yml        # CI（ruff + pytest + frontend + Compose）
+├── docs/                           # 项目说明、踩坑记录、面试材料
+├── 计划方案/                        # 已实施及后续演进方案
 │
 ├── mindforge-web/                  # React 前端
 │   ├── package.json                # 前端依赖（npm）
@@ -123,7 +125,7 @@ MindForge/
 │       ├── store/                  # Zustand 状态管理
 │       │   ├── research-store.ts   # 研究会话状态（SSE 事件 handler）
 │       │   ├── ui-store.ts         # UI 状态（主题/侧边栏）
-│       │   ├── history-store.ts    # 研究历史（自动捕获，上限 100）
+│       │   ├── history-store.ts    # 研究历史（自动捕获、分页加载、完整详情）
 │       │   └── settings-store.ts   # LLM/检索/Agent 配置
 │       ├── hooks/                  # 自定义 Hooks
 │       │   ├── use-research-session.ts  # 研究会话生命周期（SSE + 历史）
@@ -172,7 +174,7 @@ MindForge/
 │       └── server.py               # 应用入口（启动时构建前端后托管）
 │
 ├── tests/                          # Python 测试（pytest + pytest-cov）
-│   ├── test_retrieval.py           # 检索系统测试（40 个）
+│   ├── test_retrieval.py           # 检索、Agent 与真实 API 回归测试
 │   ├── test_mcp_adapter.py         # MCP 适配器测试
 │   └── test_models.py              # 模型适配器测试
 │
@@ -186,10 +188,10 @@ MindForge/
 
 | 组件 | 要求 | 说明 |
 |------|------|------|
-| 🐍 Python | `>= 3.9` | 推荐 3.11+ |
-| 🐳 Docker | 可选 | 用于 Qdrant + Redis 基础设施，无 Docker 时可跳过检索功能运行 |
-| 🟢 Node.js | `>= 18` | 前端构建 / 开发 |
-| 📦 npm | `>= 9` | 随 Node.js 18+ 附带 |
+| 🐍 Python | `>= 3.10` | 容器与 CI 使用 Python 3.11 |
+| 🐳 Docker | 推荐 | 一次启动 Qdrant、Redis、PostgreSQL 和 MindForge |
+| 🟢 Node.js | `>= 22` | 与 Dockerfile、CI 和 Vite 8 对齐 |
+| 📦 npm | `>= 10` | 随 Node.js 22 附带 |
 
 ### 🐍 1. 启动后端
 
@@ -197,37 +199,60 @@ MindForge/
 git clone <repo-url> && cd MindForge
 
 # 安装依赖
-pip install -e ".[dev]"
+pip install --require-hashes -r requirements-dev.lock
 
 # 配置环境变量
 cp .env.example .env
 # 编辑 .env，设置 LLM 供应商和 API Key
 
-# 启动基础设施（Qdrant + Redis）
-docker compose up -d
+# 启动基础设施（Qdrant + Redis + PostgreSQL）
+docker compose up -d qdrant redis postgres
 
 # 启动 API 服务
-cd src && uvicorn mindforge.api.server:app --reload --port 8000
+python -m uvicorn mindforge.api.server:app --app-dir src --reload --port 8000
 ```
 
 ### 🟢 2. 启动前端
 
 ```bash
 cd mindforge-web
-npm install
+npm ci
 npm run dev     # 开发模式 → http://localhost:5173
 ```
 
-开发模式下 Vite 自动将 `/api/*` 代理到 `http://localhost:8000`，前后端分离开发。
+开发模式下 Vite 从项目根目录 `.env` 读取
+`VITE_API_PROXY_TARGET`，并将 `/api/*` 转发到后端。
+
+### 统一配置规则
+
+项目根目录 `.env` 是所有运行时和部署参数的唯一配置源：
+
+- 后端通过 Pydantic Settings 读取 `.env`
+- Vite 通过 `envDir` 读取同一个 `.env`
+- Docker Compose 自动读取同一个 `.env`
+- MCP Client 通过 `MCP_MCP_SERVERS_JSON` 读取内联 JSON
+- QA 生成脚本通过 `QA_*` 参数读取模型、并发、批大小和输出目录
+
+`.env.example` 包含完整键集合，实际 `.env` 不提交到 Git。`pyproject.toml`、
+`package.json`、`docker-compose.yml`、Vite/TypeScript/ESLint 与 CI 文件是各工具
+必须识别的结构文件，不存放密钥或部署环境值。
 
 ### 🚢 3. 生产部署（单端口）
 
 ```bash
-cd mindforge-web && npm run build   # 构建前端到 dist/
-cd ../src && uvicorn mindforge.api.server:app --host 0.0.0.0 --port 8000
+docker compose up -d --build
 ```
 
-打开 **`http://localhost:8000`** — FastAPI 同时托管 API 和前端静态文件，一个端口搞定。
+打开 `.env` 中 `API_PORT` 对应的地址。容器内 FastAPI 同时托管
+API 和前端静态文件，并通过 `/api/v1/ready` 提供严格就绪探针。
+`DOCKER_INFRA_BIND_ADDRESS` 默认只把 PostgreSQL、Redis、Qdrant 绑定到本机。
+远程部署时必须通过启用 TLS/HTTPS 和身份认证的反向代理暴露
+MindForge；不要直接公开应用或基础设施端口。
+
+现有 Qdrant 数据卷不能跨多个小版本直接升级。若服务器仍运行
+`1.13.x`，必须先备份并按 `1.14 -> 1.15 -> 1.16 -> 1.17 -> 1.18`
+逐级启动和验证后，再使用 `.env` 中固定的 `1.18.3` 镜像；全新部署
+可直接使用该镜像。
 
 ## 🔌 MCP 协议集成
 
@@ -252,45 +277,57 @@ MindForge 实现了**双向 MCP**：既可以作为 MCP Client 调用外部工�
 }
 ```
 
-或通过 HTTP 远程访问：
+HTTP 入口使用 JSON-RPC POST：
 
-```json
-{
-  "mcpServers": {
-    "mindforge": {
-      "url": "http://your-server:8000/api/v1/mcp",
-      "transport": "sse"
-    }
-  }
-}
+```text
+POST /api/v1/mcp
+Content-Type: application/json
 ```
 
 暴露的工具：`search_knowledge_base` · `run_research_task` · `verify_citation` · `system_status`
 
 ### 📥 作为 MCP Client（接入外部工具）
 
-在项目根目录的 `mcp.json` 中配置外部 MCP Server，Researcher Agent 的 ReAct 循环会自动发现并调用：
+在项目根目录 `.env` 的 `MCP_MCP_SERVERS_JSON` 中配置外部
+MCP Server。环境变量引用会在启动子进程时展开：
 
-```json
-{
-  "mcpServers": {
-    "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp"] },
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@github/github-mcp-server"],
-      "env": { "GITHUB_TOKEN": "ghp_xxx" }
-    }
-  }
-}
+```dotenv
+MCP_MCP_SERVERS_JSON={"mcpServers":{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]},"github":{"command":"npx","args":["-y","@github/github-mcp-server"],"env":{"GITHUB_TOKEN":"${GITHUB_TOKEN}"}}}}
 ```
+
+MindForge 默认只读取项目根目录 `.env` 中的
+`MCP_MCP_SERVERS_JSON`。`MCP_MCP_CONFIG_PATH` 默认为空，仅在迁移旧部署
+时显式设置为旧 JSON 文件路径。
+
+外部 MCP 工具默认不会交给 Researcher Agent。需要启用时必须同时设置：
+
+```dotenv
+MCP_AGENT_TOOLS_ENABLED=true
+MCP_AGENT_ALLOWED_SERVERS=context7
+MCP_AGENT_ALLOWED_TOOLS=context7:resolve-library-id,context7:get-library-docs
+```
+
+只允许完成当前工作流所需的最小只读工具集合，不要把仓库写入、命令执行或
+凭证管理工具直接开放给模型。
 
 ## 🔄 CI/CD
 
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 代码风格 + import 顺序
-- **pytest + coverage** — 40 个单元测试（跳过 `integration` 标记的测试）
-- Qdrant + Redis 作为 Service Container 提供基础设施
+- **pytest + coverage** — 74 个单元与真实 API 回归测试
+- **前端质量门禁** — ESLint + TypeScript/Vite 生产构建
+- Qdrant + Redis + PostgreSQL 作为 Service Container
+- Docker Compose 配置展开校验
+
+## 📚 项目文档
+
+- [文档索引](docs/README.md)
+- [项目架构与模块说明](docs/MindForge项目文档.md)
+- [完整实现说明](docs/MindForge完整实现.md)
+- [真实问题与修复记录](docs/MindForge踩过的坑.md)
+- [面试题目与项目讲解](docs/MindForge面试题目.md)
+- [前端方案与实施复盘](计划方案/MindForge前端方案.md)
 
 ## ✨ 技术亮点
 
@@ -323,12 +360,22 @@ GitHub Actions 自动运行：
 
 - **TypeScript 严格模式** — `noUnusedLocals` + `noUnusedParameters` 全开，零类型错误
 - **Zustand 选择器模式** — 精准订阅，避免不必要的重渲染
-- **单端口部署** — 前端构建后由 FastAPI 直接托管，无需 Nginx 反向代理
-- **CI/CD** — GitHub Actions 自动 ruff 检查 + pytest 40 个测试 + coverage 报告
+- **单端口应用** — 前端构建后由 FastAPI 直接托管；远程访问仍必须置于
+  启用 TLS/HTTPS 和身份认证的反向代理之后
+- **CI/CD** — GitHub Actions 自动执行 Ruff、pytest、前端 lint/build 与 Compose 校验
 
 ## 📄 许可证
 
 本项目基于 [MIT 协议](LICENSE) 开源，可自由使用、修改和分发。
+
+## 📚 项目文档
+
+- [文档索引](docs/README.md)
+- [项目架构与模块说明](docs/MindForge项目文档.md)
+- [开发踩坑记录](docs/MindForge踩过的坑.md)
+- [完整实现说明](docs/MindForge完整实现.md)
+- [项目面试题目](docs/MindForge面试题目.md)
+- [前端实施与演进方案](计划方案/MindForge前端方案.md)
 
 ---
 

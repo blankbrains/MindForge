@@ -44,7 +44,7 @@ class HybridRetriever:
         Returns a list of result dicts with keys: ``id``, ``text``, ``score``,
         and ``source`` (one of ``vector``, ``hyde``, ``multi_query``).
         """
-        all_results: List[Dict[str, Any]] = []
+        rankings: Dict[str, List[Dict[str, Any]]] = {}
 
         # --- Path 1: Direct vector search ---
         if self.vector_store is not None and self.embedding_fn is not None:
@@ -53,19 +53,38 @@ class HybridRetriever:
                 vector_hits = await self.vector_store.search(
                     vector=dense_vec, top_k=top_k
                 )
-                for payload, score in vector_hits:
-                    all_results.append(
-                        {
-                            "id": payload.get("chunk_id", ""),
-                            "text": payload.get("content", ""),
-                            "score": float(score),
-                            "source": "vector",
-                        }
-                    )
+                rankings["vector"] = [
+                    {
+                        **payload,
+                        "id": payload.get("chunk_id", ""),
+                        "text": payload.get("content", ""),
+                        "document_source": payload.get("source", ""),
+                        "score": float(score),
+                        "source": "vector",
+                    }
+                    for payload, score in vector_hits
+                    if payload.get("chunk_id")
+                ]
             except Exception:
                 logger.exception("Direct vector search failed.")
 
-        # --- Path 2: HyDE (Hypothetical Document Embedding) ---
+        # --- Path 2: Direct BM25 search ---
+        if self.bm25_retriever is not None:
+            try:
+                bm25_hits = self.bm25_retriever.search(query=query, top_k=top_k)
+                rankings["bm25"] = [
+                    {
+                        **hit,
+                        "document_source": hit.get("source", ""),
+                        "source": "bm25",
+                    }
+                    for hit in bm25_hits
+                    if hit.get("id")
+                ]
+            except Exception:
+                logger.exception("Direct BM25 retrieval failed.")
+
+        # --- Path 3: HyDE (Hypothetical Document Embedding) ---
         if use_hyde and self.llm_fn is not None:
             try:
                 hyp_doc = await self._generate_hypothetic(query)
@@ -74,39 +93,43 @@ class HybridRetriever:
                     hyde_hits = await self.vector_store.search(
                         vector=hyp_vec, top_k=top_k
                     )
-                    for payload, score in hyde_hits:
-                        all_results.append(
-                            {
-                                "id": payload.get("chunk_id", ""),
-                                "text": payload.get("content", ""),
-                                "score": float(score),
-                                "source": "hyde",
-                            }
-                        )
+                    rankings["hyde"] = [
+                        {
+                            **payload,
+                            "id": payload.get("chunk_id", ""),
+                            "text": payload.get("content", ""),
+                            "document_source": payload.get("source", ""),
+                            "score": float(score),
+                            "source": "hyde",
+                        }
+                        for payload, score in hyde_hits
+                        if payload.get("chunk_id")
+                    ]
             except Exception:
                 logger.exception("HyDE retrieval failed.")
 
-        # --- Path 3: Multi-Query BM25 ---
+        # --- Path 4: Multi-Query BM25 ---
         if use_multi_query and self.llm_fn is not None and self.bm25_retriever is not None:
             try:
                 multi_queries = await self._generate_multi_queries(query)
+                multi_query_hits: List[Dict[str, Any]] = []
                 for mq in multi_queries:
                     bm25_hits = self.bm25_retriever.search(query=mq, top_k=top_k)
                     for hit in bm25_hits:
-                        all_results.append(
+                        multi_query_hits.append(
                             {
-                                "id": hit["id"],
-                                "text": hit["text"],
-                                "score": hit["score"],
+                                **hit,
+                                "document_source": hit.get("source", ""),
                                 "source": "multi_query",
                             }
                         )
+                rankings["multi_query"] = multi_query_hits
             except Exception:
                 logger.exception("Multi-query BM25 retrieval failed.")
 
         # --- Fuse with weighted RRF ---
         fused = self._rrf_fuse(
-            all_results, top_k,
+            rankings, top_k,
             vector_weight=vector_weight,
             bm25_weight=bm25_weight,
         )
@@ -182,46 +205,47 @@ class HybridRetriever:
 
     @staticmethod
     def _rrf_fuse(
-        results: List[Dict[str, Any]],
+        rankings: Dict[str, List[Dict[str, Any]]],
         top_k: int,
         vector_weight: float = 0.5,
         bm25_weight: float = 0.5,
     ) -> List[Dict[str, Any]]:
-        """Weighted Reciprocal Rank Fusion with constant k = 60.
+        """Fuse independently ranked result lists with weighted pure RRF.
 
-        RRF scores are scaled by 60 to produce values in [0, 1] range,
-        then multiplied by the raw cosine similarity score to preserve
-        semantic information from the embedding model.
+        Raw scores are intentionally ignored because cosine similarity,
+        BM25, and graph scores have incompatible scales. Each retrieval path
+        contributes only its rank position, which is the invariant RRF is
+        designed to combine.
         """
         fused: Dict[str, Dict[str, Any]] = {}
-        source_map: Dict[str, str] = {}
+        sources_by_doc: Dict[str, set[str]] = {}
 
-        for rank, doc in enumerate(results):
-            doc_id = doc["id"]
-            raw_score = doc.get("score", 0.0)
-
-            if doc_id not in fused:
-                fused[doc_id] = {
-                    "id": doc_id,
-                    "text": doc["text"],
-                    "score": 0.0,
-                }
-                source_map[doc_id] = doc.get("source", "unknown")
-
-            # Determine path weight
-            src = doc.get("source", "unknown")
-            if src in ("vector", "hyde"):
-                w = vector_weight
-            elif src == "multi_query":
-                w = bm25_weight
+        for ranking_name, results in rankings.items():
+            if ranking_name in ("vector", "hyde"):
+                weight = vector_weight
+            elif ranking_name in ("bm25", "multi_query"):
+                weight = bm25_weight
             else:
-                w = 0.5
+                weight = 1.0
 
-            # Weighted RRF contribution, scaled and mixed with raw score
-            # RRF: 1/(k+rank) ≈ 0.016 → scale by 60 → ~1.0 for top result
-            rrf = w * _RRF_K / (rank + _RRF_K)
-            # Blend RRF rank signal with raw semantic score (60:40)
-            fused[doc_id]["score"] += 0.6 * rrf + 0.4 * raw_score
+            seen_in_ranking: set[str] = set()
+            for rank, doc in enumerate(results, start=1):
+                doc_id = str(doc.get("id", ""))
+                if not doc_id or doc_id in seen_in_ranking:
+                    continue
+                seen_in_ranking.add(doc_id)
+
+                if doc_id not in fused:
+                    fused[doc_id] = {
+                        **doc,
+                        "id": doc_id,
+                        "text": doc.get("text", doc.get("content", "")),
+                        "score": 0.0,
+                    }
+                    sources_by_doc[doc_id] = set()
+
+                fused[doc_id]["score"] += weight / (_RRF_K + rank)
+                sources_by_doc[doc_id].add(ranking_name)
 
         # Normalize scores to [0, 1]
         max_score = max((d["score"] for d in fused.values()), default=0.0)
@@ -233,6 +257,8 @@ class HybridRetriever:
             fused.values(), key=lambda x: x["score"], reverse=True
         )
         for doc in sorted_docs:
-            doc["source"] = source_map.get(doc["id"], "unknown")
+            retrieval_sources = sorted(sources_by_doc.get(doc["id"], set()))
+            doc["retrieval_sources"] = retrieval_sources
+            doc["source"] = retrieval_sources[0] if retrieval_sources else "unknown"
 
         return sorted_docs[:top_k]

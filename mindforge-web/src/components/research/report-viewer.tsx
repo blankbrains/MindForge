@@ -58,6 +58,13 @@ export function ReportViewer({ result }: Props) {
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}
+            components={{
+              img: ({ alt }) => (
+                <span className="text-sm text-text-muted">
+                  [已阻止自动加载图片：{alt || "无说明"}]
+                </span>
+              ),
+            }}
           >
             {result.output}
           </ReactMarkdown>

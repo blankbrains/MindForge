@@ -120,7 +120,12 @@ class WebSearchTool(BaseTool):
         return ToolResult(
             success=True,
             output=formatted,
-            data={"results": results, "total": len(results), "backend": "tavily"},
+            data={
+                "results": results,
+                "sources": self._build_sources(results),
+                "total": len(results),
+                "backend": "tavily",
+            },
         )
 
     def _format_tavily_results(
@@ -204,8 +209,32 @@ class WebSearchTool(BaseTool):
         return ToolResult(
             success=True,
             output=formatted,
-            data={"results": results, "total": len(results), "backend": "duckduckgo"},
+            data={
+                "results": results,
+                "sources": self._build_sources(results),
+                "total": len(results),
+                "backend": "duckduckgo",
+            },
         )
+
+    @staticmethod
+    def _build_sources(
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "index": index,
+                "title": result.get("title", "网页来源"),
+                "url": result.get("url", ""),
+                "content": result.get(
+                    "content",
+                    result.get("snippet", ""),
+                ),
+                "source": "web",
+            }
+            for index, result in enumerate(results, start=1)
+            if result.get("url")
+        ]
 
     def _parse_ddg_html(
         self, html: str, max_results: int

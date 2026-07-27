@@ -50,6 +50,7 @@ class EmbeddingManager:
         self._provider = provider
         self._model = None
         self._client = None  # OpenAI client
+        self._native_dim: Optional[int] = None
         self._init_backend()
 
     # ------------------------------------------------------------------
@@ -100,35 +101,50 @@ class EmbeddingManager:
         Uses HuggingFace mirror (hf-mirror.com) for China access.
         Cached models load instantly with local_files_only.
         """
-        # Route HF requests through Chinese mirror (fast, unblocked)
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-        # If mirror is also slow, set short timeout
-        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "10")
+        from mindforge.config import get_settings
+
+        settings = get_settings().llm
+        os.environ["HF_ENDPOINT"] = settings.hf_endpoint
+        os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(
+            settings.hf_hub_download_timeout
+        )
 
         from sentence_transformers import SentenceTransformer
 
-        model_name = self._model_name or os.getenv("EMBEDDING_ST_MODEL", "BAAI/bge-m3")
+        model_name = self._model_name or settings.local_embedding_model
+        revision = settings.local_embedding_revision
 
         # Try local cache first (instant), then download from HF mirror
         try:
-            self._model = SentenceTransformer(model_name, local_files_only=True)
+            self._model = SentenceTransformer(
+                model_name,
+                revision=revision,
+                local_files_only=True,
+            )
         except Exception:
             logger.info("Model '%s' not cached — downloading from mirror...", model_name)
-            self._model = SentenceTransformer(model_name, local_files_only=False)
+            self._model = SentenceTransformer(
+                model_name,
+                revision=revision,
+                local_files_only=False,
+            )
+        try:
+            self._native_dim = self._model.get_embedding_dimension()
+        except AttributeError:
+            self._native_dim = self._model.get_sentence_embedding_dimension()
         if self._dim is None:
-            try:
-                self._dim = self._model.get_embedding_dimension()
-            except AttributeError:
-                self._dim = self._model.get_sentence_embedding_dimension()
+            self._dim = self._native_dim
         self._provider = "sentence-transformers"
         logger.info("Embedding: sentence-transformers/%s (dim=%d)", model_name, self._dim)
 
     def _init_openai(self) -> None:
         """Initialize OpenAI embeddings backend."""
         from openai import OpenAI
+        from mindforge.config import get_settings
 
-        api_key = os.getenv("LLM_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        base_url = os.getenv("LLM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+        settings = get_settings().llm
+        api_key = settings.openai_api_key
+        base_url = settings.openai_base_url
         if not api_key:
             raise RuntimeError("OpenAI API key not configured")
 
@@ -136,7 +152,7 @@ class EmbeddingManager:
         if base_url:
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
-        self._model_name = self._model_name or os.getenv("EMBEDDING_OPENAI_MODEL", "text-embedding-3-small")
+        self._model_name = self._model_name or settings.embedding_model
         if self._dim is None:
             # Known dimensions for common models
             _OPENAI_DIMS = {
@@ -203,27 +219,47 @@ class EmbeddingManager:
             normalize_embeddings=True,
             show_progress_bar=False,
         )
-        return result.tolist()
+        return [self._fit_dimension(vector) for vector in result.tolist()]
 
     def _embed_openai(self, texts: List[str]) -> List[List[float]]:
         # OpenAI embedding 单次请求有 token / 批量上限，按 64 条分片
         max_batch = 64
         if len(texts) <= max_batch:
-            resp = self._client.embeddings.create(
-                model=self._model_name,
-                input=texts,
-            )
+            kwargs = {"model": self._model_name, "input": texts}
+            if self._model_name.startswith("text-embedding-3"):
+                kwargs["dimensions"] = self.dim
+            resp = self._client.embeddings.create(**kwargs)
             return [d.embedding for d in resp.data]
 
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), max_batch):
             batch = texts[i:i + max_batch]
-            resp = self._client.embeddings.create(
-                model=self._model_name,
-                input=batch,
-            )
+            kwargs = {"model": self._model_name, "input": batch}
+            if self._model_name.startswith("text-embedding-3"):
+                kwargs["dimensions"] = self.dim
+            resp = self._client.embeddings.create(**kwargs)
             all_embeddings.extend(d.embedding for d in resp.data)
         return all_embeddings
+
+    def _fit_dimension(self, vector: List[float]) -> List[float]:
+        """Fit native embeddings to the configured Qdrant dimension.
+
+        Zero-padding a normalized vector preserves cosine similarity. This
+        allows BGE-M3 and OpenAI v3 embeddings to share a fixed collection
+        dimension across runtime provider switches.
+        """
+        target = self.dim
+        if len(vector) == target:
+            return vector
+        if len(vector) > target:
+            resized = vector[:target]
+            norm = math.sqrt(sum(value * value for value in resized))
+            return (
+                [value / norm for value in resized]
+                if norm > 0
+                else resized
+            )
+        return vector + [0.0] * (target - len(vector))
 
     def _embed_fallback(self, texts: List[str]) -> List[List[float]]:
         """Deterministic hash projection (zero model, zero semantic).
@@ -271,6 +307,12 @@ def get_embedder() -> EmbeddingManager:
         _embedder = EmbeddingManager(
             model_name=settings.llm.local_embedding_model or "BAAI/bge-m3",
             provider=settings.llm.embedding_provider or None,
-            dim=settings.llm.local_embedding_dim or settings.vector_store.embedding_dim or 1024,
+            dim=settings.vector_store.embedding_dim,
         )
     return _embedder
+
+
+def reset_embedder() -> None:
+    """Drop the cached embedding backend after configuration changes."""
+    global _embedder
+    _embedder = None

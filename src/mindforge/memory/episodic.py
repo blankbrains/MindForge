@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of episodes kept in-memory (when no Redis is available)
-MAX_EPISODES = 200
-
-# Redis TTL for episodes when Redis *is* available (30 days in seconds)
-REDIS_TTL = 30 * 24 * 3600
 
 TASK_CATEGORIES = frozenset({"comparison", "howto", "analysis", "concept"})
 
@@ -47,10 +43,23 @@ class EpisodicMemory:
     30-day TTL for durable storage.
     """
 
-    def __init__(self, redis_client: Any = None) -> None:
+    def __init__(
+        self,
+        redis_client: Any = None,
+        max_episodes: int | None = None,
+        redis_ttl: int | None = None,
+    ) -> None:
+        from mindforge.config import get_settings
+
+        config = get_settings().memory
         self._episodes: list[Episode] = []
         self._redis = redis_client
+        self._max_episodes = max_episodes or config.max_episodes
+        self._redis_ttl = redis_ttl or config.episodic_ttl_seconds
+        self._max_episode_chars = config.max_episode_chars
         self._lock = asyncio.Lock()
+        if self._redis is not None:
+            self._load_from_redis()
 
     # ------------------------------------------------------------------
     # Public API
@@ -66,9 +75,9 @@ class EpisodicMemory:
         """Record a new episode."""
         task_type = self._classify_task(task)
         episode = Episode(
-            task=task,
-            result=result,
-            sources=sources,
+            task=task[:20_000],
+            result=result[: self._max_episode_chars],
+            sources=[str(source)[:1000] for source in sources[:100]],
             embedding=embedding,
             task_type=task_type,
         )
@@ -76,7 +85,7 @@ class EpisodicMemory:
         self._episodes.append(episode)
 
         # In-memory cap
-        if len(self._episodes) > MAX_EPISODES:
+        if len(self._episodes) > self._max_episodes:
             self._episodes.pop(0)
 
         # Redis persistence (best-effort)
@@ -105,6 +114,7 @@ class EpisodicMemory:
         list[Episode]
             Matching episodes, scored by word-overlap (descending).
         """
+        top_k = min(max(1, top_k), 20)
         cutoff: float | None = None
         if days is not None:
             cutoff = time.time() - days * 86400
@@ -213,9 +223,10 @@ class EpisodicMemory:
     def _persist_to_redis(self, episode: Episode) -> None:
         """Store an episode in Redis with a 30-day TTL."""
         try:
-            import json
-
-            key = f"episode:{episode.timestamp}:{hash(episode.task) % 10**6}"
+            task_hash = hashlib.sha256(
+                episode.task.encode("utf-8")
+            ).hexdigest()[:16]
+            key = f"mindforge:episode:{episode.timestamp:.6f}:{task_hash}"
             payload = {
                 "task": episode.task,
                 "result": episode.result,
@@ -224,6 +235,66 @@ class EpisodicMemory:
                 "timestamp": episode.timestamp,
                 "task_type": episode.task_type,
             }
-            self._redis.setex(key, REDIS_TTL, json.dumps(payload))
+            self._redis.setex(key, self._redis_ttl, json.dumps(payload))
+            index_key = "mindforge:episodes:index"
+            self._redis.zadd(index_key, {key: episode.timestamp})
+            count = int(self._redis.zcard(index_key))
+            overflow = count - self._max_episodes
+            if overflow > 0:
+                stale = self._redis.zrange(index_key, 0, overflow - 1)
+                if stale:
+                    self._redis.delete(*stale)
+                    self._redis.zrem(index_key, *stale)
+            self._redis.expire(index_key, self._redis_ttl)
         except Exception:
             logger.exception("Failed to persist episode to Redis")
+
+    def _load_from_redis(self) -> None:
+        """Restore recent episodes from Redis at process startup."""
+        try:
+            episodes: list[Episode] = []
+            index_key = "mindforge:episodes:index"
+            keys = self._redis.zrevrange(
+                index_key,
+                0,
+                self._max_episodes - 1,
+            )
+            if not keys:
+                keys = []
+                for key in self._redis.scan_iter(
+                    match="mindforge:episode:*",
+                    count=min(200, self._max_episodes),
+                ):
+                    keys.append(key)
+                    if len(keys) >= self._max_episodes:
+                        break
+            for key in keys:
+                raw = self._redis.get(key)
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                episodes.append(
+                    Episode(
+                        task=str(data.get("task", ""))[:20_000],
+                        result=str(data.get("result", ""))[
+                            : self._max_episode_chars
+                        ],
+                        sources=[
+                            str(source)[:1000]
+                            for source in list(data.get("sources", []))[:100]
+                        ],
+                        embedding=data.get("embedding"),
+                        timestamp=float(data.get("timestamp", 0.0)),
+                        task_type=str(
+                            data.get("task_type", "unknown")
+                        ),
+                    )
+                )
+            episodes.sort(key=lambda episode: episode.timestamp)
+            self._episodes = episodes[-self._max_episodes:]
+            logger.info(
+                "Restored %d episodic memories from Redis.",
+                len(self._episodes),
+            )
+        except Exception:
+            logger.exception("Failed to restore episodic memory from Redis")

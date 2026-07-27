@@ -110,11 +110,13 @@ class AdaptiveRetriever:
         reranker: Optional[CrossEncoderReranker] = None,
         graph_engine=None,
         llm_fn=None,
+        max_request_top_k: int = 50,
     ):
         self.hybrid_retriever = hybrid_retriever
         self.reranker = reranker
         self.graph_engine = graph_engine
         self.llm_fn = llm_fn
+        self.max_request_top_k = max(1, max_request_top_k)
 
     # ------------------------------------------------------------------
     # Public API
@@ -141,6 +143,13 @@ class AdaptiveRetriever:
               - ``reasoning``: explanation of the strategy chosen
               - ``raw_results``: unreranked results per source (for debugging)
         """
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise ValueError("top_k must be an integer.")
+        if not 1 <= top_k <= self.max_request_top_k:
+            raise ValueError(
+                f"top_k must be between 1 and {self.max_request_top_k}."
+            )
+
         # Step 1: Classify intent
         if mode is not None:
             query_mode = mode

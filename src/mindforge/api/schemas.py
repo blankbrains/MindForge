@@ -5,9 +5,10 @@ Defines request / response models used by all API endpoints.
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ------------------------------------------------------------------
@@ -17,7 +18,12 @@ from pydantic import BaseModel, Field
 class QueryRequest(BaseModel):
     """Payload for submitting a research task."""
 
-    task: str = Field(..., description="Natural-language research task or question.")
+    task: str = Field(
+        ...,
+        min_length=1,
+        max_length=20_000,
+        description="Natural-language research task or question.",
+    )
     user_id: str | None = Field(None, description="Optional caller identifier.")
     stream: bool = Field(False, description="If true, use SSE streaming response.")
     options: dict[str, Any] = Field(
@@ -48,7 +54,7 @@ class IndexRequest(BaseModel):
     file_url: str | None = Field(None, description="Public URL of the document.")
     file_path: str | None = Field(None, description="Local filesystem path.")
     metadata: dict[str, Any] = Field(default_factory=dict)
-    strategy: str = Field(
+    strategy: Literal["auto", "fixed", "semantic"] = Field(
         "auto",
         description="Chunking strategy: 'auto', 'fixed', 'semantic'.",
     )
@@ -98,19 +104,41 @@ class SettingsResponse(BaseModel):
     deepseek_api_key: str = ""
     openai_api_key: str = ""
     embedding_provider: str = "openai"
+    retrieval_top_k: int = 20
+    rerank_top_k: int = 6
+    max_iterations: int = 3
+    max_refine_rounds: int = 1
+    critic_threshold: float = 7.0
+    subtask_timeout: int = 30
+    research_timeout: int = 180
 
 
 class SettingsUpdateRequest(BaseModel):
     """Payload for updating user settings."""
 
-    llm_provider: str | None = None
-    deepseek_api_key: str | None = None
-    openai_api_key: str | None = None
-    embedding_provider: str | None = None
-    retrieval_top_k: int | None = None
-    rerank_top_k: int | None = None
-    max_iterations: int | None = None
-    critic_threshold: float | None = None
+    llm_provider: Literal["openai", "deepseek"] | None = None
+    deepseek_api_key: str | None = Field(None, max_length=4096)
+    openai_api_key: str | None = Field(None, max_length=4096)
+    embedding_provider: Literal["openai", "bge"] | None = None
+    retrieval_top_k: int | None = Field(None, ge=1, le=100)
+    rerank_top_k: int | None = Field(None, ge=1, le=50)
+    max_iterations: int | None = Field(None, ge=1, le=20)
+    max_refine_rounds: int | None = Field(None, ge=0, le=5)
+    critic_threshold: float | None = Field(None, ge=0.0, le=10.0)
+    subtask_timeout: int | None = Field(None, ge=10, le=600)
+    research_timeout: int | None = Field(None, ge=30, le=3600)
+
+    @field_validator("deepseek_api_key", "openai_api_key")
+    @classmethod
+    def reject_api_key_control_characters(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("API keys must not contain control characters.")
+        return value
 
 
 class HistoryItem(BaseModel):
@@ -134,11 +162,22 @@ class HistoryListResponse(BaseModel):
 class HistorySaveRequest(BaseModel):
     """Request body for saving a research history entry."""
 
-    task: str
-    report: str = ""
+    task: str = Field(min_length=1, max_length=20_000)
+    report: str = Field(default="", max_length=2_000_000)
     quality_score: float | None = None
-    model_used: str | None = None
+    model_used: str | None = Field(default=None, max_length=200)
     token_usage: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def enforce_token_usage_size(self) -> HistorySaveRequest:
+        encoded = json.dumps(
+            self.token_usage,
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+        if len(encoded) > 100_000:
+            raise ValueError("token_usage exceeds 100000 bytes.")
+        return self
 
 
 class HealthResponse(BaseModel):
@@ -148,4 +187,6 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
     qdrant_connected: bool = False
     redis_connected: bool = False
+    postgres_connected: bool = False
+    mcp_configured: bool = False
     mcp_tools_available: bool = False

@@ -47,4 +47,5 @@ export type SSEEvent =
   | { type: "critic_feedback"; score: CriticScore; round: number }
   | { type: "refining"; round: number }
   | { type: "answer_chunk"; content: string }
+  | { type: "error"; content: string }
   | { type: "done"; result: AgentResult };

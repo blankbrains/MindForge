@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import List, Optional, Dict, Any
 import json
 import logging
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -21,10 +22,15 @@ class BM25Retriever:
     to simple keyword matching when the optional dependencies are unavailable."""
 
     def __init__(self, index_dir: str = ".bm25_index"):
+        from mindforge.config import get_settings
+
         self.index_dir = Path(index_dir)
+        self.max_chunks = get_settings().retrieval.bm25_max_chunks
         self.retriever = None
         self.documents: List[str] = []
         self.doc_ids: List[str] = []
+        self.metadatas: List[Dict[str, Any]] = []
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Index building
@@ -35,27 +41,102 @@ class BM25Retriever:
 
         Each dict should have at least ``id`` and ``text`` keys.
         """
+        if len(documents) > self.max_chunks:
+            raise ValueError(
+                "BM25 corpus exceeds the configured chunk limit of "
+                f"{self.max_chunks}."
+            )
         new_docs = [d.get("text", "") for d in documents]
-        new_ids = [d.get("id", str(i)) for i, d in enumerate(documents)]
+        new_ids = [str(d.get("id", i)) for i, d in enumerate(documents)]
+        new_metadatas = [
+            {
+                key: value
+                for key, value in d.items()
+                if key not in {"id", "text", "score"}
+            }
+            for d in documents
+        ]
 
+        with self._lock:
+            self.documents = new_docs
+            self.doc_ids = new_ids
+            self.metadatas = new_metadatas
+            self._rebuild_retriever()
+
+    def upsert_documents(self, documents: List[Dict[str, Any]]) -> None:
+        """Insert or replace documents by id and rebuild the sparse index."""
+        if not documents:
+            return
+        with self._lock:
+            existing = {
+                doc_id: {
+                    "id": doc_id,
+                    "text": self.documents[index],
+                    **(
+                        self.metadatas[index]
+                        if index < len(self.metadatas)
+                        else {}
+                    ),
+                }
+                for index, doc_id in enumerate(self.doc_ids)
+            }
+            for index, document in enumerate(documents):
+                doc_id = str(document.get("id", index))
+                existing[doc_id] = {**document, "id": doc_id}
+            if len(existing) > self.max_chunks:
+                raise ValueError(
+                    "BM25 corpus exceeds the configured chunk limit of "
+                    f"{self.max_chunks}."
+                )
+            self.build_index(list(existing.values()))
+
+    def delete_document(self, doc_id: str) -> int:
+        """Delete all chunks belonging to a document and return the count."""
+        with self._lock:
+            kept: List[Dict[str, Any]] = []
+            removed = 0
+            for index, chunk_id in enumerate(self.doc_ids):
+                metadata = (
+                    self.metadatas[index]
+                    if index < len(self.metadatas)
+                    else {}
+                )
+                if metadata.get("doc_id") == doc_id:
+                    removed += 1
+                    continue
+                kept.append(
+                    {
+                        "id": chunk_id,
+                        "text": self.documents[index],
+                        **metadata,
+                    }
+                )
+            if removed:
+                self.build_index(kept)
+            return removed
+
+    def _rebuild_retriever(self) -> None:
+        if not self.documents:
+            self.retriever = None
+            return
         if _BM25S_AVAILABLE:
             try:
-                tokenized = self._tokenize(new_docs)
+                tokenized = self._tokenize(self.documents)
                 new_retriever = bm25s.BM25()
                 new_retriever.index(tokenized)
                 self.retriever = new_retriever
                 logger.info(
-                    "Built BM25 index with %d documents.", len(new_docs)
+                    "Built BM25 index with %d documents.",
+                    len(self.documents),
                 )
+                return
             except Exception:
                 logger.exception("Failed to build BM25 index; falling back.")
-                self.retriever = None
         else:
             logger.info(
                 "bm25s not available; falling back to simple keyword matching."
             )
-        self.documents = new_docs
-        self.doc_ids = new_ids
+        self.retriever = None
 
     def _tokenize(self, texts: List[str]) -> List[List[str]]:
         """Tokenize a list of texts using jieba for Chinese support."""
@@ -93,6 +174,11 @@ class BM25Retriever:
                             "id": self.doc_ids[doc_idx],
                             "text": self.documents[doc_idx],
                             "score": score,
+                            **(
+                                self.metadatas[doc_idx]
+                                if doc_idx < len(self.metadatas)
+                                else {}
+                            ),
                         }
                     )
                 return results
@@ -117,6 +203,11 @@ class BM25Retriever:
                         "id": self.doc_ids[i],
                         "text": doc_text,
                         "score": float(score),
+                        **(
+                            self.metadatas[i]
+                            if i < len(self.metadatas)
+                            else {}
+                        ),
                     }
                 )
 
@@ -132,17 +223,17 @@ class BM25Retriever:
         save_dir = Path(path) if path else self.index_dir
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.retriever is not None and _BM25S_AVAILABLE:
-            try:
-                self.retriever.save(str(save_dir))
-                logger.info("BM25 index saved to '%s'.", save_dir)
-            except Exception:
-                logger.exception("Failed to save BM25 index.")
-
-        # Always persist document metadata so the index is self-contained.
-        meta = {"doc_ids": self.doc_ids, "documents": self.documents}
-        with open(save_dir / "meta.json", "w", encoding="utf-8") as f:
+        # Persist the corpus rather than bm25s internals. Rebuilding on load
+        # is deterministic and avoids version-specific serialized formats.
+        meta = {
+            "doc_ids": self.doc_ids,
+            "documents": self.documents,
+            "metadatas": self.metadatas,
+        }
+        tmp_path = save_dir / ".meta.json.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False)
+        tmp_path.replace(save_dir / "meta.json")
 
     def load(self, path: Optional[str] = None) -> bool:
         """Load a BM25 index from disk. Returns True on success."""
@@ -158,18 +249,13 @@ class BM25Retriever:
             meta = json.load(f)
         self.doc_ids = meta.get("doc_ids", [])
         self.documents = meta.get("documents", [])
-
-        # Load BM25 retriever
-        if _BM25S_AVAILABLE:
-            try:
-                self.retriever = bm25s.BM25()
-                self.retriever.load(str(load_dir))
-                logger.info("BM25 index loaded from '%s' (%d docs).", load_dir, len(self.documents))
-                return True
-            except Exception:
-                logger.exception("Failed to load BM25 index; metadata loaded, but retriever unavailable.")
-                self.retriever = None
-                return True
-        else:
-            logger.info("bm25s not available; loaded document metadata only.")
-            return True
+        self.metadatas = meta.get("metadatas", [{} for _ in self.doc_ids])
+        if len(self.metadatas) != len(self.doc_ids):
+            self.metadatas = [{} for _ in self.doc_ids]
+        self._rebuild_retriever()
+        logger.info(
+            "BM25 corpus loaded from '%s' (%d docs).",
+            load_dir,
+            len(self.documents),
+        )
+        return True

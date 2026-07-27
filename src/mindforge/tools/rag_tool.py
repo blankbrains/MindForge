@@ -76,28 +76,9 @@ class RAGTool(BaseTool):
                 "Install mindforge with retrieval extras or provide a retriever instance."
             )
 
-        from mindforge.retrieval.vector_store import get_vector_store
-        from mindforge.retrieval.hybrid import HybridRetriever
-        from mindforge.ingestion.embedder import get_embedder
+        from mindforge.retrieval.service import get_retriever
 
-        store = get_vector_store()
-        store.ensure_collection()
-        embedder = get_embedder()
-
-        async def _async_embed(text: str):
-            return embedder.embed_single(text)
-
-        hybrid = HybridRetriever(
-            vector_store=store,
-            bm25_retriever=None,
-            embedding_fn=_async_embed,
-        )
-        # Skip reranker to avoid HuggingFace download in offline environments
-        self._retriever = AdaptiveRetriever(
-            hybrid_retriever=hybrid,
-            reranker=None,
-            **self._retriever_kwargs,
-        )
+        self._retriever = get_retriever()
         return self._retriever
 
     def execute(self, query: str, mode: str = "hybrid", top_k: int = 5, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
@@ -127,9 +108,39 @@ class RAGTool(BaseTool):
         **kwargs: Any,
     ) -> ToolResult:
         start = time.perf_counter()
+        from mindforge.config import get_settings
+
+        settings = get_settings()
 
         if not query or not query.strip():
             return ToolResult(success=False, error="请输入搜索内容。")
+        if len(query) > 20_000:
+            return ToolResult(
+                success=False,
+                error="搜索内容不能超过 20000 个字符。",
+            )
+        if mode not in {"semantic", "hybrid", "keyword"}:
+            return ToolResult(success=False, error="不支持的检索模式。")
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            return ToolResult(success=False, error="top_k 必须是整数。")
+        if not 1 <= top_k <= settings.retrieval.max_request_top_k:
+            return ToolResult(
+                success=False,
+                error=(
+                    "top_k 必须在 1 到 "
+                    f"{settings.retrieval.max_request_top_k} 之间。"
+                ),
+            )
+        if isinstance(threshold, bool) or not isinstance(
+            threshold,
+            (int, float),
+        ):
+            return ToolResult(success=False, error="threshold 必须是数字。")
+        if not 0.0 <= float(threshold) <= 1.0:
+            return ToolResult(
+                success=False,
+                error="threshold 必须在 0 到 1 之间。",
+            )
 
         retriever = self._get_retriever()
 
@@ -199,12 +210,68 @@ class RAGTool(BaseTool):
             )
 
         formatted = self._format_results(qualified, query)
+        sources = self._build_sources(qualified)
         return ToolResult(
             success=True,
             output=formatted,
-            data={"results": qualified, "total": len(qualified), "quality": quality},
+            data={
+                "results": qualified,
+                "sources": sources,
+                "total": len(qualified),
+                "quality": quality,
+            },
             execution_time_ms=elapsed,
         )
+
+    @staticmethod
+    def _build_sources(results: list[Any]) -> list[dict[str, Any]]:
+        """Convert retrieval hits into stable citation source records."""
+        sources: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            identity = str(
+                result.get("url")
+                or result.get("chunk_id")
+                or result.get("id")
+                or ""
+            )
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            sources.append(
+                {
+                    "index": len(sources) + 1,
+                    "id": result.get("id", identity),
+                    "chunk_id": result.get(
+                        "chunk_id",
+                        result.get("id", identity),
+                    ),
+                    "doc_id": result.get("doc_id"),
+                    "title": result.get(
+                        "title",
+                        result.get(
+                            "document_source",
+                            result.get("source", "知识库文档"),
+                        ),
+                    ),
+                    "source": result.get(
+                        "document_source",
+                        result.get("source", "knowledge_base"),
+                    ),
+                    "url": result.get("url", ""),
+                    "content": result.get(
+                        "content",
+                        result.get("text", ""),
+                    ),
+                    "score": result.get(
+                        "rerank_score",
+                        result.get("score", 0.0),
+                    ),
+                }
+            )
+        return sources
 
     def _format_results(self, results: list[Any], query: str) -> str:
         """Format results as clean Markdown ready for ReactMarkdown rendering.

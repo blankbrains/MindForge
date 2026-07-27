@@ -6,8 +6,8 @@ import asyncio
 import json
 import os
 import subprocess
-import sys
 import uuid as _uuid
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -16,9 +16,10 @@ from typing import Any, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_MCP_CONFIG_PATH = "mcp.json"
+DEFAULT_MCP_CONFIG_PATH = ""
 MCP_PROTOCOL_VERSION = "2025-03-26"
 JSON_RPC_VERSION = "2.0"
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ class MCPTimeoutError(MCPError):
 
 @dataclass
 class MCPServerConfig:
-    """Configuration for a single MCP server from mcp.json."""
+    """Configuration for a single MCP server."""
 
     name: str
     command: str
@@ -102,10 +103,16 @@ class MCPServerProcess:
     """Manages a single MCP server subprocess over stdio."""
 
     def __init__(self, config: MCPServerConfig) -> None:
+        from mindforge.config import get_settings
+
         self.config = config
+        self._max_response_bytes = (
+            get_settings().mcp.mcp_max_response_bytes
+        )
         self._process: Optional[subprocess.Popen] = None
         self._tools: list[MCPToolDefinition] = []
         self._lock = asyncio.Lock()
+        self._stderr_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -116,8 +123,36 @@ class MCPServerProcess:
         if self.is_running:
             return
 
-        env = os.environ.copy()
-        env.update(self.config.env)
+        inherited_names = {
+            "PATH",
+            "PATHEXT",
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "HOME",
+            "USERPROFILE",
+            "TMP",
+            "TEMP",
+            "LANG",
+            "LC_ALL",
+            "NODE_PATH",
+            "NPM_CONFIG_CACHE",
+            "UV_CACHE_DIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        }
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() in inherited_names
+        }
+        env.update(
+            {
+                key: os.path.expandvars(value)
+                for key, value in self.config.env.items()
+            }
+        )
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -127,13 +162,21 @@ class MCPServerProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
+                limit=self._max_response_bytes + 1,
+            )
+            self._stderr_task = asyncio.create_task(
+                self._drain_stderr()
             )
         except FileNotFoundError:
             raise MCPConnectionError(
                 f"MCP server command not found: {self.config.command}"
             )
 
-        await self._initialize()
+        try:
+            await self._initialize()
+        except Exception:
+            await self.stop()
+            raise
 
     async def _initialize(self) -> None:
         """Send initialize request and await the response."""
@@ -147,6 +190,42 @@ class MCPServerProcess:
         }
         resp = await self._send_request("initialize", init_params)
         _ = resp  # server capabilities, not stored currently
+        await self._send_notification("notifications/initialized", {})
+
+    async def _send_notification(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        if not self.is_running or self._process is None:
+            raise MCPConnectionError(
+                f"MCP server '{self.config.name}' is not running."
+            )
+        if self._process.stdin is None:
+            raise MCPConnectionError("stdin is None")
+        payload = json.dumps(
+            {
+                "jsonrpc": JSON_RPC_VERSION,
+                "method": method,
+                "params": params,
+            }
+        ) + "\n"
+        self._process.stdin.write(payload.encode("utf-8"))
+        await self._process.stdin.drain()
+
+    async def _drain_stderr(self) -> None:
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        while True:
+            line = await process.stderr.readline()
+            if not line:
+                return
+            logger.debug(
+                "MCP server %s stderr: %s",
+                self.config.name,
+                line.decode("utf-8", errors="replace").rstrip(),
+            )
 
     async def discover_tools(self) -> list[MCPToolDefinition]:
         """Send tools/list and return discovered tool definitions."""
@@ -156,11 +235,19 @@ class MCPServerProcess:
         self._tools = [
             MCPToolDefinition(
                 server_name=self.config.name,
-                name=t.get("name", "unknown"),
-                description=t.get("description", ""),
-                input_schema=t.get("inputSchema", t.get("parameters", {})),
+                name=str(t.get("name") or "unknown")[:200],
+                description=str(t.get("description") or "")[:10_000],
+                input_schema=(
+                    t.get("inputSchema", t.get("parameters", {}))
+                    if isinstance(
+                        t.get("inputSchema", t.get("parameters", {})),
+                        dict,
+                    )
+                    else {}
+                ),
             )
             for t in raw_tools
+            if isinstance(t, dict)
         ]
         return self._tools
 
@@ -184,6 +271,7 @@ class MCPServerProcess:
 
         async with self._lock:
             request_line = _make_request(method, params)
+            expected_id = json.loads(request_line)["id"]
 
             if self._process is None or self._process.stdin is None:
                 raise MCPConnectionError("stdin is None")
@@ -218,9 +306,23 @@ class MCPServerProcess:
                     )
                 except asyncio.TimeoutError:
                     continue  # keep trying until the full deadline
+                except ValueError as exc:
+                    raise MCPError(
+                        "MCP response exceeded the configured byte limit."
+                    ) from exc
+
+                if len(raw_line) > self._max_response_bytes:
+                    raise MCPError(
+                        "MCP response exceeded the configured byte limit."
+                    )
 
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
+                    if not self.is_running:
+                        raise MCPConnectionError(
+                            f"MCP server '{self.config.name}' exited while "
+                            f"waiting for {method}."
+                        )
                     continue
 
                 # Try to parse as JSON
@@ -232,6 +334,13 @@ class MCPServerProcess:
 
                 # Notifications have no "id"; skip them
                 if "id" not in msg:
+                    continue
+                if msg.get("id") != expected_id:
+                    logger.warning(
+                        "Ignoring stale MCP response id=%r; expected id=%r.",
+                        msg.get("id"),
+                        expected_id,
+                    )
                     continue
 
                 if "error" in msg:
@@ -261,6 +370,9 @@ class MCPServerProcess:
         if self._process.returncode is None:
             try:
                 self._process.terminate()
+                await asyncio.wait_for(self._process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                self._process.kill()
                 await self._process.wait()
             except ProcessLookupError:
                 pass
@@ -271,6 +383,13 @@ class MCPServerProcess:
             except ProcessLookupError:
                 pass
 
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
         self._process = None
 
     async def __aenter__(self) -> "MCPServerProcess":
@@ -289,8 +408,9 @@ class MCPServerProcess:
 class MCPRegistry:
     """Manages multiple MCP server subprocesses and tool discovery.
 
-    Reads configuration from an mcp.json file and provides a unified
-    interface for tool discovery and invocation across all servers.
+    Reads inline JSON configuration from the root .env by default and
+    provides a unified interface for tool discovery and invocation.
+    A file path remains available only as a legacy migration fallback.
     """
 
     def __init__(self, config_path: str = DEFAULT_MCP_CONFIG_PATH) -> None:
@@ -301,7 +421,7 @@ class MCPRegistry:
     # ---- Config loading -------------------------------------------------------
 
     def load_config(self, config_path: Optional[str] = None) -> None:
-        """Read and parse the mcp.json configuration file."""
+        """Read and parse a legacy MCP JSON configuration file."""
         path = config_path or self._config_path
 
         if not os.path.exists(path):
@@ -310,8 +430,31 @@ class MCPRegistry:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
+        self._load_config_data(raw)
+
+    def load_config_json(self, config_json: str) -> None:
+        """Read MCP server configuration from a JSON value."""
+        try:
+            raw = json.loads(config_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"MCP_MCP_SERVERS_JSON contains invalid JSON: {exc}"
+            ) from exc
+        self._load_config_data(raw)
+
+    def _load_config_data(self, raw: dict[str, Any]) -> None:
+        if not isinstance(raw, dict):
+            raise ValueError("MCP configuration must be a JSON object.")
         servers_raw = raw.get("mcpServers", raw.get("servers", {}))
+        if not isinstance(servers_raw, dict):
+            raise ValueError("MCP server configuration must be an object.")
+        self._servers = {}
+        self._tool_index = {}
         for name, cfg in servers_raw.items():
+            if not isinstance(cfg, dict):
+                raise ValueError(
+                    f"MCP server '{name}' configuration must be an object."
+                )
             server_config = MCPServerConfig(
                 name=name,
                 command=cfg.get("command", ""),
@@ -331,8 +474,11 @@ class MCPRegistry:
             try:
                 await asyncio.wait_for(server.start(), timeout=timeout)
             except (Exception, asyncio.TimeoutError) as exc:
-                print(f"Warning: Failed to start MCP server '{server.config.name}': {exc}",
-                      file=sys.stderr)
+                logger.warning(
+                    "Failed to start MCP server '%s': %s",
+                    server.config.name,
+                    exc,
+                )
 
         tasks = [_start_one(s) for s in self._servers.values()]
         if tasks:
@@ -352,16 +498,28 @@ class MCPRegistry:
                     tools = await server.discover_tools()
                     all_tools.extend(tools)
                 except Exception as exc:
-                    print(
-                        f"Warning: Failed to discover tools from "
-                        f"'{server.config.name}': {exc}",
-                        file=sys.stderr,
+                    logger.warning(
+                        "Failed to discover tools from '%s': %s",
+                        server.config.name,
+                        exc,
                     )
 
-        # Build name index (last server wins on name collision)
+        # Ambiguous tool names are excluded instead of allowing a later
+        # server to impersonate an earlier server's tool.
         self._tool_index = {}
+        collisions: set[str] = set()
         for tool in all_tools:
+            if tool.name in self._tool_index:
+                collisions.add(tool.name)
+                continue
             self._tool_index[tool.name] = tool
+        for name in collisions:
+            self._tool_index.pop(name, None)
+            logger.error(
+                "MCP tool name collision; tool disabled until server "
+                "configuration is disambiguated: %s",
+                name,
+            )
 
         return all_tools
 

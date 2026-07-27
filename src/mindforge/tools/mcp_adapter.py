@@ -43,10 +43,10 @@ class MCPToolAdapter(BaseTool):
             },
             "server_name": {
                 "type": "string",
-                "description": "Optional: specific MCP server to route the call to.",
+                "description": "Configured MCP server to route the call to.",
             },
         },
-        "required": ["tool_name"],
+        "required": ["tool_name", "server_name"],
     }
 
     def __init__(self, mcp_client: Optional[Any] = None) -> None:
@@ -57,6 +57,8 @@ class MCPToolAdapter(BaseTool):
     async def _ensure_client(self) -> Any:
         """Lazy-initialize MCPClient if not provided."""
         if self._mcp_client is not None:
+            if not getattr(self._mcp_client, "is_initialized", False):
+                await self._mcp_client.initialize()
             return self._mcp_client
         if MCPClient is not None:
             self._mcp_client = MCPClient()
@@ -80,6 +82,46 @@ class MCPToolAdapter(BaseTool):
 
         params = kwargs.pop("params", {}) or {}
         server_name = kwargs.pop("server_name", None)
+        if not isinstance(server_name, str) or not server_name.strip():
+            return ToolResult(
+                success=False,
+                error="server_name is required for MCP Agent calls.",
+            )
+        server_name = server_name.strip()
+
+        settings = get_settings().mcp
+        allowed_tools = settings.allowed_agent_tools()
+        allowed_servers = settings.allowed_agent_servers()
+        qualified_name = (
+            f"{server_name}:{tool_name}" if server_name else ""
+        )
+        tool_allowed = (
+            tool_name in allowed_tools
+            or qualified_name in allowed_tools
+            or (
+                not server_name
+                and any(
+                    value.endswith(f":{tool_name}")
+                    for value in allowed_tools
+                )
+            )
+        )
+        server_allowed = (
+            server_name in allowed_servers
+        )
+        if (
+            not settings.agent_tools_enabled
+            or not tool_allowed
+            or not server_allowed
+        ):
+            return ToolResult(
+                success=False,
+                error=(
+                    "MCP tool is not allowed for Agent execution. Configure "
+                    "MCP_AGENT_ALLOWED_TOOLS and "
+                    "MCP_AGENT_ALLOWED_SERVERS in .env."
+                ),
+            )
 
         client = await self._ensure_client()
 

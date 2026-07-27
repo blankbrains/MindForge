@@ -25,10 +25,14 @@ class MCPClient:
     def __init__(
         self,
         registry: Optional[MCPRegistry] = None,
-        config_path: str = "mcp.json",
+        config_path: str | None = None,
         auto_initialize: bool = False,
     ) -> None:
         self._registry = registry
+        if config_path is None:
+            from mindforge.config import get_settings
+
+            config_path = get_settings().mcp.mcp_config_path
         self._config_path = config_path
         self._initialized = False
 
@@ -51,6 +55,13 @@ class MCPClient:
 
         if self._registry is None:
             self._registry = get_mcp_registry(self._config_path)
+
+        if not self._registry.servers:
+            from mindforge.config import get_settings
+
+            mcp_json = get_settings().mcp.mcp_servers_json
+            if mcp_json.strip():
+                self._registry.load_config_json(mcp_json)
 
         if not self._registry.servers:
             # Config was loaded by get_mcp_registry; if no servers, load again

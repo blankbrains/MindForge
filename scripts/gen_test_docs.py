@@ -4,24 +4,29 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.stdout.reconfigure(encoding="utf-8")
 
-from mindforge.config import get_settings
-from mindforge.models.deepseek_adapter import DeepSeekAdapter
-from mindforge.models.base import ChatMessage
+from mindforge.config import get_settings, resolve_project_path  # noqa: E402
+from mindforge.models.base import ChatMessage  # noqa: E402
+from mindforge.models.deepseek_adapter import DeepSeekAdapter  # noqa: E402
 
 _settings = get_settings()
-_api_key = _settings.llm.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+_api_key = _settings.llm.deepseek_api_key
 if not _api_key:
-    print("❌ 请设置环境变量 LLM_DEEPSEEK_API_KEY 或 DEEPSEEK_API_KEY")
+    print("❌ 请在项目根目录 .env 中设置 LLM_DEEPSEEK_API_KEY")
     sys.exit(1)
 
-DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "docs")
-os.makedirs(DOCS_DIR, exist_ok=True)
+DOCS_DIR = resolve_project_path(Path(_settings.app.data_dir) / "docs")
+DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-llm = DeepSeekAdapter(model="deepseek-chat", api_key=_api_key)
+llm = DeepSeekAdapter(
+    model=_settings.llm.get_model("researcher"),
+    api_key=_api_key,
+    base_url=_settings.llm.deepseek_base_url,
+)
 
 
 async def gen_doc(filename, title, prompt):
@@ -41,8 +46,8 @@ async def gen_doc(filename, title, prompt):
 
     full = f"# {title}\n\n" + "\n".join(lines[start:]).strip()
 
-    filepath = os.path.join(DOCS_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as f:
+    filepath = DOCS_DIR / filename
+    with filepath.open("w", encoding="utf-8") as f:
         f.write(full)
     print(f"  ✅ {filename} — {len(content)} chars")
     return filepath

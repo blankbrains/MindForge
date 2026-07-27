@@ -3,7 +3,7 @@ import { CheckCircle2, Loader2, Circle, XCircle } from "lucide-react";
 import type { SubTask } from "@/types/research";
 
 interface Props {
-  subtasks: Record<string, SubTask & { result?: unknown }>;
+  subtasks: Record<string, SubTask>;
 }
 
 const statusIcon: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -40,14 +40,22 @@ export function SubtaskProgressList({ subtasks }: Props) {
                   st.status === "in_progress" && "animate-spin",
                 )}
               />
-              <span
-                className={cn(
-                  "text-text",
-                  st.status === "completed" && "text-text-muted line-through",
+              <div className="min-w-0">
+                <span
+                  className={cn(
+                    "text-text",
+                    st.status === "completed"
+                      && "text-text-muted line-through",
+                  )}
+                >
+                  {st.description}
+                </span>
+                {st.status === "failed" && st.result?.output && (
+                  <p className="mt-1 break-words text-xs text-red-600 dark:text-red-400">
+                    {st.result.output}
+                  </p>
                 )}
-              >
-                {st.description}
-              </span>
+              </div>
             </li>
           );
         })}

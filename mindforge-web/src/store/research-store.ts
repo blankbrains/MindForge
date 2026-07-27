@@ -11,6 +11,36 @@ interface SubTaskState {
   [taskId: string]: SubTask & { result?: AgentResult };
 }
 
+function boundedScore(value: unknown): number {
+  const score = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(score) ? Math.min(10, Math.max(0, score)) : 0;
+}
+
+function boundedTextList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.slice(0, 2_000))
+    .filter((item) => item.trim().length > 0)
+    .slice(0, 20);
+}
+
+function normalizeCriticScore(value: unknown): CriticScore | null {
+  if (!value || typeof value !== "object") return null;
+  const score = value as Record<string, unknown>;
+  return {
+    overall: boundedScore(score.overall),
+    completeness: boundedScore(score.completeness),
+    accuracy: boundedScore(score.accuracy),
+    depth: boundedScore(score.depth),
+    clarity: boundedScore(score.clarity),
+    citations: boundedScore(score.citations),
+    issues: boundedTextList(score.issues),
+    suggestions: boundedTextList(score.suggestions),
+    should_refine: score.should_refine === true,
+  };
+}
+
 interface ResearchState {
   status: "idle" | "connecting" | "streaming" | "completed" | "error";
   error: string | null;
@@ -89,16 +119,19 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         break;
 
       case "subtask_result":
-        set((s) => ({
-          subtasks: {
-            ...s.subtasks,
-            [event.task_id]: {
-              ...s.subtasks[event.task_id],
-              status: event.result.success ? "completed" : "failed",
-              result: event.result,
+        set((s) => {
+          if (!s.subtasks[event.task_id]) return s;
+          return {
+            subtasks: {
+              ...s.subtasks,
+              [event.task_id]: {
+                ...s.subtasks[event.task_id],
+                status: event.result.success ? "completed" : "failed",
+                result: event.result,
+              },
             },
-          },
-        }));
+          };
+        });
         break;
 
       case "synthesizing":
@@ -106,7 +139,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         break;
 
       case "critic_feedback":
-        set({ criticScore: event.score });
+        set({ criticScore: normalizeCriticScore(event.score) });
         break;
 
       case "refining":
@@ -120,9 +153,20 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       case "done":
         set({
           finalResult: event.result,
-          status: "completed",
+          status: event.result.success ? "completed" : "error",
+          error: event.result.success
+            ? null
+            : event.result.output || "研究任务执行失败",
           synthesizing: false,
           refineRound: 0,
+        });
+        break;
+
+      case "error":
+        set({
+          status: "error",
+          error: event.content || "研究任务执行失败",
+          synthesizing: false,
         });
         break;
 

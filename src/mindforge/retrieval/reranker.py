@@ -13,8 +13,15 @@ class CrossEncoderReranker:
     :meth:`rerank` to avoid unnecessary memory usage at import time.
     """
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        model_revision: str | None = None,
+        max_candidates: int = 100,
+    ):
         self.model_name = model_name
+        self.model_revision = model_revision
+        self.max_candidates = max(1, max_candidates)
         self._model = None
         self._model_lock = threading.Lock()
         if model_name is None:
@@ -34,7 +41,10 @@ class CrossEncoderReranker:
                 if self._model is None:
                     try:
                         from sentence_transformers import CrossEncoder
-                        self._model = CrossEncoder(self.model_name)
+                        self._model = CrossEncoder(
+                            self.model_name,
+                            revision=self.model_revision,
+                        )
                         logger.info("Loaded CrossEncoder model '%s'.", self.model_name)
                     except ImportError:
                         raise ImportError(
@@ -70,26 +80,31 @@ class CrossEncoderReranker:
         if not candidates:
             return []
 
-        top_k = top_k if top_k is not None else len(candidates)
+        bounded_candidates = candidates[: self.max_candidates]
+        top_k = (
+            min(max(1, top_k), self.max_candidates)
+            if top_k is not None
+            else len(bounded_candidates)
+        )
 
         # Prepare query-doc pairs
-        texts = [c.get("text", "") for c in candidates]
+        texts = [c.get("text", "") for c in bounded_candidates]
         pairs = [(query, text) for text in texts]
 
         model = self.model
         if model is None:
             logger.warning("No reranker model configured; returning original order.")
-            scores = [0.0] * len(candidates)
+            scores = [0.0] * len(bounded_candidates)
         else:
             try:
                 scores = model.predict(pairs)
             except Exception:
                 logger.exception("Cross-encoder scoring failed; returning original order.")
-                scores = [0.0] * len(candidates)
+                scores = [0.0] * len(bounded_candidates)
 
         # Attach scores and re-sort
         reranked = []
-        for candidate, score in zip(candidates, scores):
+        for candidate, score in zip(bounded_candidates, scores):
             reranked.append({**candidate, "rerank_score": float(score)})
 
         reranked.sort(key=lambda x: x["rerank_score"], reverse=True)

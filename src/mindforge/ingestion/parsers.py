@@ -37,14 +37,31 @@ class ParsedDocument:
 class DocumentParser:
     SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".html", ".htm", ".md", ".txt"}
 
+    def __init__(self) -> None:
+        from mindforge.config import get_settings
+
+        self._limits = get_settings().api
+
     def parse(self, file_path: str | Path) -> ParsedDocument:
         path = Path(file_path)
         suffix = path.suffix.lower()
         if suffix not in self.SUPPORTED_EXTENSIONS:
             raise ValueError(f"不支持的文件格式: {suffix}，支持: {self.SUPPORTED_EXTENSIONS}")
+        st = path.stat()
+        if (
+            suffix in {".html", ".htm", ".md", ".txt"}
+            and st.st_size
+            > self._limits.max_text_file_mb * 1024 * 1024
+        ):
+            raise ValueError(
+                "Text document exceeds the configured parser size limit."
+            )
         parser = self._get_parser(suffix)
         content, sections, metadata = parser(path)
-        st = path.stat()
+        if len(content) > self._limits.max_parsed_chars:
+            raise ValueError(
+                "Parsed document exceeds the configured character limit."
+            )
         doc_id = hashlib.md5(
             f"{path.name}:{st.st_size}:{st.st_mtime_ns}:{content[:256]}".encode()
         ).hexdigest()[:12]
@@ -67,12 +84,24 @@ class DocumentParser:
 
         with pdfplumber.open(str(path)) as pdf:
             total = len(pdf.pages)
+            if total > self._limits.max_pdf_pages:
+                raise ValueError(
+                    "PDF exceeds the configured page limit of "
+                    f"{self._limits.max_pdf_pages}."
+                )
             if total <= 10:
                 # 小 PDF 直接串行
                 for i, page in enumerate(pdf.pages):
                     text = page.extract_text() or ""
                     content_parts.append(text)
                     sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
+                    if (
+                        sum(len(part) for part in content_parts)
+                        > self._limits.max_parsed_chars
+                    ):
+                        raise ValueError(
+                            "PDF text exceeds the configured character limit."
+                        )
             else:
                 # 大 PDF 并行解析 — 线程数取 min(8, CPU 核数)
                 workers = min(8, os.cpu_count() or 4)
@@ -84,24 +113,71 @@ class DocumentParser:
                     except Exception:
                         return i, ""
 
+                total_chars = 0
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    results = list(pool.map(_extract_page, range(total)))
-
-                # Sort by page index to preserve order
-                results.sort(key=lambda x: x[0])
-                for i, text in results:
-                    content_parts.append(text)
-                    sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
-                logger.info("PDF 解析完成: %d 页, %d 字符", total, sum(len(t) for _, t in results))
+                    batch_size = workers * 2
+                    for start in range(0, total, batch_size):
+                        stop = min(total, start + batch_size)
+                        results = list(
+                            pool.map(_extract_page, range(start, stop))
+                        )
+                        results.sort(key=lambda item: item[0])
+                        for i, text in results:
+                            total_chars += len(text)
+                            if total_chars > self._limits.max_parsed_chars:
+                                raise ValueError(
+                                    "PDF text exceeds the configured "
+                                    "character limit."
+                                )
+                            content_parts.append(text)
+                            sections.append({
+                                "title": f"第 {i+1} 页",
+                                "content": text,
+                                "level": 0,
+                            })
+                logger.info(
+                    "PDF 解析完成: %d 页, %d 字符",
+                    total,
+                    total_chars,
+                )
 
         return "\n".join(content_parts), sections, {"pages": len(content_parts)}
 
     def _parse_docx(self, path: Path):
+        from zipfile import BadZipFile, ZipFile
+
+        try:
+            with ZipFile(path) as archive:
+                infos = archive.infolist()
+                if len(infos) > self._limits.max_docx_parts:
+                    raise ValueError(
+                        "DOCX package exceeds the configured part limit."
+                    )
+                expanded_size = sum(info.file_size for info in infos)
+                if (
+                    expanded_size
+                    > self._limits.max_docx_uncompressed_mb
+                    * 1024
+                    * 1024
+                ):
+                    raise ValueError(
+                        "DOCX package exceeds the configured expanded-size "
+                        "limit."
+                    )
+        except BadZipFile as exc:
+            raise ValueError("Invalid DOCX package.") from exc
+
         from docx import Document as DocxDocument
         doc = DocxDocument(str(path))
         content_parts, sections = [], []
+        total_chars = 0
         for para in doc.paragraphs:
             if para.text.strip():
+                total_chars += len(para.text)
+                if total_chars > self._limits.max_parsed_chars:
+                    raise ValueError(
+                        "DOCX text exceeds the configured character limit."
+                    )
                 content_parts.append(para.text)
                 if para.style.name.startswith("Heading"):
                     try:
@@ -115,6 +191,12 @@ class DocumentParser:
             for row in table.rows:
                 row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
                 if row_text:
+                    total_chars += len(row_text)
+                    if total_chars > self._limits.max_parsed_chars:
+                        raise ValueError(
+                            "DOCX text exceeds the configured character "
+                            "limit."
+                        )
                     content_parts.append(row_text)
         return "\n".join(content_parts), sections, {}
 

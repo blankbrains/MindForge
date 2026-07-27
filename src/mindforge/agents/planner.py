@@ -62,6 +62,57 @@ class ResearchPlan:
         """Return True when every subtask is either completed or failed."""
         return all(st.status in ("completed", "failed") for st in self.subtasks)
 
+    def validate(self, max_subtasks: int = 5) -> None:
+        """Validate task ids, dependency references, and DAG acyclicity."""
+        if not 1 <= len(self.subtasks) <= max_subtasks:
+            raise ValueError(
+                "Planner returned "
+                f"{len(self.subtasks)} subtasks; allowed range is "
+                f"1-{max_subtasks}."
+            )
+        task_ids = [task.task_id for task in self.subtasks]
+        if any(not task_id for task_id in task_ids):
+            raise ValueError("Planner returned an empty task_id.")
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("Planner returned duplicate task_id values.")
+
+        known_ids = set(task_ids)
+        indegree = {task_id: 0 for task_id in task_ids}
+        dependents: dict[str, list[str]] = {
+            task_id: [] for task_id in task_ids
+        }
+        for task in self.subtasks:
+            normalized = list(dict.fromkeys(task.dependencies))
+            task.dependencies = normalized
+            for dependency in normalized:
+                if dependency not in known_ids:
+                    raise ValueError(
+                        f"Task {task.task_id} depends on unknown task "
+                        f"{dependency}."
+                    )
+                if dependency == task.task_id:
+                    raise ValueError(
+                        f"Task {task.task_id} depends on itself."
+                    )
+                indegree[task.task_id] += 1
+                dependents[dependency].append(task.task_id)
+
+        ready = [
+            task_id
+            for task_id, degree in indegree.items()
+            if degree == 0
+        ]
+        visited = 0
+        while ready:
+            current = ready.pop()
+            visited += 1
+            for dependent in dependents[current]:
+                indegree[dependent] -= 1
+                if indegree[dependent] == 0:
+                    ready.append(dependent)
+        if visited != len(task_ids):
+            raise ValueError("Planner returned cyclic task dependencies.")
+
     # ------------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,7 +220,8 @@ class PlannerAgent(BaseAgent):
             ChatMessage(
                 role="user",
                 content=(
-                    f"请将以下任务分解为 DAG 子任务：\n\n{task}"
+                    "请将以下任务分解为 DAG 子任务，子任务总数不得超过 "
+                    f"{settings.agent.max_subtasks}：\n\n{task}"
                 ),
             ),
         ]
@@ -193,6 +245,7 @@ class PlannerAgent(BaseAgent):
             # Validate at least one subtask
             if not plan.subtasks:
                 raise ValueError("Planner returned zero subtasks.")
+            plan.validate(max_subtasks=settings.agent.max_subtasks)
 
             return plan
 

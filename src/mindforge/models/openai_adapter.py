@@ -1,7 +1,6 @@
 """OpenAI 适配器 — 使用 openai.AsyncOpenAI 调用 GPT 系列模型及 embedding"""
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
-import os
 
 import openai
 
@@ -15,7 +14,7 @@ class OpenAIAdapter(BaseLLM):
         self.model = model
         self.embed_model = embed_model
         self.client = openai.AsyncOpenAI(
-            api_key=api_key or os.getenv("OPENAI_API_KEY", ""),
+            api_key=api_key or "",
             base_url=base_url,
             max_retries=max_retries,
         )

@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """MindForge 研究任务执行脚本"""
 import asyncio
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+def safe_terminal_text(value: object, limit: int) -> str:
+    return re.sub(
+        r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]",
+        "",
+        str(value),
+    )[:limit]
 
 
 async def main():
@@ -15,14 +24,14 @@ async def main():
 
     # Step 1: Check configuration
     print("\n[1/4] 检查配置...")
-    from mindforge.config import get_settings
+    from mindforge.config import get_settings, resolve_project_path
     settings = get_settings()
     print(f"   模型提供商: {settings.llm.llm_provider}")
     print(f"   API Key 就绪: {bool(getattr(settings.llm, f'{settings.llm.llm_provider}_api_key', ''))}")
 
     # Step 2: Prepare knowledge base document
     print("\n[2/4] 准备知识库文档...")
-    doc_dir = Path("data/docs")
+    doc_dir = resolve_project_path(Path(settings.app.data_dir) / "docs")
     doc_dir.mkdir(parents=True, exist_ok=True)
     doc_path = doc_dir / "transformer_intro.md"
     doc_path.write_text("""# Transformer 架构简介
@@ -79,20 +88,24 @@ Transformer 使用正弦位置编码来注入位置信息。
         ], temperature=0.3)
 
         print(f"   [{settings.llm.llm_provider} Response]")
-        print(f"   {result.content[:200]}")
+        print(f"   {safe_terminal_text(result.content, 200)}")
         print(f"   Token用量: {result.usage.get('total_tokens', 'N/A')}")
-        print(f"   API 调用成功!")
+        print("   API 调用成功!")
 
     except Exception as e:
         print(f"   API 调用失败: {e}")
-        print(f"   请检查 API Key 配置")
+        print("   请检查 API Key 配置")
 
     # Step 4: Start API server info
     print("\n[4/4] 服务就绪")
     print()
-    print(f"   API 服务: uvicorn mindforge.api.server:app --reload --port 8000")
-    print(f"   API 文档: http://localhost:8000/docs")
-    print(f"   健康检查: http://localhost:8000/api/v1/health")
+    api_url = f"http://127.0.0.1:{settings.api.port}"
+    print(
+        "   API 服务: uvicorn mindforge.api.server:app "
+        f"--reload --host {settings.api.host} --port {settings.api.port}"
+    )
+    print(f"   API 文档: {api_url}/docs")
+    print(f"   健康检查: {api_url}/api/v1/health")
     print()
     print("=" * 60)
     print("系统就绪!")
