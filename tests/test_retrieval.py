@@ -78,6 +78,15 @@ def test_env_sync_does_not_replace_bind_mount_target(tmp_path, monkeypatch):
     }
 
 
+def test_database_url_must_be_configured(monkeypatch):
+    from mindforge.config import require_environment_variable
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required"):
+        require_environment_variable("DATABASE_URL")
+
+
 def test_history_save_request_enforces_body_bounds():
     with pytest.raises(ValueError):
         HistorySaveRequest(task="")

@@ -315,7 +315,7 @@ MCP_AGENT_ALLOWED_TOOLS=context7:resolve-library-id,context7:get-library-docs
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 代码风格 + import 顺序
-- **pytest + coverage** — 75 个单元与真实 API 回归测试
+- **pytest + coverage** — 76 个单元与真实 API 回归测试
 - **前端质量门禁** — ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验

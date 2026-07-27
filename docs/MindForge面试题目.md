@@ -4057,7 +4057,7 @@ PostgreSQL 更适合：
 ```python
 # 项目配置使用 PostgreSQL
 database_url: str = Field(
-    default="postgresql://mindforge:mindforge@localhost:5432/mindforge"
+    default=os.environ["DATABASE_URL"]
 )
 
 # 原因：
@@ -4229,7 +4229,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6377
       - QDRANT_URL=http://qdrant:6333
-      - DATABASE_URL=postgresql://mindforge:mindforge@postgres:5432/mindforge
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     volumes:
       - ./src:/app/src  # 开发时热重载
 

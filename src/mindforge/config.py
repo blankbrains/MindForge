@@ -66,6 +66,17 @@ def resolve_project_path(
         return path.resolve()
     return ((root or _PROJECT_ROOT) / path).resolve()
 
+
+def require_environment_variable(name: str) -> str:
+    """Return a required environment variable or fail with setup guidance."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(
+            f"{name} is required. Configure it in the project .env file."
+        )
+    return value
+
+
 class LLMConfig(BaseSettings):
     """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
     llm_provider: str = Field(default="openai", description="openai | deepseek")

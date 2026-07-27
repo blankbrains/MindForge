@@ -33,13 +33,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken
+from mindforge.config import require_environment_variable
 
 # ---------------------------------------------------------------------------
 # Engine — PostgreSQL only
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PG_URL = "postgresql://mindforge:mindforge@localhost:5432/mindforge"
-_DB_URL = os.getenv("DATABASE_URL", _DEFAULT_PG_URL)
+_DB_URL = require_environment_variable("DATABASE_URL")
 
 _engine = create_engine(
     _DB_URL,
