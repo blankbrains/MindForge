@@ -203,7 +203,8 @@ pip install --require-hashes -r requirements-dev.lock
 
 # 配置环境变量
 cp .env.example .env
-# 编辑 .env，设置 LLM 供应商和 API Key
+# 编辑 .env：设置 LLM API Key、强 PostgreSQL 密码和 DATABASE_URL
+# DATABASE_URL 为必填项；应用不会回退到内置数据库连接串。
 
 # 启动基础设施（Qdrant + Redis + PostgreSQL）
 docker compose up -d qdrant redis postgres
@@ -232,6 +233,10 @@ npm run dev     # 开发模式 → http://localhost:5173
 - Docker Compose 自动读取同一个 `.env`
 - MCP Client 通过 `MCP_MCP_SERVERS_JSON` 读取内联 JSON
 - QA 生成脚本通过 `QA_*` 参数读取模型、并发、批大小和输出目录
+
+`DATABASE_URL` 是后端启动必填项，必须与 `POSTGRES_USER`、`POSTGRES_PASSWORD`
+和 `POSTGRES_DB` 对应；缺失时应用会直接给出配置错误，而不会使用任何内置
+数据库账号或连接串。
 
 `.env.example` 包含完整键集合，实际 `.env` 不提交到 Git。`pyproject.toml`、
 `package.json`、`docker-compose.yml`、Vite/TypeScript/ESLint 与 CI 文件是各工具

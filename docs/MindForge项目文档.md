@@ -419,6 +419,10 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 
 每个子配置有独立的环境变量前缀，可以从 `.env` 文件或系统环境变量加载。新增配置只需添加子类并注册到 `Settings` 主类。
 
+其中 `DATABASE_URL` 是数据库模块导入时的必填项。应用不会再使用内置
+PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 PostgreSQL
+实例一致的连接 URL。
+
 ---
 
 ### 3.10 API 层（api/）
@@ -470,7 +474,10 @@ done             →  { type, result: AgentResult }
 
 ### 3.11 数据库层（db.py）
 
-基于 SQLAlchemy ORM，**仅支持 PostgreSQL，不提供 SQLite 回退**。API Key 使用 Fernet 加密，密钥由根目录 `.env` 中的 `APP_SECRET` 提供；缺失时应用会生成并尝试持久化。
+基于 SQLAlchemy ORM，**仅支持 PostgreSQL，不提供 SQLite 回退**。`DATABASE_URL`
+必须由根目录 `.env` 或进程环境显式提供，缺失时启动失败，避免开发默认账号进入
+部署环境。API Key 使用 Fernet 加密，密钥由根目录 `.env` 中的 `APP_SECRET`
+提供；缺失时应用会生成并尝试持久化。
 
 主要存储的数据：
 - 用户配置（LLM 供应商、API Key 等加密存储）

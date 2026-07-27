@@ -16,6 +16,7 @@
 - React 19、TypeScript 6、Vite 8、Tailwind CSS 4。
 - PostgreSQL-only，不提供 SQLite 回退。
 - 根目录 `.env` 是运行和部署参数的唯一配置源。
+- `DATABASE_URL` 为后端启动必填项；应用不提供内置数据库连接串回退。
 - API 前缀为 `/api/v1`，当前包含 18 个 REST/JSON-RPC 路由。
 - 研究流支持 `answer_chunk` 增量事件，默认最多精炼 1 轮。
 - CI 执行 Ruff、76 项 pytest、前端 ESLint/构建和 Compose 配置校验。

@@ -4060,6 +4060,9 @@ database_url: str = Field(
     default=os.environ["DATABASE_URL"]
 )
 
+实际项目中进一步把这一约束放在数据库模块入口：`DATABASE_URL` 缺失时直接抛出
+带配置指引的错误，而不是提供固定 PostgreSQL 账号作为回退。
+
 # 原因：
 # 1. JSONB 存储复杂的 Agent 状态和研究成果
 # 2. 可能用到 pgvector 做向量检索补充
