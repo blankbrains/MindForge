@@ -33,6 +33,11 @@ dist/
 build/
 *.egg-info/
 .coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Docker
 .docker/
