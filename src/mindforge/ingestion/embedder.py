@@ -84,15 +84,13 @@ class EmbeddingManager:
             except Exception as exc:
                 logger.warning("Embedding backend %s unavailable: %s", backend, exc)
 
-        # 显式指定 provider 时失败——记录警告并降级到 hash fallback
         if explicit:
-            logger.warning(
-                "Embedding provider '%s' unavailable — falling back to hash-based embedding. "
-                "Install sentence-transformers or configure OpenAI API key for semantic search.",
-                self._provider,
+            raise RuntimeError(
+                f"Configured embedding provider '{resolved}' is unavailable. "
+                "Refusing to create incompatible fallback vectors."
             )
 
-        # Ultimate fallback
+        # Automatic mode keeps the development-only fallback.
         self._init_fallback()
 
     def _init_st(self) -> None:
@@ -113,6 +111,12 @@ class EmbeddingManager:
 
         model_name = self._model_name or settings.local_embedding_model
         revision = settings.local_embedding_revision
+        self._device = settings.sentence_transformers_device
+        self._batch_size = settings.embedding_batch_size
+        if settings.torch_num_threads > 0:
+            import torch
+
+            torch.set_num_threads(settings.torch_num_threads)
 
         # Try local cache first (instant), then download from HF mirror
         try:
@@ -120,6 +124,7 @@ class EmbeddingManager:
                 model_name,
                 revision=revision,
                 local_files_only=True,
+                device=self._device,
             )
         except Exception:
             logger.info("Model '%s' not cached — downloading from mirror...", model_name)
@@ -127,6 +132,7 @@ class EmbeddingManager:
                 model_name,
                 revision=revision,
                 local_files_only=False,
+                device=self._device,
             )
         try:
             self._native_dim = self._model.get_embedding_dimension()
@@ -135,7 +141,14 @@ class EmbeddingManager:
         if self._dim is None:
             self._dim = self._native_dim
         self._provider = "sentence-transformers"
-        logger.info("Embedding: sentence-transformers/%s (dim=%d)", model_name, self._dim)
+        logger.info(
+            "Embedding: sentence-transformers/%s "
+            "(dim=%d, device=%s, batch=%d)",
+            model_name,
+            self._dim,
+            self._device,
+            self._batch_size,
+        )
 
     def _init_openai(self) -> None:
         """Initialize OpenAI embeddings backend."""
@@ -162,6 +175,8 @@ class EmbeddingManager:
             }
             self._dim = _OPENAI_DIMS.get(self._model_name, 1536)
         self._provider = "openai"
+        self._device = "remote"
+        self._batch_size = 64
         logger.info("Embedding: openai/%s (dim=%d)", self._model_name, self._dim)
 
     def _init_fallback(self) -> None:
@@ -169,6 +184,8 @@ class EmbeddingManager:
         if self._dim is None:
             self._dim = _FALLBACK_DIM
         self._provider = "fallback"
+        self._device = "cpu"
+        self._batch_size = 1
         logger.warning(
             "Embedding: HASH-BASED FALLBACK (dim=%d) — NO semantic similarity. "
             "Install sentence-transformers or configure an OpenAI API key for production.",
@@ -186,6 +203,10 @@ class EmbeddingManager:
     @property
     def dim(self) -> int:
         return self._dim or _FALLBACK_DIM
+
+    @property
+    def device(self) -> str:
+        return getattr(self, "_device", "unknown")
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         """Embed a batch of texts into dense vectors."""
@@ -218,6 +239,7 @@ class EmbeddingManager:
             texts,
             normalize_embeddings=True,
             show_progress_bar=False,
+            batch_size=self._batch_size,
         )
         return [self._fit_dimension(vector) for vector in result.tolist()]
 
@@ -291,6 +313,12 @@ class EmbeddingManager:
             results.append(vec)
         return results
 
+    def close(self) -> None:
+        """Release provider-owned network resources."""
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
@@ -312,7 +340,31 @@ def get_embedder() -> EmbeddingManager:
     return _embedder
 
 
+def get_embedder_status() -> dict[str, str]:
+    """Return configured or loaded backend identity without loading a model."""
+    if _embedder is not None:
+        return {
+            "provider": _embedder.provider,
+            "device": _embedder.device,
+        }
+    from mindforge.config import get_settings
+
+    settings = get_settings().llm
+    provider = settings.embedding_provider
+    device = (
+        settings.sentence_transformers_device
+        if provider in {"bge", "st", "sentence-transformers"}
+        else "remote"
+        if provider == "openai"
+        else "cpu"
+    )
+    return {"provider": provider, "device": device}
+
+
 def reset_embedder() -> None:
     """Drop the cached embedding backend after configuration changes."""
     global _embedder
+    previous = _embedder
     _embedder = None
+    if previous is not None:
+        previous.close()

@@ -27,6 +27,7 @@ _PROJECT_ROOT = get_project_root()
 _retriever: AdaptiveRetriever | None = None
 _bm25: BM25Retriever | None = None
 _graph: GraphRAGEngine | None = None
+_reranker: CrossEncoderReranker | None = None
 _index_lock = asyncio.Lock()
 
 
@@ -88,6 +89,29 @@ def get_graph_engine(*, llm: Any = None) -> GraphRAGEngine:
     return _graph
 
 
+def get_reranker() -> CrossEncoderReranker | None:
+    global _reranker
+    settings = get_settings().retrieval
+    model_name = settings.reranker_model or None
+    if model_name is None:
+        return None
+    if _reranker is None:
+        _reranker = CrossEncoderReranker(
+            model_name,
+            model_revision=settings.reranker_model_revision,
+            max_candidates=settings.reranker_max_candidates,
+            device=settings.reranker_device,
+        )
+    return _reranker
+
+
+async def preload_reranker() -> bool:
+    reranker = get_reranker()
+    if reranker is None:
+        return False
+    return await asyncio.to_thread(reranker.preload)
+
+
 def get_retriever() -> AdaptiveRetriever:
     global _retriever
     if _retriever is None:
@@ -97,7 +121,6 @@ def get_retriever() -> AdaptiveRetriever:
         async def _async_embed(text: str) -> list[float]:
             return await asyncio.to_thread(embedder.embed_single, text)
 
-        reranker_model = settings.retrieval.reranker_model or None
         _retriever = AdaptiveRetriever(
             hybrid_retriever=HybridRetriever(
                 vector_store=get_vector_store(),
@@ -105,19 +128,7 @@ def get_retriever() -> AdaptiveRetriever:
                 embedding_fn=_async_embed,
                 llm_fn=_llm_text,
             ),
-            reranker=(
-                CrossEncoderReranker(
-                    reranker_model,
-                    model_revision=(
-                        settings.retrieval.reranker_model_revision
-                    ),
-                    max_candidates=(
-                        settings.retrieval.reranker_max_candidates
-                    ),
-                )
-                if reranker_model
-                else None
-            ),
+            reranker=get_reranker(),
             graph_engine=(
                 get_graph_engine()
                 if settings.graphrag.graph_enabled
@@ -125,6 +136,8 @@ def get_retriever() -> AdaptiveRetriever:
             ),
             llm_fn=_llm_text,
             max_request_top_k=settings.retrieval.max_request_top_k,
+            retrieval_top_k=settings.retrieval.vector_top_k,
+            rerank_top_k=settings.retrieval.rerank_top_k,
         )
     return _retriever
 
@@ -134,19 +147,70 @@ async def index_auxiliary_documents(
     *,
     graph_llm: Any = None,
     use_graphrag: bool = False,
+    progress_callback: Any = None,
+    timings: dict[str, float] | None = None,
+    start_progress: float = 88.0,
 ) -> None:
     """Persist BM25 and optional GraphRAG indexes for uploaded chunks."""
     if not documents:
         return
+    stage_timings = timings if timings is not None else {}
     async with _index_lock:
+        if progress_callback is not None:
+            await progress_callback(
+                "bm25",
+                start_progress,
+                len(documents),
+                dict(stage_timings),
+            )
+        started = asyncio.get_running_loop().time()
         bm25 = get_bm25_retriever()
-        await asyncio.to_thread(bm25.upsert_documents, documents)
+        doc_id = str(documents[0].get("doc_id") or "")
+        if doc_id:
+            await asyncio.to_thread(
+                bm25.replace_document,
+                doc_id,
+                documents,
+            )
+        else:
+            await asyncio.to_thread(bm25.upsert_documents, documents)
         await asyncio.to_thread(bm25.save)
+        stage_timings["bm25"] = (
+            asyncio.get_running_loop().time() - started
+        )
+        bm25_end = 97.0 if use_graphrag else 99.0
+        if progress_callback is not None:
+            await progress_callback(
+                "bm25",
+                bm25_end,
+                len(documents),
+                dict(stage_timings),
+            )
 
         if use_graphrag:
+            if progress_callback is not None:
+                await progress_callback(
+                    "graphrag",
+                    97.0,
+                    len(documents),
+                    dict(stage_timings),
+                )
+            started = asyncio.get_running_loop().time()
             graph = get_graph_engine(llm=graph_llm)
+            if doc_id:
+                await graph.delete_document_async(doc_id)
             await graph.build_graph(documents)
             await asyncio.to_thread(graph.save, str(_graph_path()))
+            stage_timings["graphrag"] = (
+                asyncio.get_running_loop().time() - started
+            )
+            if progress_callback is not None:
+                await progress_callback(
+                    "graphrag",
+                    99.0,
+                    len(documents),
+                    dict(stage_timings),
+                )
 
 
 async def delete_auxiliary_document(doc_id: str) -> None:
@@ -158,13 +222,14 @@ async def delete_auxiliary_document(doc_id: str) -> None:
             await asyncio.to_thread(bm25.save)
 
         graph = get_graph_engine()
-        graph.delete_document(doc_id)
+        await graph.delete_document_async(doc_id)
         await asyncio.to_thread(graph.save, str(_graph_path()))
 
 
 def reset_retrieval_service() -> None:
     """Drop cached retrieval components after runtime configuration changes."""
-    global _retriever, _bm25, _graph
+    global _retriever, _bm25, _graph, _reranker
     _retriever = None
     _bm25 = None
     _graph = None
+    _reranker = None

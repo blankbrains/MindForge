@@ -4,8 +4,6 @@ export interface HealthResponse {
   qdrant_connected: boolean;
   redis_connected: boolean;
   postgres_connected: boolean;
-  mcp_configured: boolean;
-  mcp_tools_available: boolean;
 }
 
 export interface StatsResponse {
@@ -15,4 +13,7 @@ export interface StatsResponse {
   qdrant_url: string;
   redis_url: string;
   max_upload_mb: number;
+  max_pdf_pages: number;
+  embedding_provider: string;
+  embedding_device: string;
 }

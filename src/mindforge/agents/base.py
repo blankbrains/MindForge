@@ -509,10 +509,13 @@ class BaseAgent(ABC):
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
         cost = _estimate_cost(model_used, aggregated_usage)
+        success = bool(final_content.strip())
+        if not success:
+            final_content = ""
 
         return AgentResult(
             agent_name=self.name,
-            success=True,
+            success=success,
             output=final_content,
             data={
                 "rounds": min(round_idx + 1, max_rounds),
@@ -521,6 +524,9 @@ class BaseAgent(ABC):
                 "messages": len(conv),
                 "sources": collected_sources,
                 "tool_call_details": tool_call_details,
+                "failure_reason": (
+                    None if success else "empty_llm_response"
+                ),
             },
             metadata={
                 "model": model_used,

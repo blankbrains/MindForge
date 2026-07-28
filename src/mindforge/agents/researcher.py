@@ -20,7 +20,6 @@ _RESEARCHER_SYSTEM_PROMPT = """你是一名专业的研究助理。你可以使�
 - **web_search** — 搜索网络获取最新信息。
 - **code_executor** — 在沙箱中执行 Python 代码，用于计算、数据分析或原型设计。
 - **verify_citation** — 验证报告中的引用标记 [N] 是否与来源匹配。
-- **mcp_tool** — 访问外部 MCP（模型上下文协议）工具。
 
 核心原则：
 1. **先直接回答**：如果你的知识储备足够回答该问题，直接在 1 轮内给出全面、详细的答案，**不要调用任何工具**。
@@ -158,6 +157,9 @@ class ResearcherAgent(BaseAgent):
             if not result.tool_calls:
                 # --- Final answer ---
                 final_content = result.content or ""
+                success = bool(final_content.strip())
+                if not success:
+                    final_content = ""
                 conv.append(ChatMessage(role="assistant", content=final_content))
 
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -166,13 +168,16 @@ class ResearcherAgent(BaseAgent):
 
                 agent_result = AgentResult(
                     agent_name=self.name,
-                    success=True,
+                    success=success,
                     output=final_content,
                     data={
                         "rounds": _round + 1,
                         "messages": len(conv),
                         "tool_calls": tool_calls_made,
                         "tool_calls_rejected": tool_calls_rejected,
+                        "failure_reason": (
+                            None if success else "empty_llm_response"
+                        ),
                     },
                     metadata={
                         "model": getattr(
@@ -250,7 +255,11 @@ class ResearcherAgent(BaseAgent):
                 if isinstance(exec_result, BaseException):
                     output = f"Tool execution error: {exec_result}"
                     conv.append(
-                        ChatMessage(role="tool", content=output, tool_call_id="")
+                        ChatMessage(
+                            role="tool",
+                            content=output,
+                            tool_call_id=tc.get("id", ""),
+                        )
                     )
                 else:
                     output = exec_result["output"]
@@ -270,12 +279,25 @@ class ResearcherAgent(BaseAgent):
                 }
 
         # --- Max rounds reached without final answer ---
-        # Grab last assistant content
         final_content = ""
-        for msg in reversed(conv):
-            if msg.role == "assistant":
-                final_content = msg.content or ""
-                break
+        try:
+            final_result = await self._chat(
+                conv,
+                tools=None,
+                _llm_override=_llm_override,
+            )
+            final_content = final_result.content or ""
+            if final_result.usage:
+                for key, value in final_result.usage.items():
+                    aggregated_usage[key] = (
+                        aggregated_usage.get(key, 0) + (value or 0)
+                    )
+        except Exception:
+            pass
+
+        success = bool(final_content.strip())
+        if not success:
+            final_content = ""
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         from mindforge.agents.base import _estimate_cost
@@ -283,13 +305,16 @@ class ResearcherAgent(BaseAgent):
 
         agent_result = AgentResult(
             agent_name=self.name,
-            success=True,
+            success=success,
             output=final_content,
             data={
                 "rounds": max_rounds,
                 "messages": len(conv),
                 "tool_calls": tool_calls_made,
                 "tool_calls_rejected": tool_calls_rejected,
+                "failure_reason": (
+                    None if success else "empty_llm_response"
+                ),
             },
             metadata={
                 "model": getattr(

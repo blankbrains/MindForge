@@ -58,8 +58,10 @@ services:
       args:
         APP_UID: ${APP_UID}
         APP_GID: ${APP_GID}
+        REQUIREMENTS_FILE: ${PYTHON_REQUIREMENTS_FILE}
         VITE_API_TIMEOUT_MS: ${VITE_API_TIMEOUT_MS}
         VITE_RESEARCH_TIMEOUT_MS: ${VITE_RESEARCH_TIMEOUT_MS}
+        VITE_STREAM_MARKDOWN_INTERVAL_MS: ${VITE_STREAM_MARKDOWN_INTERVAL_MS}
     env_file:
       - .env
     environment:

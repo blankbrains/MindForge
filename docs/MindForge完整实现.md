@@ -1,15 +1,15 @@
 # MindForge — 自适应研究助理系统（完整实现）
 
-> **文档同步说明（2026-07-27）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
-> **项目定位：** 一个能主动学习、自我校正、多模态理解的智能研究助理。不是简单的"问答机器人"，而是能**主动分解问题、迭代检索、综合推理、生成可执行研究报告**的 Agent 系统。
+> **文档同步说明（2026-07-28）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
+> **项目定位：** 一个面向文本研究任务的自适应研究助理。不是简单的"问答机器人"，而是能**主动分解问题、迭代检索、综合推理、生成结构化研究报告**的 Agent 系统。
 >
-> **面试定位：** 2026 年 Agent 开发实习面试项目。集成 **Agentic RAG + Multi-Agent 协作 + 自适应记忆 + MCP 协议 + 流式可观测性**，每一层都有工程深度，可以在面试中讲 40 分钟而不重复。
+> **面试定位：** 2026 年 Agent 开发实习面试项目。集成 **Agentic RAG + Multi-Agent 协作 + 自适应记忆 + 流式可观测性**。MCP 章节仅保留历史学习说明，旧源码、脚本和测试已从当前 `main` 工作树移除。
 
-> **🏗️ 双分支架构：** 本项目分为两个 Git 分支：
+> **🏗️ 分支说明：** 仓库保留两个 Git 分支：
 > - **`main`** — 全栈 Web 平台（FastAPI + React 19 SPA + PostgreSQL + 前端 UI）
-> - **`mcp-server`** — 纯 MCP Server（无前端/API 层，专注 MCP 工具后端）
+> - **`mcp-server`** — 历史实验分支，不属于当前交付与部署范围
 >
-> 两个分支共享 80% 核心代码（agents/retrieval/tools/mcp/models），API 层和前端各自独立。
+> 当前事实以 `main` 为准：无 `/api/v1/mcp`、无 MCP 启动加载、无 Agent MCP 工具。
 
 ---
 
@@ -19,7 +19,7 @@
 - [第二章：配置管理](#第二章配置管理)
 - [第三章：文档处理流水线](#第三章文档处理流水线)
 - [第四章：检索系统](#第四章检索系统)
-- [第五章：MCP 协议层](#第五章mcp-协议层)
+- [第五章：历史 MCP 协议层](#第五章mcp-协议层)
 - [第六章：工具层](#第六章工具层)
 - [第七章：模型层（多模型支持）](#第七章模型层多模型支持)
 - [第八章：Agent 系统](#第八章agent-系统)
@@ -65,12 +65,7 @@ MindForge 技术栈
 │   ├── RAG 工具（内部知识库）
 │   ├── Web 搜索工具（实时信息）
 │   ├── 代码执行工具（数据分析）
-│   ├── 引用验证工具                          ← 实用性：防幻觉
-│   └── MCP 协议适配器                        ← 2026：标准化工具接入
-│
-├── MCP 层                                    ← 新增
-│   ├── MCP Client（调用外部 MCP Server）
-│   └── MCP Server（暴露 Agent 能力）
+│   └── 引用验证工具                          ← 编号与来源支持检查
 │
 ├── 模型层                                    ← 新增
 │   ├── OpenAI 适配器
@@ -91,6 +86,7 @@ MindForge/                                       # main 分支（全栈 Web 平�
 ├── pyproject.toml                               # 后端依赖管理
 ├── docker-compose.yml                           # Docker 编排（Qdrant+Redis+PostgreSQL）
 ├── Dockerfile                                   # 容器构建
+├── migrations/                                 # Alembic 数据库迁移
 ├── .env.example                                 # 环境变量模板
 ├── .gitignore                                   # 隐私保护（.env/.mcp.json/CLAUDE.md）
 ├── .github/workflows/ci.yml                     # CI 流水线
@@ -107,13 +103,11 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │       └── routes/                              # TanStack Router 路由
 │
 ├── scripts/
-│   ├── run_research.py                          # 快速启动演示
-│   ├── mcp_demo.py                              # MCP 功能演示
-│   └── mcp_discover.py                          # MCP 工具发现
+│   └── run_research.py                          # 快速启动演示
 │
 ├── src/mindforge/                               # Python 后端核心
 │   ├── __init__.py
-│   ├── config.py                                # 统一配置（11 子类 + Pydantic Settings）
+│   ├── config.py                                # 统一配置（14 子类 + Pydantic Settings）
 │   ├── db.py                                    # 🆕 数据库层（SQLAlchemy + PostgreSQL ONLY）
 │   │
 │   ├── ingestion/                               # 文档处理流水线
@@ -153,14 +147,13 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   │   ├── rag_tool.py                          # RAG 检索（完整依赖链 + 无 LLM 可工作）
 │   │   ├── web_search.py                        # 网络搜索（Tavily + DuckDuckGo 回退）
 │   │   ├── code_executor.py                     # 代码执行（加固沙箱 + 词边界匹配）
-│   │   ├── citation_verifier.py                 # 引用验证
-│   │   └── mcp_adapter.py                       # MCP 协议适配器
+│   │   └── citation_verifier.py                 # 引用验证
 │   │
-│   ├── mcp/                                     # MCP 协议层（双向）
-│   │   ├── __init__.py
-│   │   ├── client.py                            # MCP 客户端（调用外部工具）
-│   │   ├── server.py                            # MCP 服务端（暴露 4 个工具）
-│   │   └── registry.py                          # 工具注册表（进程管理 + 异常容错）
+│   ├── repositories/                            # PostgreSQL 文档目录访问层
+│   │   └── documents.py
+│   ├── services/                                # 后台健康监视与索引并发控制
+│   │   ├── health.py
+│   │   └── indexing.py
 │   │
 │   ├── models/                                  # LLM 适配器
 │   │   ├── __init__.py
@@ -176,30 +169,28 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   └── api/                                     # FastAPI 服务层
 │       ├── __init__.py
 │       ├── server.py                            # 应用入口（生命周期 + 静态文件托管）
-│       ├── routes.py                            # REST + SSE 路由（15 个端点）
+│       ├── routes.py                            # REST + SSE 路由（20 个方法）
 │       └── schemas.py                           # Pydantic v2 请求/响应模型
 │
 ├── tests/                                       # 测试
 └── data/                                        # 文档存储
 ```
 
-> **mcp-server 分支差异：** 删除 `mindforge-web/` 和 `src/mindforge/api/`，精简 `pyproject.toml`（无 fastapi/uvicorn），专注 MCP Server 模式。其余核心模块完全相同。
->
-> **推送策略：** 两个分支独立推送到 GitHub，各自的 git history 完整保留。核心模块（agents/retrieval/tools/mcp/models）的 bug 修复通过 cherry-pick 跨分支同步。
+> **历史分支说明：** `mcp-server` 保留旧实验代码。当前修复、文档和部署只以
+> `main` 为目标，不应把历史分支能力描述为线上功能。
 
 ### 1.3 技术选型理由（面试必讲）
 
 ```
 技术选型                选用原因                          面试亮点
 ─────────────────────────────────────────────────────────────
-LangGraph          状态机架构，精确控制 Agent 流程    "比 AgentExecutor 可靠10倍"
-Qdrant             Rust 实现，毫秒级检索，支持多向量  "向量数据库生产首选"
-MCP 协议           标准化工具接口，2026 行业标准       "Agent 生态兼容性"
+自研 Orchestrator  显式 DAG、超时和失败传播             "执行语义可测试"
+Qdrant             向量检索与 payload 过滤              "自托管向量存储"
 FastAPI + SSE      原生异步，流式输出零配置           "生产级 API 标准"
-Redis              语义缓存，相同问题零延迟            "成本优化核心手段"
+Redis              情节记忆持久化与 TTL                 "跨重启缓存"
 LangFuse           开源可观测性，全链路追踪            "生产环境必备"
-RAGAS              RAG 专用评估，五维度量化质量        "系统可信度保障"
-DeepSeek           开源模型，成本为 OpenAI 1/10        "成本控制意识"
+pytest/Vitest      回归测试锁定失败语义和交互竞态       "可重复验证"
+DeepSeek/OpenAI    统一模型适配接口                     "供应商解耦"
 GraphRAG           微软 2024 提出的图增强检索          "前沿技术敏感度"
 Docker Compose     一键启动所有服务                   "DevOps 实践"
 ```
@@ -351,15 +342,6 @@ class AgentConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
 
-class MCPConfig(BaseSettings):
-    mcp_config_path: str = Field(
-        default=os.path.expanduser("~/.claude/mcp.json"),
-    )
-    mcp_auto_discover: bool = Field(default=True)
-    mcp_tool_timeout: int = Field(default=30, ge=5)
-    model_config = SettingsConfigDict(env_prefix="MCP_", extra="ignore")
-
-
 class CacheConfig(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6377")
     cache_ttl: int = Field(default=3600, ge=60)
@@ -395,7 +377,6 @@ class Settings(BaseSettings):
     raptor: RAPTORConfig = Field(default_factory=RAPTORConfig)
     graphrag: GraphRAGConfig = Field(default_factory=GraphRAGConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
-    mcp: MCPConfig = Field(default_factory=MCPConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
@@ -429,7 +410,7 @@ LLM_PROVIDER=openai                # openai | deepseek
 # ── OpenAI（默认）──
 OPENAI_API_KEY=sk-...
 
-# ── DeepSeek（备选，成本降 90%）──
+# ── DeepSeek（备选）──
 # DEEPSEEK_API_KEY=sk-...
 # DEEPSEEK_BASE_URL=https://api.deepseek.com
 
@@ -468,10 +449,6 @@ VECTOR_COLLECTION_NAME=mindforge_docs
 # AGENT_SUBTASK_TIMEOUT=30            # 子任务超时（秒）
 # AGENT_RESEARCH_TIMEOUT=180          # 全流程超时（秒）
 # AGENT_CRITIC_THRESHOLD=7.0
-
-# ── MCP ──
-# MCP_MCP_CONFIG_PATH=~/.claude/mcp.json
-# MCP_MCP_AUTO_DISCOVER=true
 
 # ── 缓存 ──
 # CACHE_REDIS_URL=redis://localhost:6377   # Redis 对外端口 6377
@@ -916,8 +893,11 @@ class EmbeddingManager:
                 logger.warning("Embedding backend %s unavailable: %s", backend, exc)
 
         if explicit:
-            logger.warning("Embedding provider '%s' unavailable — falling back to hash-based embedding.", self._provider)
-        self._init_fallback()
+            raise RuntimeError(
+                f"Configured embedding provider '{resolved}' is unavailable. "
+                "Refusing to create incompatible fallback vectors."
+            )
+        self._init_fallback()  # 仅未指定 provider 的开发模式
 
     def _init_st(self):
         """sentence-transformers 本地模型 — 默认 BAAI/bge-m3 (1024维)
@@ -2438,7 +2418,13 @@ class GraphRAGEngine:
 
 ---
 
-## 第五章：MCP 协议层
+## 第五章：历史 MCP 协议层
+
+> 本章代码用于记录早期协议探索，不代表当前 `main` Web 应用能力。当前应用
+> 不加载 MCP Registry、不暴露 MCP HTTP 路由、不注册 MCP Agent 工具，
+> `pyproject.toml` 和 `.env.example` 也没有 MCP 启动入口。下列路径和代码均为
+> 文档归档，当前源码树中不存在。重新启用前必须重新完成权限、生命周期和
+> 端到端安全评审。
 
 ### 5.1 MCP 工具注册表
 
@@ -3624,6 +3610,9 @@ class CitationVerifier(BaseTool):
 
 ### 6.6 MCP 协议适配器
 
+> 历史代码示例。当前 Orchestrator 的工具集合只有 RAG、WebSearch、
+> CodeExecutor 和 CitationVerifier。
+
 ```python
 # src/mindforge/tools/mcp_adapter.py
 """MCP 协议适配器 — 将外部 MCP 工具包装为标准 Agent 工具"""
@@ -4003,7 +3992,7 @@ class OpenAIAdapter(BaseLLM):
 
 ```python
 # src/mindforge/models/deepseek_adapter.py
-"""DeepSeek 适配器 — 兼容 OpenAI SDK，成本为 OpenAI 的 1/10"""
+"""DeepSeek 适配器 — 兼容 OpenAI SDK 的统一 LLM 接口"""
 
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
@@ -4615,7 +4604,6 @@ class ResearcherAgent(BaseAgent):
     - WebSearchTool：网络搜索（补充）
     - CodeExecutor：代码执行（数据分析）
     - CitationVerifier：引用验证
-    - MCPToolAdapter：外部 MCP 工具
     """
 
     def __init__(self, llm=None, tools=None):
@@ -4653,7 +4641,6 @@ class ResearcherAgent(BaseAgent):
 3. 如果知识库信息不足，使用 web_search 补充
 4. 如果需要计算或数据分析，使用 execute_python
 5. 生成报告前使用 verify_citations 验证引用
-6. 如果 MCP 工具可用，可以通过 mcp_tools 调用外部服务
 
 规则：
 - 每个思考步骤只做一件事（思考 OR 调用工具）
@@ -6098,8 +6085,8 @@ class IndexRequest(BaseModel):
     file_url: Optional[str] = None
     file_path: Optional[str] = None
     metadata: dict = Field(default_factory=dict)
-    strategy: str = Field(default="semantic")
-    use_raptor: bool = Field(default=True)
+    strategy: str = Field(default="auto")
+    use_raptor: bool = Field(default=False)
     use_graphrag: bool = Field(default=False)
 
 
@@ -6117,7 +6104,7 @@ class HealthResponse(BaseModel):
     version: str = "1.0.0"
     qdrant_connected: bool = False
     redis_connected: bool = False
-    mcp_tools_available: int = 0
+    postgres_connected: bool = False
 ```
 
 ### 11.2 API 路由
@@ -6215,7 +6202,7 @@ async def health():
         version="1.0.0",
         qdrant_connected=True,
         redis_connected=True,
-        mcp_tools_available=0,
+        postgres_connected=True,
     )
 
 
@@ -6244,7 +6231,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="MindForge",
-    description="自适应研究助理系统 — Multi-Agent RAG with MCP",
+    description="Multi-agent research orchestration platform.",
     version="1.0.0",
 )
 
@@ -6369,24 +6356,26 @@ _ensure_app_secret()
 
 # ── 加密/解密（API Key 保护）──
 def _get_secret() -> bytes:
-    secret = os.getenv("APP_SECRET", "mindforge-default-secret-change-in-production")
+    secret = os.getenv("APP_SECRET", "")
+    if not secret:
+        raise RuntimeError("APP_SECRET is not initialized")
     return hashlib.sha256(secret.encode()).digest()
 
 def encrypt_api_key(plain: str) -> str:
     if not plain:
         return ""
-    secret = _get_secret()
-    encrypted = bytes(b ^ secret[i % len(secret)] for i, b in enumerate(plain.encode()))
-    return encrypted.hex()
+    key = base64.urlsafe_b64encode(_get_secret())
+    token = Fernet(key).encrypt(plain.encode("utf-8")).decode("ascii")
+    return f"fernet:{token}"
 
 def decrypt_api_key(encrypted: str) -> str:
     if not encrypted:
         return ""
     try:
-        secret = _get_secret()
-        raw = bytes.fromhex(encrypted)
-        return bytes(b ^ secret[i % len(secret)] for i, b in enumerate(raw)).decode()
-    except Exception:
+        key = base64.urlsafe_b64encode(_get_secret())
+        token = encrypted.removeprefix("fernet:")
+        return Fernet(key).decrypt(token.encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError, UnicodeDecodeError):
         return ""
 
 # ── 数据模型 ──
@@ -6456,7 +6445,7 @@ def init_db():
 
 ### 13.1 统一配置与锁文件
 
-项目根目录 `.env` 是运行时和部署参数的唯一配置源，`.env.example` 提供完整键集合。Python 依赖由 `uv.lock` 解析，并生成带哈希的 `requirements.lock` / `requirements-dev.lock`；前端依赖由 `package-lock.json` 锁定。
+项目根目录 `.env` 是运行时和部署参数的唯一配置源，`.env.example` 提供完整键集合。Python 依赖由 `uv.lock` 解析，并生成带哈希的 `requirements.lock` / `requirements-dev.lock`；前端依赖由 `package-lock.json` 锁定。CPU 部署把 Torch 显式绑定到官方 CPU wheel 索引，避免间接依赖引入 CUDA/NVIDIA 运行库。
 
 ```bash
 cp .env.example .env
@@ -6482,12 +6471,19 @@ docker compose up -d qdrant redis postgres
 
 ### 13.3 Dockerfile
 
-Dockerfile 使用两阶段构建：
+Dockerfile 使用三阶段构建：
 
 1. Node.js 22 Alpine 执行 `npm ci` 和 Vite 生产构建。
-2. Python 3.11 slim 使用 `requirements.lock` 的哈希锁安装依赖，复制前端产物和 Python 源码，以非 root 用户运行。
+2. Python Builder 使用 `requirements.lock` 的哈希锁安装后端依赖。
+3. Python 3.11 slim Runtime 复制依赖、前端产物、迁移和源码，以非 root 用户运行。
 
 容器通过 `/api/v1/ready` 执行健康检查，FastAPI 在单端口同时托管 API 与前端静态资源。
+CPU 镜像使用 `requirements-cpu.lock` 和 `torch==2.13.0+cpu`。当前服务器
+生产容器使用 `requirements-gpu.lock` 和 `torch==2.13.0+cu130`，
+`torch.cuda.is_available()` 为 `True`，设备为 NVIDIA GPU。服务器没有
+NVIDIA Container Toolkit，`docker-compose.gpu.yml` 通过显式映射
+`/dev/nvidia*` 设备节点以及宿主机 `libcuda.so`、`libnvidia-ml.so`
+完成 GPU 直通。
 
 ### 13.4 启动脚本
 
@@ -6513,11 +6509,37 @@ python -m ruff check src tests
 python -m pytest tests -v --cov=src/mindforge -m "not integration"
 npm ci
 npm run lint
+npm test
 npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-27 本地基线：Ruff 通过、76 项 pytest 通过、npm audit 0 漏洞、ESLint 通过、Vite 生产构建通过。
+2026-07-28 本地基线：Ruff 致命错误检查通过、121 项 pytest 通过、16 项
+Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整 Ruff 规则当前
+仍有 419 个历史告警，在清理前不能声明 CI 的完整 Ruff 门禁已通过。当前 npm
+镜像不支持审计接口，因此不声明 `npm audit` 为零漏洞。
+
+### 13.6 长文档性能实测
+
+同一份 28,961,284 字节、523 页、396,579 字符、925 Chunk 的 PDF：
+
+- 优化前同步完整索引：`302.38s`。
+- CPU 优化后完整索引：`228.44-232.59s`，提升约 `23.1%-24.5%`。
+- NVIDIA GPU 默认 `auto` 策略完整索引：`<gpu-baseline>`，较 CPU 优化结果
+  缩短约 `94%`。
+- PDF 多进程解析：`3.25-3.42s`。
+- BGE-M3 CPU Embedding：`<cpu-baseline>`，约占首次索引 97%。
+- BGE-M3 GPU Embedding：`9.07-10.09s`；独立同批数据基准最快 `5.509s`。
+- 相同内容和配置重复上传：`<reuse-duration>`，直接复用完整索引。
+
+重复上传并不是只比较文件名：解析内容生成稳定 SHA-256 文档 ID，索引配置生成
+独立签名，并核对 PostgreSQL、Qdrant、BM25 三方 Chunk 数。配置变化或任一索引
+不完整时会完整重建，避免错误命中缓存。
+
+前端不提供历史“索引任务”查看区，也不轮询任务列表。文件传输使用
+`XMLHttpRequest.upload.onprogress` 展示已上传字节百分比；服务器返回任务 ID
+后切换为单任务轮询，展示索引阶段、进度、Chunk 数、耗时和取消操作。完成或
+取消后刷新文档目录与统计。
 
 ---
 ## 第十四章：前端模块（React 19 SPA）
@@ -6672,7 +6694,6 @@ export interface HealthResponse {
   version: string;
   qdrant_connected: boolean;
   redis_connected: boolean;
-  mcp_tools_available: boolean;
 }
 export interface StatsResponse {
   documents_indexed: number;
@@ -7037,7 +7058,7 @@ export function Sidebar() {
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive = to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to);
-          return <Link key={to} to={to} search={{}} className={cn("flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors", isActive ? "bg-primary/10 text-primary" : "text-text-muted hover:bg-surface-alt hover:text-text")}><Icon className="h-4 w-4" />{label}</Link>;
+          return <Link key={to} to={to} search={{}} reloadDocument={to === "/settings"} className={cn("flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors", isActive ? "bg-primary/10 text-primary" : "text-text-muted hover:bg-surface-alt hover:text-text")}><Icon className="h-4 w-4" />{label}</Link>;
         })}
       </nav>
       <div className="border-t border-border px-6 py-4"><p className="text-xs text-text-muted">MindForge v1.0.0</p></div>
@@ -7130,17 +7151,17 @@ export default defineConfig({
 ```
 MindForge — Adaptive Research Assistant System
 │
-├── Designed and implemented a Multi-Agent system (Planner→Researcher→Critic→Synthesizer)
-│   using LangGraph, achieving automated task decomposition and parallel execution.
+├── Designed and implemented a custom async Multi-Agent pipeline
+│   (Planner→Researcher→Synthesizer→Critic) with validated DAG execution.
 │
-├── Integrated MCP (Model Context Protocol) for standardized tool discovery and invocation,
-│   enabling dynamic integration of external services (Docker, DB, search).
+├── Built a transactional ingestion pipeline with batch embeddings, dimension/count
+│   validation, rollback, RAPTOR summaries, BM25 persistence, and GraphRAG enrichment.
 │
-├── Built dual-engine retrieval (RAPTOR hierarchical indexing + GraphRAG entity graph)
-│   with adaptive strategy routing across 6 query types (factual/conceptual/analytical...).
+├── Built adaptive hybrid retrieval using dense search, BM25, weighted RRF,
+│   HyDE, Multi-Query, optional CrossEncoder reranking, and GraphRAG.
 │
-├── Implemented provider-agnostic model layer supporting OpenAI ↔ DeepSeek switching,
-│   reducing API costs by 90% on high-volume research tasks.
+├── Implemented OpenAI/DeepSeek model adapters while keeping the embedding space
+│   independent and preventing incompatible provider switches on existing indexes.
 │
 ├── Developed three-tier memory (Working/Episodic/Semantic) and Self-Refine quality loop
 │   (Critic Agent with threshold-based iterative refinement).
@@ -7153,17 +7174,17 @@ MindForge — Adaptive Research Assistant System
 ```
 MindForge — 自适应研究助理系统
 │
-├── 基于 LangGraph 实现 Multi-Agent 流水线（规划→研究→批评→综合），
-│   支持 DAG 任务分解与并行执行，相比单 Agent 架构效率提升 3 倍
+├── 自研异步 Multi-Agent 流水线（规划→研究→综合→评判），
+│   支持 DAG 校验、依赖调度、并行子任务、失败传播与 SSE 事件
 │
-├── 集成 MCP 协议实现工具标准化接入，Researcher Agent 可动态发现
-│   和调用外部 MCP 工具（Docker/数据库等），支持运行时热插拔
+├── 构建统一文档索引事务：批量 Embedding、数量/维度校验、失败回滚、
+│   RAPTOR 摘要、BM25 持久化和可选 GraphRAG 增强
 │
-├── 双引擎检索策略：RAPTOR 层次化索引 + GraphRAG 实体关系图谱，
-│   根据 6 种查询类型自适应路由，NDCG@6 提升 22%
+├── 自适应混合检索：Dense + BM25 + RRF，并按查询模式启用
+│   HyDE、Multi-Query、CrossEncoder 和 GraphRAG
 │
-├── 模型无关架构：OpenAI / DeepSeek 一键切换，
-│   高调用场景下成本降低 90%，对上層 Agent 完全透明
+├── 模型层支持 OpenAI / DeepSeek 切换，同时将 LLM 与 Embedding 解耦，
+│   防止不同向量空间污染已有索引
 │
 ├── 三层记忆系统（工作/情节/语义）+ Critic Self-Refine 质量循环，
 │   Critic Agent 5 维度自动评分，低于阈值自动触发精炼
@@ -7182,23 +7203,21 @@ A:  单 Agent 把所有工具都交给一个 LLM，职责不清晰、context 容
     又方便单独优化和扩展。
 
 Q2: MCP 协议在你的项目里是怎么用的？
-A:  我实现了 MCPToolAdapter，它通过读取 mcp.json 配置自动连接到
-    已安装的 MCP Server，把外部工具通过 MCP 协议转换为 Agent 可以
-    调用的 Function Calling 格式。这样 Researcher Agent 不仅能调用
-    内部工具，还能动态发现和调用 Docker、数据库等外部 MCP 工具。
-    相比硬编码的 @tool 函数，MCP 方式更具扩展性。
+A:  项目早期实现过 MCP Client/Server 和适配器，用于学习 JSON-RPC、
+    stdio 子进程与工具发现。完整审查后，当前 Web 版本将它停用：
+    不暴露 /api/v1/mcp，不在启动阶段加载，也不向 Researcher 注册。
+    遗留模块保留为学习代码，未来若重启需要重新做权限和生命周期评审。
 
 Q3: RAPTOR 和 GraphRAG 有什么区别？
 A:  RAPTOR 是从底层文档块自底向上构建层次化摘要树，适合单文档内
     由浅入深的检索；GraphRAG 是从多文档中抽取实体和关系构建知识图谱，
-    适合跨文档的关系发现。我在 AdaptiveRetriever 中根据查询类型
-    选择不同策略：概念型用 RAPTOR，关系型用 GraphRAG，分析型两者结合。
+    适合跨文档的关系发现。当前 RAPTOR 摘要与普通 Chunk 一起进入 Qdrant，
+    GraphRAG 则在 graph 查询模式下显式调用；尚未实现按 RAPTOR 层级下钻。
 
 Q4: 为什么同时支持 OpenAI 和 DeepSeek？
-A:  为了成本和灵活性。DeepSeek 的 API 成本约为 OpenAI 的 1/10，
-    在 Researcher Agent 这种高调用量场景下使用 DeepSeek 可以显著
-    降低成本。我通过 LLMFactory 抽象层实现了一键切换，对上层 Agent
-    完全透明。每个 Agent 角色可以配置不同模型（目前统一用 deepseek-chat）。
+A:  为了部署灵活性和供应商解耦。我通过 LLMFactory 抽象层实现切换，
+    对上层 Agent 保持统一接口。每个 Agent 角色可以配置不同模型；
+    具体成本差异取决于供应商当期定价，项目文档不写死比例。
     LLMFactory.create() 对未知 provider 会 raise ValueError 而非静默 fallback。
     面试时可以补充：这意味着不绑定单一供应商，且工厂模式支持未来扩展新模型。
 
@@ -7256,20 +7275,16 @@ A:  MCP (Model Context Protocol) 是 Anthropic 提出的 LLM-工具交互标准�
     ③ 支持热插拔——改 mcp.json 配置即生效，不需要重启服务。
 
 Q6: 你的项目里 MCP 是怎么双向实现的？
-A:  我实现了 MCP 的双向架构——既有 MCP Client（调用外部工具），
-    也有 MCP Server（暴露自己的能力）。Client 端通过 MCPRegistry 管理子进程，
-    将 GitHub/Qdrant 等外部 MCP Server 的工具自动转换为 OpenAI Function Calling 格式。
-    Server 端通过 MindForgeMCPServer 把 search_knowledge_base/run_research_task
-    等内部能力暴露为 4 个 MCP 工具，可以被 Claude Code 等 MCP Host 调用。
-    面试时可以强调"我把项目本身做成了一个 MCP 生态节点"。
+A:  历史版本实现过 MCP Client、Server 和 Registry，但完整审查后发现它会
+    扩大配置、进程和权限边界。当前 main 已停用所有运行时接入，只保留学习代码。
+    这个决策说明我会根据产品定位控制复杂度，而不是为了技术标签强行上线。
 
 Q7: MCP Client subprocess 挂了怎么处理？
 A:  MCPRegistry.start_all() 对每个 server 进程有独立的 try/except，
     一个 server 失败不影响其他。discover_all_tools() 同样对每个 server
     单独容错。_send_request() 用循环读取 stdout，跳过非 JSON 行（npx 启动日志）
     和 notification 消息，只取带 "id" 的响应。30 秒超时保证不会无限等待。
-    这是我实际开发中踩过的坑——npx 第一次运行会输出下载进度到 stdout，
-    破坏了 JSON-RPC 的纯净性。
+    这是历史学习实现中真实遇到的问题；当前 Web 应用不会启动这些子进程。
 ```
 
 #### 🔍 检索与 RAG
@@ -7292,17 +7307,15 @@ A:  HyDE (Hypothetical Document Embeddings) 的核心思想是：让 LLM 先
 
 Q10: RAPTOR 和 GraphRAG 分别解决什么问题？
 A:  两者互补：RAPTOR 是纵向的——对单文档/文档集做层次化摘要（叶子=原文块，
-    上层=cluster 摘要），检索时从粗到细，适合"给我概述一下这个领域"。
+    上层=cluster 摘要），适合为检索提供不同粒度的文本。
     GraphRAG 是横向的——跨文档抽取实体和关系构建知识图谱，适合"A 和 B
-    之间有什么关联"。我的 AdaptiveRetriever 根据 6 种查询模式动态选择：
-    概念型开 RAPTOR、关系型开 GraphRAG、分析型两者全开。
+    之间有什么关联"。当前 GraphRAG 在 graph 模式显式调用，RAPTOR 摘要和
+    普通 Chunk 一起进入 Qdrant；按层级下钻仍是后续工作。
 
-Q11: 你的 Embedding 方案为什么设计了三级回退？
-A:  实际部署环境千差万别：有 GPU 的可以跑本地 sentence-transformers，
-    有 API Key 的用 OpenAI，什么都没有的至少能用 hash fallback 把系统跑起来
-    验证流程。面试官会喜欢你考虑到了生产环境的多样性。另外我设置了
-    EMBEDDING_DISABLE_ST 环境变量和 HF_HUB_DOWNLOAD_TIMEOUT=5s，
-    确保在无网络的服务器上不会因为模型下载而 hung 住。这是真实踩坑经验。
+Q11: 为什么显式 Embedding provider 失败时不再自动回退？
+A:  因为 BGE、OpenAI 和 hash 不在同一个向量空间。静默回退虽然让请求不报错，
+    却会把不兼容向量写进已有 Collection，检索结果表面可用、实际失真。
+    当前显式 provider 失败会停止索引；已有文档时也拒绝切换 provider。
 ```
 
 #### 🧩 模型与成本
@@ -7371,27 +7384,25 @@ A:  代码不在 API 主进程执行。父进程先校验代码长度、变量 J
     因此生产环境应继续配合容器权限、seccomp/AppArmor 和网络策略。
 
 Q19: 你是怎么保护 API Key 的？
-A:  ① .env 和 .mcp.json 加入 .gitignore，避免代码仓库泄露
+A:  ① .env 和 *.env 加入 .gitignore，避免代码仓库泄露
     ② 数据库中使用 Fernet 加密保存，密钥由 APP_SECRET 派生
     ③ 前端 settings API 返回脱敏显示（"***086a" 只显示后 4 位）
     ④ CLAUDE.md 等含项目配置的文件也被 .gitignore 排除。
-    面试时可以说"虽不是 PCI 级别的加密，但比明文存储好 100 倍"。
+    同时在提交前扫描历史和源码中的硬编码凭证；不使用无法验证的量化说法。
 
 Q20: 如果 LLM API 挂了，整个系统会崩溃吗？
-A:  不会。我设计了多层降级：① _fallback_research() 在 ResearchAgent
-    不可用时自动切换到纯检索+网络搜索模式，不需要 LLM 也能给出结果
-    ② search_knowledge_base 这个 MCP 工具完全不依赖 LLM——只做向量检索
-    ③ orchestrator 有由 `AGENT_RESEARCH_TIMEOUT` 控制的总超时，默认 180s，
+A:  不会直接崩溃。非流式 Agent 失败会进入知识库纯检索 fallback；
+    fallback 也失败时返回 503，而不是伪装成成功报告。Orchestrator 有由
+    `AGENT_RESEARCH_TIMEOUT` 控制的总超时，默认 180s，
     超时返回明确失败结果而不是
-    无响应 ④ BaseAgent._chat() 有 3 次指数退避重试。面试时可以说
-    "我设计的系统即使 LLM 全挂了，至少还能当搜索引擎用"。
+    无响应；BaseAgent._chat() 还有限次重试。
 
 Q21: 前端研究任务超时了怎么处理？
-A:  use-research-session.ts 从根目录 `.env` 读取 `VITE_RESEARCH_TIMEOUT_MS`
-    （默认 900000ms），
+A:  use-research-session.ts 优先读取设置接口中的运行时研究超时（默认 180s），
+    `VITE_RESEARCH_TIMEOUT_MS` 只作构建时回退，
     超时后自动 abort SSE 连接并设置 status="error"。后端 orchestrator.run()
     也有默认 180s 的总超时，超时返回含超时说明的 AgentResult。
-    两端双重保护，用户不会看到"永远的 loading spinner"。
+    每个请求还有 generation id，旧连接的迟到回调不会污染新会话。
 ```
 
 #### 🏗️ 项目实际踩坑
@@ -7410,19 +7421,16 @@ A:  最大的坑有五个：
        解决：设置 HF_ENDPOINT=https://hf-mirror.com（国内镜像）
        + local_files_only=True 优先（缓存命中瞬时加载）
        + HF_HUB_DOWNLOAD_TIMEOUT=10s。
-    ④ 情节记忆 single-word bug——查询只有一个词时，几乎所有任务都有至少 1 个词重叠，
-       导致"什么是AI""今天天气"都能匹配。解决：最少 2 个词重叠才算相似。
+    ④ 情节记忆模糊命中——两个词重叠也可能把新问题替换成旧答案。
+       解决：自动复用只允许任务完全相同且未过期。
     ⑤ GraphRAG JSON 解析——LLM 返回的 JSON 可能不完整（提前截断）或多输出（markdown 包裹），
        json.loads 直接报错。解决：括号平衡遍历找到正确截断位置再解析。
     面试时主动讲解决问题的过程比讲"一切顺利"更有说服力。
 
 Q23: 为什么要分 main 和 mcp-server 两个分支？
-A:  main 是全栈 Web 平台（有前端/API/数据库），mcp-server 是纯 MCP 工具后端。
-    两个分支共享 80% 的核心代码（agents/retrieval/tools/mcp/models）。
-    这样做的好处：① mcp-server 分支可以独立作为 pip 包发布，不携带前端和 FastAPI 依赖
-    ② 核心模块的 bug 修复通过 cherry-pick 同步，不会分化 ③ GitHub 上两个分支
-    面向不同受众（全栈开发者看 main，MCP 集成者看 mcp-server）。
-    面试时体现的是"代码组织能力和产品思维"。
+A:  这是历史实验留下的分支结构。当前交付只以 main 为准，mcp-server 不参与
+    部署，也不应作为当前产品能力宣传。后续若不再需要，应单独评估归档策略，
+    而不是让两个运行时长期分化。
 
 Q24: 为什么没有用 LangChain/LlamaIndex 而是自己写？
 A:  LangChain 对 Agent 流程的抽象太重，调试困难，而且版本迭代快 API 经常 Breaking。
@@ -7454,19 +7462,19 @@ A:  优势：发现跨文档的实体关系（传统 RAG 只看单文档内的 c
 
 ```
 问 Agent 架构    → Multi-Agent 流水线 + DAG 并行 + 角色分工
-问 工具调用      → MCP 双向协议 + JSON-RPC + Function Calling 动态发现
+问 工具调用      → RAG/Web/Code/Citation 四类工具 + 有界 ReAct 循环
 问 检索          → 混合检索 RRF + HyDE + Multi-Query + 自适应 6 模式
 问 模型          → LLMFactory 抽象 + OpenAI/DeepSeek 切换 + per-role 模型映射
-问 成本          → DeepSeek 1/10 成本 + Redis 缓存 + Token 精确追踪
-问 质量          → Critic 5维 Self-Refine + LangFuse 全链路 + RAGAS 评估
+问 成本          → 有界工具调用 + 精确任务缓存 + Token/成本追踪
+问 质量          → Critic 5维 Self-Refine + 引用支持检查 + 回归测试
 问 部署          → FastAPI SSE + Docker Compose + PostgreSQL + Redis 6377
 问 安全          →代码沙箱多层防护 + API Key Fernet 加密 + .gitignore 隐私保护
-问 评估          → RAGAS 五维指标 + Critic 自评分 + Token/成本监控
-问 工程化        → 双分支架构 + 三级回退 + 超时保护 + 自动降级 + 简单查询跳过
+问 评估          → 当前缺少离线检索基准，明确区分已测事实与待测指标
+问 工程化        → 索引事务 + 超时保护 + 失败回滚 + 前后端回归测试
 问 数据库        → PostgreSQL ONLY + APP_SECRET 持久化 + API Key Fernet 加密
-问 前端          → Zustand persist + SSE 流式 + 5 分钟超时 + 响应式暗色模式
-问 踩坑          → Qdrant 版本锁定 + MCP npx 污染 + 离线 embedder 镜像 + single-word bug + JSON 括号平衡
-问 2026 趋势     → Multi-Agent + MCP 标准化 + Agent 可靠性 > 能力
+问 前端          → Zustand + SSE generation 隔离 + 运行时超时 + 响应式暗色模式
+问 踩坑          → 向量空间污染 + 缓存误命中 + SPA 404 + SSE 竞态
+问 2026 趋势     → Multi-Agent 协作 + 检索评测 + Agent 可靠性
 问 性能          → PDF 并行 + 批量 Embedding + 跳过 Synthesizer/Critic + 流式逐 token + 缓存精准匹配
 ```
 
@@ -7481,9 +7489,9 @@ A:  优势：发现跨文档的实体关系（传统 RAG 只看单文档内的 c
 ```
 优化维度              旧方案                          新方案                          效果
 ─────────────────────────────────────────────────────────────────────────────────────
-PDF 解析              单线程逐页                       ThreadPoolExecutor(8 workers)   4-8x 提速
+PDF 解析              8 线程页范围解析                  spawn 进程池（默认12 workers）  显著降低解析耗时
 文档 Embedding        逐块 embed_single()              embedder.embed(texts) 批量       3-5x 提速
-Qdrant Upsert         逐条写入                         500条/批                       10x+ 提速
+Qdrant Upsert         逐条写入                         .env 可配置批量写入             降低网络往返
 RAPTOR 摘要           串行逐 cluster                   asyncio.gather 并行             3-5x 提速
 GraphRAG 实体抽取     逐文档块依次调用 LLM              所有块合并一次调用(batch)        减少 N-1 次调用
 简单查询 Critic       一律执行评估                     1个子任务+输出<800字跳过        减少1轮评估调用
@@ -7495,36 +7503,24 @@ GraphRAG 实体抽取     逐文档块依次调用 LLM              所有块合
 ### 16.2 文档上传优化
 
 ```python
-# PDF 并行解析核心代码（ingestion/parsers.py 中的实际实现）
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# PDF 并行解析核心结构（实际实现还包含页数限制、线程回退和异常映射）
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB 上限
 
-def _parse_pdf_parallel(self, path: Path) -> tuple[str, list, dict]:
-    """使用 ThreadPoolExecutor(8) 并行解析 PDF 各页"""
-    import pdfplumber
-    content_parts = []
-    sections = []
-
-    with pdfplumber.open(str(path)) as pdf:
-        pages = list(pdf.pages)
-        # 8 个工作线程并行提取文本
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(_extract_page, p): i for i, p in enumerate(pages)}
-            results = {}
-            for future in as_completed(futures):
-                idx = futures[future]
-                try:
-                    results[idx] = future.result()
-                except Exception:
-                    results[idx] = ""
-
-    for i in range(len(pages)):
-        text = results.get(i, "")
-        content_parts.append(text)
-        sections.append({"title": f"第 {i+1} 页", "content": text, "level": 0})
-
-    return "\n".join(content_parts), sections, {"pages": len(content_parts)}
+def _parse_pdf_ranges(path: Path, ranges: list[tuple[int, int]]) -> list:
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=12,
+        mp_context=context,
+    ) as executor:
+        return list(
+            executor.map(
+                _extract_pdf_page_range,
+                [(str(path), start, end) for start, end in ranges],
+            )
+        )
 
 
 # 批量 Embedding + Qdrant Upsert（ingestion/embedder.py + retrieval/vector_store.py）
@@ -7532,9 +7528,10 @@ def _parse_pdf_parallel(self, path: Path) -> tuple[str, list, dict]:
 # 新方案：
 embeddings = embedder.embed([c.content for c in chunks])  # 一次批量调用
 
-# Qdrant upsert 500条/批
-for i in range(0, len(points), 500):
-    batch = points[i:i + 500]
+# Qdrant upsert 批大小来自 API_INDEX_BATCH_SIZE，当前默认 128
+batch_size = get_settings().api.index_batch_size
+for i in range(0, len(points), batch_size):
+    batch = points[i:i + batch_size]
     await store.upsert(batch)
 
 # 小文档跳过 RAPTOR/GraphRAG（<=5 chunks 不适合建树）
@@ -7691,7 +7688,7 @@ interface HistoryResponse {
 ---
 
 > **项目总结：MindForge 是一个为 2026 年 Agent 开发实习面试设计的完整项目。**
-> 它从基础的 RAG 出发，逐步演进到 Multi-Agent + MCP 协议 + GraphRAG，
+> 它从基础的 RAG 出发，逐步演进到 Multi-Agent + RAPTOR + GraphRAG，
 > 每一层都有可讲的工程深度。文中包含了 26 道高频面试题的完整答案和
 > 项目实际开发中的踩坑经验，可以在面试中稳定输出 40-60 分钟的技术深度。
 
@@ -7704,8 +7701,8 @@ interface HistoryResponse {
 |------|--------|--------|
 | 模型 | MD5 哈希投影（无语义） | **BAAI/bge-m3** (1024-dim) |
 | 下载源 | HuggingFace（被墙） | **hf-mirror.com 镜像** + ModelScope 国内源 |
-| 语义相似度 | ~0.01（随机） | **0.44-0.53**（真正语义匹配） |
-| 回退策略 | 仅 hash | ST → OpenAI → hash 三级回退 |
+| 语义相似度 | hash 无可靠语义 | 由 BGE/OpenAI 真实向量提供 |
+| 失败策略 | 静默 hash | 显式 provider 失败即停止，防止污染 Collection |
 | 加载策略 | 每次联网下载 | **local_files_only=True 优先**，缓存命中瞬时加载 |
 | Fallback dim | 384 | **1024**（与 BGE-M3 对齐，避免切换时维度不匹配） |
 | 中文分词 | 空白切分 | **jieba 分词**（Fallback 模式质量提升） |
@@ -7723,13 +7720,13 @@ interface HistoryResponse {
 | CacheConfig.redis_url | localhost:6379 | **localhost:6377** | Redis Docker 对外端口 |
 | LLMFactory unknown provider | 默认 fallback openai | **raise ValueError** | 显式报错 |
 | deepseek_critic | deepseek-reasoner | **deepseek-chat** | DeepSeek 统一模型 |
-| Reranker model_name | cross-encoder/ms-marco-MiniLM-L-6-v2 | **None** | 默认不启用 reranker |
+| Reranker model_name | cross-encoder/ms-marco-MiniLM-L-6-v2 | **BAAI/bge-reranker-v2-m3** | 固定 revision，可选启动预加载与失败熔断 |
 
 ### 检索质量优化
 | 项目 | 旧方案 | 新方案 |
 |------|--------|--------|
-| RRF 融合 | `score = w/(k+rank)` → ~0.01 | `0.6*w*k/(k+rank) + 0.4*raw` → 0.4-0.6 |
-| 分数过滤 | 固定阈值 0.02 | 自适应：真实 embedding 0.15，hash fallback 0.005 |
+| RRF 融合 | 原始分数直接混合 | 按检索路径权重执行纯 RRF，避免 BM25/向量分数尺度污染 |
+| 分数过滤 | 固定阈值 | 由检索配置和最终 Top-K 控制，不把不同来源原始分数直接比较 |
 | 输出格式 | 原始元数据（Knowledge Base Results...） | Markdown 标题 + 📌来源标注 + 低分警告 |
 | 无结果提示 | "No results found" | "⚠️ 当前资料库中暂无高度相关的内容" + 建议 |
 
@@ -7747,10 +7744,11 @@ interface HistoryResponse {
 ### 文档上传优化
 | 项目 | 旧方案 | 新方案 |
 |------|--------|--------|
-| PDF 解析 | 单线程逐页 | **ThreadPoolExecutor(8 workers)** 并行 |
+| PDF 解析 | 8 线程页范围解析 | **spawn ProcessPoolExecutor**，worker/阈值可配置并保留线程回退 |
 | Embedding | 逐块 embed_single() | **批量 embedder.embed(texts)** |
-| Qdrant Upsert | 逐条写入 | **500条/批** |
-| 文件上限 | 无限制 | **200MB** |
+| Qdrant Upsert | 逐条写入 | **API_INDEX_BATCH_SIZE 可配置批量写入** |
+| 文件上限 | 无限制 | **API_MAX_UPLOAD_MB 配置，模板默认 200MB** |
+| 重复上传 | 每次完整 Embedding | **内容 SHA-256 + 索引签名，完整性通过后直接复用** |
 | 小文档处理 | 一律建 RAPTOR/GraphRAG | **<=5 chunks 自动跳过** |
 | 错误提示 | 英文 | **中文（文件过大/格式不支持/解析失败）** |
 
@@ -7769,8 +7767,8 @@ interface HistoryResponse {
 | db.py | **独立加载 .env**（不依赖 config 模块，避免循环导入） |
 | qdrant-client | **锁定 1.18.x**，与 Qdrant Server 1.18.3 对齐 |
 | Redis 端口 | **6377**（Docker host），避免与本地 Redis 冲突 |
-| 缓存匹配 | 仅匹配 task（不匹配 result），最少 2 词重叠 |
+| 缓存匹配 | 仅复用完全相同且未过期的 task |
 | 前端 | 设置页眼睛图标切换，取消编辑恢复脱敏值，删除立即保存 |
 | 历史 | 分页 API（page/page_size），支持大规模历史 |
 | 部署 | Docker Compose 一键启动（Qdrant v1.18.3 + Redis 7 + PostgreSQL 16） |
-| 双分支 | main（全栈 Web）+ mcp-server（纯 MCP，无前端/API 层） |
+| 分支 | 当前交付只以 main 为准；mcp-server 为历史实验分支 |

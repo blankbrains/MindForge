@@ -36,6 +36,8 @@ export interface SettingsState {
   subtaskTimeout: number;
   researchTimeout: number;
   loaded: boolean;
+  loadError: string | null;
+  saveError: string | null;
 
   setLLMProvider: (provider: LLMProvider) => void;
   setLLMApiKey: (key: string) => void;
@@ -48,6 +50,7 @@ export interface SettingsState {
   setCriticThreshold: (value: number) => void;
   setSubtaskTimeout: (value: number) => void;
   setResearchTimeout: (value: number) => void;
+  resetConfigDefaults: () => void;
   loadSettings: () => Promise<void>;
   saveSettings: () => Promise<boolean>;
   deleteLLMApiKey: () => Promise<boolean>;
@@ -58,6 +61,35 @@ const EMPTY_FLAGS: ProviderFlags = { openai: false, deepseek: false };
 
 function providerKeyName(provider: LLMProvider) {
   return provider === "deepseek" ? "deepseek_api_key" : "openai_api_key";
+}
+
+async function responseError(response: Response, fallback: string) {
+  const raw = await response.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown };
+    if (parsed.detail) return String(parsed.detail);
+  } catch {
+    // Use the bounded raw response below.
+  }
+  return raw && raw.length <= 300 ? raw : fallback;
+}
+
+function validateSettings(state: SettingsState): string | null {
+  const checks: Array<[number, number, number, string]> = [
+    [state.retrievalTopK, 1, 100, "向量检索 Top-K"],
+    [state.rerankTopK, 1, 50, "重排序 Top-K"],
+    [state.maxIterations, 1, 20, "最大迭代次数"],
+    [state.maxRefineRounds, 0, 5, "最大精炼轮次"],
+    [state.criticThreshold, 0, 10, "评判阈值"],
+    [state.subtaskTimeout, 10, 600, "子任务超时"],
+    [state.researchTimeout, 30, 3600, "研究总超时"],
+  ];
+  for (const [value, minimum, maximum, label] of checks) {
+    if (!Number.isFinite(value) || value < minimum || value > maximum) {
+      return `${label}必须在 ${minimum} 到 ${maximum} 之间。`;
+    }
+  }
+  return null;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -77,6 +109,8 @@ export const useSettingsStore = create<SettingsState>()(
       subtaskTimeout: 30,
       researchTimeout: 180,
       loaded: false,
+      loadError: null,
+      saveError: null,
 
       setLLMProvider: (provider) => {
         const state = get();
@@ -134,8 +168,25 @@ export const useSettingsStore = create<SettingsState>()(
       setCriticThreshold: (value) => set({ criticThreshold: value }),
       setSubtaskTimeout: (value) => set({ subtaskTimeout: value }),
       setResearchTimeout: (value) => set({ researchTimeout: value }),
+      resetConfigDefaults: () =>
+        set((state) => ({
+          llmProvider: "deepseek",
+          llmApiKey:
+            state.apiKeyDrafts.deepseek
+            ?? state.maskedKeys.deepseek,
+          hasLLMKey: state.hasLLMKeys.deepseek,
+          retrievalTopK: 20,
+          rerankTopK: 6,
+          maxIterations: 3,
+          maxRefineRounds: 1,
+          criticThreshold: 7,
+          subtaskTimeout: 30,
+          researchTimeout: 180,
+          saveError: null,
+        })),
 
       loadSettings: async () => {
+        set({ loaded: false, loadError: null });
         try {
           const response = await fetch(`${API_BASE}/settings`);
           if (!response.ok) {
@@ -168,18 +219,29 @@ export const useSettingsStore = create<SettingsState>()(
             subtaskTimeout: data.subtask_timeout ?? 30,
             researchTimeout: data.research_timeout ?? 180,
             loaded: true,
+            loadError: null,
           });
-        } catch {
-          set({ loaded: true });
+        } catch (error) {
+          set({
+            loaded: true,
+            loadError:
+              error instanceof Error
+                ? error.message
+                : "设置加载失败。",
+          });
         }
       },
 
       saveSettings: async () => {
         const state = get();
+        const validationError = validateSettings(state);
+        if (validationError) {
+          set({ saveError: validationError });
+          return false;
+        }
+        set({ saveError: null });
         const payload: SettingsPayload = {
           llm_provider: state.llmProvider,
-          embedding_provider:
-            state.llmProvider === "openai" ? "openai" : "bge",
           retrieval_top_k: state.retrievalTopK,
           rerank_top_k: state.rerankTopK,
           max_iterations: state.maxIterations,
@@ -189,8 +251,11 @@ export const useSettingsStore = create<SettingsState>()(
           research_timeout: state.researchTimeout,
         };
 
-        if (!state.llmApiKey.startsWith("***")) {
-          payload[providerKeyName(state.llmProvider)] = state.llmApiKey;
+        for (const provider of ["deepseek", "openai"] as const) {
+          const draft = state.apiKeyDrafts[provider];
+          if (draft !== undefined && !draft.startsWith("***")) {
+            payload[providerKeyName(provider)] = draft;
+          }
         }
 
         try {
@@ -199,10 +264,19 @@ export const useSettingsStore = create<SettingsState>()(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
-          if (!response.ok) return false;
+          if (!response.ok) {
+            set({
+              saveError: await responseError(
+                response,
+                "设置保存失败，请稍后重试。",
+              ),
+            });
+            return false;
+          }
           await get().loadSettings();
           return true;
         } catch {
+          set({ saveError: "设置保存失败，请检查网络连接。" });
           return false;
         }
       },
@@ -210,16 +284,6 @@ export const useSettingsStore = create<SettingsState>()(
       deleteLLMApiKey: async () => {
         const state = get();
         const payload: SettingsPayload = {
-          llm_provider: state.llmProvider,
-          embedding_provider:
-            state.llmProvider === "openai" ? "openai" : "bge",
-          retrieval_top_k: state.retrievalTopK,
-          rerank_top_k: state.rerankTopK,
-          max_iterations: state.maxIterations,
-          max_refine_rounds: state.maxRefineRounds,
-          critic_threshold: state.criticThreshold,
-          subtask_timeout: state.subtaskTimeout,
-          research_timeout: state.researchTimeout,
           [providerKeyName(state.llmProvider)]: "",
         };
         try {
@@ -237,7 +301,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
     }),
     {
-      name: "mindforge-settings",
+      name: "mindforge-settings-v2",
       partialize: (state) => ({
         llmProvider: state.llmProvider,
         hasLLMKey: state.hasLLMKey,

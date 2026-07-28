@@ -10,7 +10,13 @@ import asyncio
 
 import openai
 
-from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, StreamEvent
+from mindforge.models.base import (
+    BaseLLM,
+    ChatMessage,
+    ChatResult,
+    LLMConfigurationError,
+    StreamEvent,
+)
 
 
 # 延迟加载 embedding 模型（单例，线程安全）
@@ -53,7 +59,7 @@ class DeepSeekAdapter(BaseLLM):
         self.model = model
         key = api_key or ""
         if not key or not key.strip():
-            raise ValueError(
+            raise LLMConfigurationError(
                 "DeepSeek API key is not configured. "
                 "Set LLM_DEEPSEEK_API_KEY in .env or pass api_key."
             )

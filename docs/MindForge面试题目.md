@@ -2451,13 +2451,17 @@ Prompts     │ 预设的提示模板    │ 角色模板、场景模板
 
 ---
 
-## 49. MindForge 中的 MCP 实现
+## 49. MindForge 历史 MCP 实现与当前取舍
 
 **Q：** MindForge 项目中 MCP 是怎么实现的？
 
 **A：**
 
-MindForge 实现了**双向 MCP**——既是 Client 又是 Server。
+MindForge 早期实现过双向 MCP Client/Server，下面代码用于讲解协议结构。
+当前 `main` Web 应用已经停用这条运行时链路：不暴露 `/api/v1/mcp`，启动阶段
+不加载 Registry，Researcher 不注册 MCP 工具，`.env.example` 与
+`pyproject.toml` 也没有 MCP 配置和 CLI。旧源码、脚本和测试已移除，下列代码
+仅作为历史协议讲解。
 
 ### MCP Client——调用外部工具
 
@@ -2539,7 +2543,10 @@ class MCPRegistry:
 
 ### 面试话术
 
-> *"MCP 是 LLM 应用和工具之间的标准化协议，类比于 USB 接口统一了外设连接标准。一个完整的 MCP Server 包含协议层（JSON-RPC 2.0）、能力声明层、工具实现层、安全层和可观测性。运作机制上，Client 通过 initialize → list tools → call tool 三步完成交互。MindForge 实现了双向 MCP——既是 Client 调用外部工具，也是 Server 暴露自身能力。"*
+> *"MCP 是 LLM 应用和工具之间的标准化协议。MindForge 早期做过双向实现，
+> 用于理解 initialize、tools/list、tools/call 和子进程生命周期；但当前 Web
+> 产品不需要这条额外权限边界，所以主分支已停用运行时接入，只保留学习代码。
+> 这体现的是根据产品定位控制复杂度，而不是为了技术标签强行上线。"*
 
 ---
 

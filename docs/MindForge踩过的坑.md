@@ -310,6 +310,9 @@ onClick={() => session.startResearch(task)}                     // 重试时空 
 
 ## 六、MCP 协议
 
+> 本节记录历史 MCP 实现中的真实问题。当前 `main` Web 应用已停用 MCP，
+> 不暴露 HTTP 入口、不在启动阶段加载，也不向 Researcher 注册 MCP 工具。
+
 ### 18. JSON-RPC request id 用内存地址
 
 **现象**：并发 MCP 请求响应串扰。
@@ -393,19 +396,361 @@ onClick={() => session.startResearch(task)}                     // 重试时空 
 
 **修复**：Tracer 对 key/password/secret/token/cookie 等字段和疑似凭证值统一脱敏；默认 `OBSERVABILITY_CAPTURE_CONTENT=false`，并限制单条记录、单文件大小和保留天数。
 
+### 27. 本地 `.env` 覆盖服务器配置导致容器无法启动
+
+**现象**：代码同步后重新构建，PostgreSQL 因主机端口被占用而启动失败；修复端口后，应用又只绑定到 `127.0.0.1`。容器内进程还可能因 UID/GID 不匹配而无法读取绑定挂载的 `.env`。
+
+**根因**：本地与服务器虽然共享同一套配置键，但部署值不同。把本地 `.env`
+整文件上传后，覆盖了服务器专用的 PostgreSQL 端口、应用绑定地址以及
+`APP_UID/APP_GID`。宿主 `.env` 属于原用户，容器 UID 改变后即使文件保持
+`600`，运行时配置接口也无法读写。
+
+**修复**：远程部署只同步代码和文档；`.env` 先备份再按键合并。配置变更
+只更新相关键，并在重建前运行 `docker compose config --quiet`。容器
+UID/GID 必须与 `.env` 文件所有者对齐；调整时先迁移数据卷和模型缓存所有权。
+重建后同时检查 Compose 端口映射、`/api/v1/ready` 和远程访问地址。
+
+### 28. 旧 SPA 缓存叠加设置页懒加载导致卡死
+
+**现象**：点击侧边栏“设置”后长期停在“正在加载页面”，部分 Edge 渲染进程
+随后以 `STATUS_ILLEGAL_INSTRUCTION` 崩溃。移除 MCP 管理后，已经打开的旧
+浏览器标签页仍可复现。
+
+**定位证据**：设置 API 始终快速返回 200，响应不足 1 KB，服务端无异常。干净
+浏览器会请求当前 `settings-page-*.js` 并正常进入设置页；发生卡死的浏览器仍
+持续轮询 `/health`，但点击设置时服务端没有收到当前设置 chunk 请求，说明它
+继续运行部署前缓存的 SPA 和旧 chunk。
+
+**根因**包含两个阶段。第一阶段是设置页使用 TanStack Router 的
+`lazyRouteComponent`，旧标签页继续运行部署前入口；同时
+`importWithReload` 在导入失败后返回永不结束的 Promise，导致路由永久停在
+pending。取消动态 chunk 后，用户 Edge 仍出现原生崩溃，Crashpad 转储进一步
+定位到 `dwrite.dll`，异常码 `0xc000001d`，多次崩溃地址完全一致。
+
+最终触发条件是设置 Store 持久化了 `hasLLMKey=true`，但不会持久化真实或脱敏
+`llmApiKey`。设置页在 API 返回前立即渲染表单，于是旧浏览器状态会先在
+`font-mono` 元素中显示中文占位文本，触发该机器 Edge/DirectWrite 的字体回退
+崩溃。干净浏览器没有这份持久化状态，因此一直无法复现。
+
+**修复**：设置页改为同步路由，构建产物不再生成 `settings-page-*.js`；桌面和
+移动端设置链接使用 `reloadDocument` 强制完整文档导航；动态导入失败后触发
+重载并抛出原错误，不再留下永久 pending Promise。HTML 保持 `no-store`，哈希
+资源保持 `immutable`。设置数据加载完成前只显示加载态，失败时显示可重试
+错误态；API Key 展示和输入取消等宽字体，空值仅使用 ASCII 掩码。设置 Store
+迁移到 `mindforge-settings-v2`，忽略旧持久化状态，并由 AppShell 启动时从
+服务器统一初始化。同时移除主页 MCP 状态卡和管理界面。后续进一步移除了
+`/api/v1/mcp`、启动加载、健康字段、Agent 工具注册、CLI 入口和 `.env.example`
+配置；遗留协议模块仅用于历史学习。
+
+### 29. `AgentResult(success=False)` 被包装成成功响应
+
+**现象**：非流式 `/query` 中，Orchestrator 明确返回失败结果，API 仍返回 200
+和普通 `QueryResponse`，调用方无法区分成功报告与失败文本。
+
+**根因**：路由只捕获异常，没有检查 `result.success`。
+
+**修复**：失败结果进入纯检索 fallback；fallback 也失败时返回 503。回归测试用
+假的 Orchestrator 固定复现，不依赖真实 LLM。
+
+### 30. 情节记忆用关键词重叠跳过新研究
+
+**现象**：缓存过 `explain react hooks` 后，请求
+`explain react hooks security` 会直接返回旧答案。
+
+**根因**：`recall()` 允许两个词重叠就视为命中，而且内存副本没有执行 TTL。
+
+**修复**：自动复用只允许规范化后的任务完全相同，并在查询前清理过期记录。
+模糊检索仍可用于分析或推荐，但不能替代新任务执行。
+
+### 31. 引用验证只看编号，不看来源是否支持声明
+
+**现象**：`The moon is made of cheese [1]` 配一条 Python 文档来源仍被判定
+100% 有效。
+
+**根因**：旧实现只检查 `[N]` 是否落在来源列表范围内。
+
+**修复**：增加保守的声明句提取和词汇支持检查；来源只有 URL、内容为空或与
+声明没有最低限度交集时标记问题。该工具仍不是事实核查器，文档中不再宣称
+未经基准验证的幻觉率。
+
+### 32. 索引链路会静默接受空文档和向量截断
+
+**现象**：空文档返回 `indexed`；Embedding 返回数量少于 Chunk 时，
+`zip(chunks, vectors)` 静默丢掉尾部数据。
+
+**根因**：两个索引入口各写一套流程，缺少统一的空值、数量和维度校验。
+
+**修复**：`/index` 与 `/upload` 共用索引管线；空文档返回 422，向量数量或
+维度不匹配直接失败并回滚。解析、Embedding 和同步 Qdrant 初始化移到
+`asyncio.to_thread()`，避免阻塞单 worker 事件循环。
+
+### 33. RAPTOR 重复计算叶子 Embedding
+
+**现象**：上传流程先让 RAPTOR 对每个叶子逐条 `embed_single()`，随后又对所有
+Chunk 批量 Embedding。
+
+**根因**：增强索引执行顺序早于基础向量生成。
+
+**修复**：先批量生成并写回 `DocumentChunk.embedding`，RAPTOR 直接复用叶子
+向量，仅为摘要节点生成新向量；聚类和同步模型调用移出事件循环。
+
+### 34. LLM 切换顺带切换 Embedding，污染已有 Collection
+
+**现象**：设置页切到 OpenAI/DeepSeek 时自动改 Embedding provider，旧向量不
+重建；显式后端初始化失败还会静默退化为 hash 向量。
+
+**根因**：把 LLM 和 Embedding 当成同一个供应商开关，忽略向量空间兼容性。
+
+**修复**：前端不再随 LLM 自动发送 `embedding_provider`；已有索引时后端拒绝
+切换 Embedding。显式 provider 不可用时停止索引，不写 fallback 向量。
+
+### 35. 文档内容预览重复 overlap 且 payload 被截断
+
+**现象**：内容预览把重叠 Chunk 用空行拼接，重复显示文本；每个 payload 又只
+保存前 2000 字，合法的 2048 字 Chunk 会丢内容。
+
+**根因**：索引写入与文档重建没有使用 `chunk_start/chunk_end`。
+
+**修复**：保存完整 Chunk 和结构化 metadata；预览按字符区间去重拼接。历史
+时间同时统一补 UTC `Z`，避免浏览器把无时区时间误当成本地时间。
+
+### 36. SPA fallback 把不存在的 API 返回成 HTML 200
+
+**现象**：访问 `/api/v1/not-a-real-endpoint` 得到前端 `index.html` 和 200。
+
+**根因**：通配 SPA 路由没有排除 `/api/`。
+
+**修复**：未知 API 路径返回 JSON 404，只有非 API 路由才回退到 SPA。
+
+### 37. 旧 SSE 连接回调污染新研究会话
+
+**现象**：快速开始第二个任务后，第一个连接迟到的 chunk、完成或错误事件仍会
+写入当前 Zustand 状态；前端超时还固定为构建时常量。
+
+**根因**：客户端只有一个 AbortController 引用，没有请求代次标识。
+
+**修复**：每次开始/取消研究递增 generation id，所有回调先检查代次；研究总
+超时优先读取运行时设置。Vitest 直接模拟两个连接，验证旧回调被忽略。
+
+### 38. 设置更新缺少统一锁和资源释放
+
+**现象**：并发保存可能让 DB、`.env`、`os.environ` 和单例处于不同版本；配置
+切换后旧 Qdrant、Redis、OpenAI 客户端保持打开。
+
+**根因**：只有 `.env` 文件锁，没有覆盖完整设置事务。
+
+**修复**：设置更新使用进程级重入锁串行执行，保留 `.env`/DB 回滚；提交成功后
+重载配置并关闭旧 Orchestrator、Embedding 和 Qdrant 资源。
+
+### 39. 上传取消弹窗被覆盖，构建上下文携带陈旧 egg-info
+
+**现象**：上传中点击关闭后，确认弹窗和上传弹窗同为 `z-50`，后渲染的上传框
+盖住确认框；Docker 构建还会复制本地 `src/mindforge.egg-info`。
+
+**根因**：Modal 渲染顺序错误，`.dockerignore` 未覆盖 `*.egg-info`。
+
+**修复**：取消确认放到上传弹窗之后渲染，取消异常触发服务端尽力回滚；
+`.dockerignore` 增加 `*.egg-info`。
+
+### 40. BM25 声明可用但生产依赖缺少 jieba
+
+**现象**：`bm25s` 可导入，中文查询却一直退化为关键词匹配。
+
+**根因**：中文分词依赖只写在代码分支，没有进入生产依赖锁。
+
+**修复**：将 `jieba` 加入 `pyproject.toml` 和哈希锁，并增加依赖可用性回归。
+
+### 41. Chunk 去空白后仍保留原始偏移，预览吞空格
+
+**现象**：`alpha beta gamma` 重建后变成 `alpha betagamma`。
+
+**根因**：Chunk 内容被 `strip()`，`chunk_start/chunk_end` 却仍指向原文。
+
+**修复**：固定分块保留原始切片；语义分块按原文 span 记录准确偏移，并做
+round-trip 测试。
+
+### 42. 流式失败结果和缺 Key 初始化没有进入检索回退
+
+**现象**：非流式可回退，SSE 收到 `success=False` 或 Orchestrator 因缺 Key
+初始化失败时却直接报错。
+
+**根因**：初始化发生在 fallback 的 `try` 外，SSE 只捕获异常、不检查失败
+`done` 结果。
+
+**修复**：初始化纳入回退边界；SSE 识别失败 `done` 并统一走异步 RAG fallback。
+
+### 43. 同步检索和 GraphRAG 扫描阻塞事件循环
+
+**现象**：BM25、CrossEncoder、RAG 初始化和 GraphRAG 分词/全图扫描均运行在
+事件循环线程。
+
+**修复**：同步工作统一移入 `asyncio.to_thread()`；GraphRAG 用操作锁串行化
+构建、查询和删除，并用状态锁保护同步查询。
+
+### 44. BM25 查询和重建并发时结果映射到错误文档
+
+**根因**：查询使用旧索引返回位置后，读取的却是已经被重建替换的新文档数组。
+
+**修复**：查询、构建、保存和加载使用同一实例重入锁，确保索引与文档快照一致。
+
+### 45. 设置页跨供应商草稿丢失，删除 Key 被无关非法值阻断
+
+**修复**：保存时提交两个供应商的全部草稿；删除 Key 只发送目标供应商空值，
+不携带其他设置。
+
+### 46. CodeExecutor 安全加固后科学库全部不可用
+
+**现象**：`numpy/pandas/scipy/sklearn` 在白名单中，但导入时报
+`ctypes.dlopen` 或 Windows `kernel32` 错误。
+
+**根因**：审计 Hook 在可信科学库加载本地扩展前就禁止动态库初始化。
+
+**修复**：只预加载用户代码静态声明的白名单模块，再安装审计 Hook；同时禁止
+用户访问 `ctypeslib/CDLL/windll` 等桥接属性。子进程环境只继承必要系统变量，
+不继承 API Key。
+
+### 47. CodeExecutor 中文异常触发父进程解码崩溃
+
+**修复**：子进程强制 UTF-8，父进程使用替换解码，并把空 stdout 和外层异常
+转换为失败 `ToolResult`。
+
+### 48. RAPTOR 相同摘要跨文档覆盖
+
+**根因**：摘要节点 ID 只依赖层级、聚类序号和摘要文本。
+
+**修复**：ID 加入所有 child node ID 的稳定指纹，跨文档节点集合不再相交。
+
+### 49. 文档和历史详情的迟到响应覆盖当前选择
+
+**修复**：文档预览使用 AbortController 和请求身份校验；历史详情使用 generation
+id，关闭、删除和清空时使旧请求失效。
+
+### 50. Agent 空文本和 Synthesizer 流协议被误判成功
+
+**现象**：LLM 返回空文本时 Agent/Synthesizer 仍 `success=True`；多子任务流式
+综合直接对未 await 的协程执行 `async for`。
+
+**修复**：空白输出统一标记失败，Orchestrator 初次综合失败时停止，精炼失败时
+保留上一版草稿；流式 chat 先 await 得到异步迭代器。
+
+### 51. WebSearch 在干净生产环境中两条后端都不可用
+
+**根因**：缺少 `tavily-python` 和 `requests` 生产依赖；注入客户端还被 SDK
+缺失判断提前忽略，DuckDuckGo 正则无法解析重定向链接。
+
+**修复**：锁定正式依赖，增加运行时参数校验和 Tavily 异常回退，并用
+BeautifulSoup 解析 DuckDuckGo。
+
+### 52. 大 PDF 跨线程共享同一解析对象，错误被吞成空页
+
+**修复**：先改为每个 worker 独立打开 PDF 并处理连续页范围，再用真实 523 页
+文件比较线程与 `spawn` 进程。8 线程为 `<thread-baseline>`，12 进程为 `<process-baseline>`，
+最终默认多进程并保留线程回退；单页失败记录具体页码。
+
+### 53. 设置重置误删 DeepSeek Key，资源关闭失败阻断新配置
+
+**根因**：重置按钮先切到 DeepSeek 再清 Key；运行时重载把所有 reset 串在一次
+无保护调用中。
+
+**修复**：重置只恢复非敏感参数，所有 Key 草稿保持不变；旧资源关闭和各单例
+重建逐项隔离，某一项失败不会阻断其余配置生效。
+
+### 54. 移动端首次加载自动展开侧边栏遮挡主内容
+
+**现象**：在 390px 移动视口全新打开首页时，侧边栏和遮罩立即覆盖主内容，
+用户必须先关闭抽屉才能使用页面。
+
+**根因**：全局 UI Store 将 `sidebarOpen` 无条件初始化为 `true`；桌面布局虽然
+不读取该状态，但移动布局会据此直接渲染抽屉。
+
+**修复**：将抽屉初始状态改为关闭，保留菜单按钮显式打开行为，并增加 Store
+回归测试和真实移动视口浏览器验证。
+
+### 55. 非流式检索降级把 Qdrant 异步客户端带到错误事件循环
+
+**现象**：缺少 LLM Key 时 `/query` 表面返回 200，但日志出现
+`bound to a different event loop`，向量检索实际失败后被混合检索降级逻辑吞掉。
+
+**根因**：API 将 `RAGTool.safe_execute` 放入工作线程；同步桥接在该线程中创建
+新的事件循环，却复用了主事件循环初始化的 Qdrant 异步客户端。
+
+**修复**：非流式 fallback 直接 `await RAGTool.execute_async()`，仅由工具内部
+卸载同步初始化，异步 Qdrant 调用始终留在请求事件循环。现有 fallback 回归测试
+同时禁止再次调用同步桥接。
+
+### 56. 缺少 LLM Key 的正常降级被记录为 ERROR 堆栈
+
+**现象**：系统按设计在未配置 API Key 时返回知识库检索结果，但每次请求都会
+输出 ERROR 和完整 Traceback，导致监控误报并掩盖真实故障。
+
+**根因**：模型适配器用通用 `ValueError` 表示缺少 Key，API 又对所有初始化异常
+统一调用 `logger.exception`。
+
+**修复**：新增 `LLMConfigurationError`，OpenAI/DeepSeek 缺 Key 时统一抛出；
+API 对该明确配置状态记录 WARNING，未知异常仍保留 ERROR 堆栈，回归测试同时
+校验降级成功和日志级别。
+
+### 57. 大 PDF 超过页数上限却显示“服务器繁忙”
+
+**现象**：上传约 300 页的书籍 PDF 后，前端只提示“服务器繁忙，请稍后重试”。
+实测文件实际有 523 页，而服务端原上限为 500 页。
+
+**根因**：解析器用通用 `ValueError` 表示页数超限，API 没有把输入边界异常
+映射到 4xx，前端又把所有 5xx 统一遮蔽成服务器繁忙。
+
+**修复**：增加文档解析异常层级，将页数、字符数和 Chunk 数等限制映射到
+400/413/422；错误信息同时包含实际值和配置上限。前端优先展示服务端 `detail`，
+知识库上传框显示当前 PDF 页数上限。大体量 PDF 测试 在上限 600 时
+成功生成 925 个 Chunk，601 页测试文件返回 HTTP 413。
+
+### 58. 异步任务临时文件名导致相同 PDF 重复索引
+
+**现象**：同一份 大体量 PDF 重复上传后，文档数从 1 增长到 2，Chunk 从
+925 增长到 1850，并再次消耗约 223 秒执行 CPU Embedding。
+
+**根因**：旧 `doc_id` 包含文件名、mtime 和内容前缀。异步任务每次都给上传
+文件加新的 job ID 前缀，所以相同内容必然得到不同文档 ID；BM25 也只能按新的
+Chunk ID 追加。
+
+**修复**：文档 ID 改为解析内容 SHA-256；新增索引签名覆盖分块、Embedding、
+RAPTOR 和 GraphRAG 配置。命中前核对 PostgreSQL、Qdrant 和 BM25 Chunk 数；
+Qdrant 重建时替换同文档 Point，BM25 按文档整体替换。服务器重复上传实测
+`<reuse-duration>`，未进入 Embedding，文档和 Chunk 总数不再增长。
+
+### 59. 服务器有 GPU，但容器只能使用 CPU
+
+**现象**：宿主机存在 NVIDIA GPU，但生产容器运行 `torch==2.13.0+cpu`，
+大体量 PDF 的 BGE-M3 Embedding 仍需 `<cpu-baseline>`。服务器没有
+NVIDIA Container Toolkit，常规 `gpus: all` 配置无法工作。
+
+**根因**：GPU 是否存在和容器是否获得 CUDA 设备是两件事。CPU Torch wheel
+不包含 CUDA 后端，Docker 默认也不会把 `/dev/nvidia*` 和宿主机驱动库暴露给
+容器。
+
+**修复**：保留 CPU/GPU 两套互斥哈希锁；GPU Compose override 显式映射
+`/dev/nvidia0`、`/dev/nvidiactl`、`/dev/nvidia-uvm`、
+`/dev/nvidia-uvm-tools`、`libcuda.so` 和 `libnvidia-ml.so`，并把
+Embedding 设备设为 `cuda`、batch size 设为 32。容器内真实 CUDA 矩阵运算
+通过，大体量 PDF 默认 `auto` 策略完整索引降至 `<gpu-baseline>`。
+
+该方式依赖宿主机驱动库的真实版本路径，驱动升级后需要更新服务器 `.env`。
+如果目标主机具备 NVIDIA Container Toolkit，应优先使用标准 GPU runtime，
+减少对宿主机文件布局的耦合。
+
 ---
 
 ## 总结
 
 | 类别 | 坑数 | 最深的坑 |
 |------|:----:|---------|
-| LLM 调用链路 | 3 | 脱敏 Key 覆盖真实 Key |
-| Agent 编排 | 4 | `as_completed` Future 映射失败 |
-| 检索系统 | 4 | RRF 分数尺度不匹配 |
-| SSE 流式 | 2 | `[DONE]` 和 `done` 竞态 |
-| 前端 | 4 | 重试按钮空 task |
+| LLM 调用链路 | 4 | 脱敏 Key 覆盖真实 Key |
+| Agent 编排 | 6 | 空响应和流式综合协议错误 |
+| 检索与索引 | 14 | 向量空间污染、事件循环错用、竞态与静默截断 |
+| SSE 流式 | 5 | 失败结果未触发检索回退 |
+| 前端 | 11 | 旧响应覆盖、Key 草稿、重置误删除和移动抽屉遮挡 |
 | MCP 协议 | 2 | JSON-RPC id 内存地址 |
-| 性能 | 1 | 空知识库重试风暴 |
-| 生产化与安全 | 6 | 代码沙箱隔离与输入资源边界 |
+| 性能 | 5 | 大 PDF 解析、重复 Embedding、GPU 容器直通与同步重任务阻塞事件循环 |
+| 生产化与安全 | 12 | 沙箱边界、依赖缺失、输入边界、日志误报与资源释放 |
 
-总共 **26 个坑**，每个都落地到代码层面解决了。面试官问到的时候，挑 2-3 个讲清楚，比一口气列完更有说服力。
+总共 **59 个坑**，每个都落地到代码或测试层面解决了。面试官问到的时候，
+挑 2-3 个讲清楚，比一口气列完更有说服力。

@@ -25,7 +25,7 @@ class VerificationIssue:
     """An issue found during citation verification."""
 
     marker: CitationMarker
-    issue_type: str  # "missing_source", "index_out_of_range", "empty_source", "unused_source"
+    issue_type: str
     detail: str = ""
 
 
@@ -118,6 +118,31 @@ class CitationVerifier(BaseTool):
     }
 
     MARKER_PATTERN = re.compile(r"\[(\d+)\]")
+    WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+")
+    STOP_WORDS = frozenset(
+        {
+            "about",
+            "also",
+            "and",
+            "are",
+            "been",
+            "being",
+            "for",
+            "from",
+            "has",
+            "have",
+            "into",
+            "its",
+            "made",
+            "that",
+            "the",
+            "their",
+            "this",
+            "was",
+            "were",
+            "with",
+        }
+    )
 
     def execute(
         self,
@@ -237,6 +262,32 @@ class CitationVerifier(BaseTool):
                             ),
                         )
                     )
+                elif not title and not content:
+                    summary.issues.append(
+                        VerificationIssue(
+                            marker=marker,
+                            issue_type="insufficient_source_content",
+                            detail=(
+                                f"Source [{marker.index}] has only a URL, so "
+                                "the cited claim cannot be checked."
+                            ),
+                        )
+                    )
+                elif not self._source_supports_marker(
+                    report_text,
+                    marker,
+                    src,
+                ):
+                    summary.issues.append(
+                        VerificationIssue(
+                            marker=marker,
+                            issue_type="unsupported_claim",
+                            detail=(
+                                f"Source [{marker.index}] does not contain "
+                                "enough lexical evidence for the cited claim."
+                            ),
+                        )
+                    )
                 else:
                     summary.valid_markers += 1
                     summary.sources_used.add(marker.index)
@@ -248,6 +299,63 @@ class CitationVerifier(BaseTool):
             summary.unused_sources = unused
 
         return summary
+
+    def _source_supports_marker(
+        self,
+        report_text: str,
+        marker: CitationMarker,
+        source: dict[str, Any],
+    ) -> bool:
+        claim = self._claim_for_marker(report_text, marker)
+        claim_terms = self._terms(claim)
+        source_terms = self._terms(
+            f"{source.get('title', '')} {source.get('content', '')}"
+        )
+        if not claim_terms or not source_terms:
+            return False
+        overlap = claim_terms & source_terms
+        if len(claim_terms) <= 2:
+            return claim_terms <= source_terms
+        return len(overlap) >= 2 and (
+            len(overlap) / len(claim_terms)
+        ) >= 0.2
+
+    def _claim_for_marker(
+        self,
+        report_text: str,
+        marker: CitationMarker,
+    ) -> str:
+        sentence_start = max(
+            report_text.rfind(delimiter, 0, marker.position)
+            for delimiter in (".", "!", "?", "。", "！", "？", "\n")
+        )
+        following = [
+            position
+            for delimiter in (".", "!", "?", "。", "！", "？", "\n")
+            if (position := report_text.find(
+                delimiter,
+                marker.position + len(marker.raw),
+            ))
+            != -1
+        ]
+        sentence_end = min(following) if following else len(report_text)
+        claim = report_text[sentence_start + 1:sentence_end]
+        return self.MARKER_PATTERN.sub("", claim)
+
+    def _terms(self, text: str) -> set[str]:
+        terms: set[str] = set()
+        for token in self.WORD_PATTERN.findall(text.lower()):
+            if "\u4e00" <= token[0] <= "\u9fff":
+                if len(token) == 1:
+                    terms.add(token)
+                else:
+                    terms.update(
+                        token[index:index + 2]
+                        for index in range(len(token) - 1)
+                    )
+            elif len(token) >= 3 and token not in self.STOP_WORDS:
+                terms.add(token)
+        return terms
 
     # ------------------------------------------------------------------
     # Formatting

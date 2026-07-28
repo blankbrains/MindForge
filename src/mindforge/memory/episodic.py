@@ -160,28 +160,30 @@ class EpisodicMemory:
         """
         async with self._lock:
             output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
-            self.add_episode(task=task, result=output, sources=[])
+            await asyncio.to_thread(
+                self.add_episode,
+                task=task,
+                result=output,
+                sources=[],
+            )
 
     async def recall(self, task: str) -> dict | None:
-        """Async alias for ``search_similar`` — used by Orchestrator.
+        """Recall a cached result only for an exact, unexpired task.
 
-        Returns the top episode's result dict, or ``None`` if no match.
+        Fuzzy keyword matches are useful for analytics and suggestions, but
+        they are not safe as a substitute for executing a new research task.
         """
         async with self._lock:
-            # 优先精确匹配，避免不必要的 LLM 调用
+            cutoff = time.time() - self._redis_ttl
+            self._episodes = [
+                episode
+                for episode in self._episodes
+                if episode.timestamp >= cutoff
+            ]
             task_clean = task.strip().lower()
-            for ep in self._episodes:
+            for ep in reversed(self._episodes):
                 if ep.task.strip().lower() == task_clean:
                     return {"output": ep.result, "episode": ep}
-            # 回退到关键词相似匹配（至少 2 个词重叠才命中，避免误匹配）
-            matches = self.search_similar(query=task, top_k=1)
-            if matches:
-                # Verify the match is strong enough
-                query_words = set(task.strip().lower().split())
-                task_words = set(matches[0].task.strip().lower().split())
-                overlap = len(query_words & task_words)
-                if overlap >= 2:
-                    return {"output": matches[0].result, "episode": matches[0]}
             return None
 
     def get_user_profile(self) -> dict[str, float]:
@@ -202,6 +204,12 @@ class EpisodicMemory:
 
         total = sum(counts.values())
         return {t: c / total for t, c in counts.items()}
+
+    def close(self) -> None:
+        """Release the optional Redis connection."""
+        close = getattr(self._redis, "close", None)
+        if callable(close):
+            close()
 
     # ------------------------------------------------------------------
     # Internal helpers

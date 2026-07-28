@@ -81,7 +81,7 @@ class RAGTool(BaseTool):
         self._retriever = get_retriever()
         return self._retriever
 
-    def execute(self, query: str, mode: str = "hybrid", top_k: int = 5, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
+    def execute(self, query: str, mode: str = "hybrid", top_k: int | None = None, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
         """Synchronous wrapper — uses thread pool when event loop is running."""
         import asyncio
         try:
@@ -103,7 +103,7 @@ class RAGTool(BaseTool):
         self,
         query: str,
         mode: str = "hybrid",
-        top_k: int = 5,
+        top_k: int | None = None,
         threshold: float = 0.0,
         **kwargs: Any,
     ) -> ToolResult:
@@ -121,6 +121,8 @@ class RAGTool(BaseTool):
             )
         if mode not in {"semantic", "hybrid", "keyword"}:
             return ToolResult(success=False, error="不支持的检索模式。")
+        if top_k is None:
+            top_k = settings.retrieval.rerank_top_k
         if isinstance(top_k, bool) or not isinstance(top_k, int):
             return ToolResult(success=False, error="top_k 必须是整数。")
         if not 1 <= top_k <= settings.retrieval.max_request_top_k:
@@ -142,7 +144,9 @@ class RAGTool(BaseTool):
                 error="threshold 必须在 0 到 1 之间。",
             )
 
-        retriever = self._get_retriever()
+        import asyncio
+
+        retriever = await asyncio.to_thread(self._get_retriever)
 
         mode_map = {
             "semantic": QueryMode.CONCEPTUAL,

@@ -10,28 +10,50 @@ import os
 import shutil
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Awaitable, Callable, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import os as _os
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from mindforge.api.schemas import (
     DocumentContentResponse, DocumentItem, HealthResponse,
-    HistoryItem, HistorySaveRequest, IndexRequest, IndexResponse,
+    HistoryItem, HistorySaveRequest, IndexJobResponse, IndexRequest,
+    IndexResponse,
     QueryRequest, QueryResponse,
     SettingsResponse, SettingsUpdateRequest,
 )
+from mindforge.agents.base import AgentResult
 from mindforge.agents.orchestrator import Orchestrator
-from mindforge.ingestion.parsers import DocumentParser
-from mindforge.ingestion.chunker import TextSplitter
+from mindforge.ingestion.parsers import DocumentParser, DocumentParserError
+from mindforge.ingestion.chunker import (
+    DocumentChunk,
+    ElementAwareSplitter,
+    SemanticChunker,
+    TextSplitter,
+)
 from mindforge.ingestion.raptor import RAPTORIndexer
 from mindforge.retrieval.vector_store import get_vector_store
 from mindforge.memory.episodic import EpisodicMemory
-from mindforge.memory.working import WorkingMemory
 from mindforge.memory.semantic import SemanticMemory
+from mindforge.models.base import LLMConfigurationError
+from mindforge.services.health import get_health_monitor
+from mindforge.services.indexing import (
+    IndexingCancelledError,
+    index_slot,
+    remove_document_status,
+    set_document_status,
+)
 from mindforge.config import (
     get_project_root,
     get_settings,
@@ -42,7 +64,25 @@ from mindforge import __version__
 logger = logging.getLogger(__name__)
 router = APIRouter()
 _orchestrator: Orchestrator | None = None
+_ORCHESTRATOR_LOCK = threading.Lock()
 _ENV_FILE_LOCK = threading.RLock()
+_SETTINGS_UPDATE_LOCK = threading.RLock()
+IndexProgressCallback = Callable[
+    [str, float, int, dict[str, float]],
+    Awaitable[None],
+]
+
+
+async def _report_index_progress(
+    callback: IndexProgressCallback | None,
+    *,
+    stage: str,
+    progress: float,
+    chunk_count: int,
+    timings: dict[str, float],
+) -> None:
+    if callback is not None:
+        await callback(stage, progress, chunk_count, dict(timings))
 
 
 def _public_service_url(value: str) -> str:
@@ -64,9 +104,69 @@ def _public_service_url(value: str) -> str:
         return ""
 
 
+def _sanitize_upload_filename(filename: str | None) -> str:
+    import re
+
+    safe_name = filename or "uploaded_doc"
+    safe_name = re.sub(r"[\\/]", "_", safe_name)
+    safe_name = re.sub(r"\.\.+", "", safe_name)
+    safe_name = safe_name.strip() or "uploaded_doc"
+    return safe_name[:512]
+
+
+async def _persist_upload(
+    file: UploadFile,
+    *,
+    target_dir: Path,
+    unique_prefix: str,
+) -> Path:
+    """Stream one validated upload to persistent application storage."""
+    safe_name = _sanitize_upload_filename(file.filename)
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in DocumentParser.SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported document format. Supported formats: "
+                + ", ".join(sorted(DocumentParser.SUPPORTED_EXTENSIONS))
+            ),
+        )
+
+    max_upload_bytes = get_settings().api.max_upload_mb * 1024 * 1024
+    await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
+    target = target_dir / f"{unique_prefix}_{safe_name}"
+    try:
+        with target.open("wb") as output:
+            total_bytes = 0
+            while True:
+                block = await file.read(1024 * 1024)
+                if not block:
+                    break
+                total_bytes += len(block)
+                if total_bytes > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            "File exceeds the configured maximum of "
+                            f"{get_settings().api.max_upload_mb}MB."
+                        ),
+                    )
+                await asyncio.to_thread(output.write, block)
+    except Exception:
+        await asyncio.to_thread(target.unlink, missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    return target
+
+
 def get_orchestrator() -> Orchestrator:
     global _orchestrator
-    if _orchestrator is None:
+    if _orchestrator is not None:
+        return _orchestrator
+    with _ORCHESTRATOR_LOCK:
+        if _orchestrator is not None:
+            return _orchestrator
         settings = get_settings()
         redis_client = None
         try:
@@ -99,7 +199,6 @@ def get_orchestrator() -> Orchestrator:
                 logger.exception("Tracer initialization failed.")
 
         _orchestrator = Orchestrator(
-            working_memory=WorkingMemory(),
             episodic_memory=EpisodicMemory(redis_client=redis_client),
             semantic_memory=SemanticMemory(storage_dir=semantic_path),
             tracer=tracer,
@@ -113,13 +212,578 @@ def get_retriever():
     return _get_retriever()
 
 
+async def _parse_document_file(
+    parser: DocumentParser,
+    file_path: str,
+):
+    try:
+        return await asyncio.to_thread(parser.parse, file_path)
+    except DocumentParserError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+
+
+def _split_document(
+    *,
+    doc_id: str,
+    content: str,
+    strategy: str,
+    metadata: dict[str, Any] | None = None,
+    embedder: Any = None,
+    elements: list[Any] | None = None,
+) -> list[DocumentChunk]:
+    """Split one document according to the requested indexing strategy."""
+    if elements:
+        chunks = ElementAwareSplitter(
+            strategy=strategy,
+            embedder=embedder,
+        ).split(
+            doc_id,
+            elements,
+            metadata=metadata or {},
+        )
+    elif strategy == "semantic":
+        splitter = SemanticChunker(embedder=embedder)
+        chunks = splitter.split(doc_id, content, metadata=metadata or {})
+    else:
+        splitter = TextSplitter()
+        chunks = splitter.split(doc_id, content, metadata=metadata or {})
+    if not chunks:
+        raise HTTPException(
+            status_code=422,
+            detail="Document contains no indexable text.",
+        )
+    return chunks
+
+
+def _build_chunk_points(
+    *,
+    chunks: list[DocumentChunk],
+    vectors: list[list[float]],
+    doc_id: str,
+    source: str,
+    expected_dimension: int,
+) -> list[Any]:
+    """Validate embeddings and build complete Qdrant point payloads."""
+    from qdrant_client.models import PointStruct
+    import hashlib as _hashlib
+
+    if len(vectors) != len(chunks):
+        raise ValueError(
+            "Embedding vector count does not match document chunk count."
+        )
+
+    points: list[PointStruct] = []
+    for chunk_index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        if len(vector) != expected_dimension:
+            raise ValueError(
+                f"Embedding vector dimension {len(vector)} does not match "
+                f"configured dimension {expected_dimension}."
+            )
+        chunk.embedding = list(vector)
+        points.append(
+            PointStruct(
+                id=int(
+                    _hashlib.md5(chunk.chunk_id.encode()).hexdigest(),
+                    16,
+                )
+                % (2**63),
+                vector=vector,
+                payload={
+                    "chunk_id": chunk.chunk_id,
+                    "doc_id": doc_id,
+                    "content": chunk.content,
+                    "source": source,
+                    "chunk_index": chunk_index,
+                    "chunk_start": chunk.metadata.get("chunk_start"),
+                    "chunk_end": chunk.metadata.get("chunk_end"),
+                    "metadata": dict(chunk.metadata),
+                    "is_summary": False,
+                },
+            )
+        )
+    return points
+
+
+async def _embed_and_store_chunks(
+    *,
+    chunks: list[DocumentChunk],
+    doc_id: str,
+    source: str,
+    progress_callback: IndexProgressCallback | None = None,
+    timings: dict[str, float] | None = None,
+) -> tuple[Any, Any]:
+    """Embed chunks off the event loop, validate them, and persist them."""
+    from mindforge.ingestion.embedder import get_embedder
+
+    embedder = get_embedder()
+    store = get_vector_store()
+    stage_timings = timings if timings is not None else {}
+    await asyncio.to_thread(store.ensure_collection)
+    texts = [chunk.content for chunk in chunks]
+    logger.info("Embedding %d document chunks.", len(texts))
+    await _report_index_progress(
+        progress_callback,
+        stage="embedding",
+        progress=25.0,
+        chunk_count=len(chunks),
+        timings=stage_timings,
+    )
+    started = time.perf_counter()
+    vectors: list[list[float]] = []
+    batch_size = get_settings().api.index_batch_size
+    for index in range(0, len(texts), batch_size):
+        batch = texts[index:index + batch_size]
+        vectors.extend(await asyncio.to_thread(embedder.embed, batch))
+        completed = min(index + len(batch), len(texts))
+        await _report_index_progress(
+            progress_callback,
+            stage="embedding",
+            progress=25.0 + (50.0 * completed / len(texts)),
+            chunk_count=len(chunks),
+            timings=stage_timings,
+        )
+    stage_timings["embedding"] = time.perf_counter() - started
+    await _report_index_progress(
+        progress_callback,
+        stage="embedding",
+        progress=75.0,
+        chunk_count=len(chunks),
+        timings=stage_timings,
+    )
+    started = time.perf_counter()
+    points = _build_chunk_points(
+        chunks=chunks,
+        vectors=vectors,
+        doc_id=doc_id,
+        source=source,
+        expected_dimension=store.embedding_dim,
+    )
+    await _report_index_progress(
+        progress_callback,
+        stage="vector_store",
+        progress=75.0,
+        chunk_count=len(chunks),
+        timings=stage_timings,
+    )
+    await store.delete(doc_id)
+    for index in range(0, len(points), batch_size):
+        await store.upsert(points[index:index + batch_size])
+        completed = min(index + batch_size, len(points))
+        await _report_index_progress(
+            progress_callback,
+            stage="vector_store",
+            progress=75.0 + (13.0 * completed / len(points)),
+            chunk_count=len(chunks),
+            timings=stage_timings,
+        )
+    stage_timings["vector_store"] = time.perf_counter() - started
+    await _report_index_progress(
+        progress_callback,
+        stage="vector_store",
+        progress=88.0,
+        chunk_count=len(chunks),
+        timings=stage_timings,
+    )
+    return embedder, store
+
+
+async def _index_parsed_document(
+    *,
+    parsed: Any,
+    source: str,
+    strategy: str = "auto",
+    metadata: dict[str, Any] | None = None,
+    use_raptor: bool = False,
+    use_graphrag: bool = False,
+    progress_callback: IndexProgressCallback | None = None,
+    timings: dict[str, float] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[DocumentChunk]:
+    """Run the complete, shared indexing pipeline for one parsed document."""
+    stage_timings = timings if timings is not None else {}
+    splitter_embedder = None
+    if strategy == "semantic":
+        from mindforge.ingestion.embedder import get_embedder
+
+        splitter_embedder = get_embedder()
+    await _report_index_progress(
+        progress_callback,
+        stage="chunking",
+        progress=20.0,
+        chunk_count=0,
+        timings=stage_timings,
+    )
+    chunks: list[DocumentChunk] = []
+    started = time.perf_counter()
+    if parsed.content.strip():
+        chunks = await asyncio.to_thread(
+            _split_document,
+            doc_id=parsed.doc_id,
+            content=parsed.content,
+            strategy=strategy,
+            metadata=metadata,
+            embedder=splitter_embedder,
+            elements=getattr(parsed, "elements", None),
+        )
+    stage_timings["chunking"] = time.perf_counter() - started
+    await _report_index_progress(
+        progress_callback,
+        stage="vision",
+        progress=25.0,
+        chunk_count=len(chunks),
+        timings=stage_timings,
+    )
+    visual_started = time.perf_counter()
+    from mindforge.ingestion.visual import build_visual_chunks
+
+    visual_chunks = await build_visual_chunks(
+        parsed.doc_id,
+        document_metadata=metadata,
+        cancelled=cancelled,
+    )
+    stage_timings["vision"] = time.perf_counter() - visual_started
+    chunks.extend(visual_chunks)
+    if not chunks:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Document contains no indexable text or visual captions. "
+                "Configure visual retrieval for image-only documents."
+            ),
+        )
+    await _report_index_progress(
+        progress_callback,
+        stage="chunking",
+        progress=25.0,
+        chunk_count=len(chunks),
+        timings=stage_timings,
+    )
+    if len(chunks) > get_settings().api.max_chunks_per_document:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Document produced too many chunks; configured maximum is "
+                f"{get_settings().api.max_chunks_per_document}."
+            ),
+        )
+
+    embedder, store = await _embed_and_store_chunks(
+        chunks=chunks,
+        doc_id=parsed.doc_id,
+        source=source,
+        progress_callback=progress_callback,
+        timings=stage_timings,
+    )
+
+    enable_raptor = use_raptor
+    enable_graphrag = use_graphrag
+    if (enable_raptor or enable_graphrag) and len(chunks) <= 5:
+        logger.info(
+            "Skipping RAPTOR/GraphRAG for '%s' (%d chunks): "
+            "document is too short.",
+            source,
+            len(chunks),
+        )
+        enable_raptor = False
+        enable_graphrag = False
+
+    enrichment_llm = None
+    if enable_raptor or enable_graphrag:
+        try:
+            from mindforge.models.base import LLMFactory
+
+            settings = get_settings()
+            enrichment_llm = LLMFactory.create(
+                settings.llm.llm_provider,
+                settings.llm.get_model("researcher"),
+            )
+        except Exception as exc:
+            logger.warning("Enrichment LLM init failed: %s", exc)
+
+    if enable_raptor and enrichment_llm:
+        await _report_index_progress(
+            progress_callback,
+            stage="raptor",
+            progress=88.0,
+            chunk_count=len(chunks),
+            timings=stage_timings,
+        )
+        started = time.perf_counter()
+        try:
+            from qdrant_client.models import PointStruct
+            import hashlib as _hashlib
+
+            raptor = RAPTORIndexer(
+                embedder=embedder,
+                llm=enrichment_llm,
+            )
+            tree_nodes = await raptor.build_tree(chunks)
+            raptor_points: list[PointStruct] = []
+            for node in tree_nodes:
+                if node.level <= 0:
+                    continue
+                if node.embedding is None:
+                    node.embedding = await asyncio.to_thread(
+                        embedder.embed_single,
+                        node.content,
+                    )
+                if len(node.embedding) != store.embedding_dim:
+                    raise ValueError(
+                        "RAPTOR summary embedding dimension does not match "
+                        "the Qdrant collection."
+                    )
+                raptor_points.append(
+                    PointStruct(
+                        id=int(
+                            _hashlib.md5(node.node_id.encode()).hexdigest(),
+                            16,
+                        )
+                        % (2**63),
+                        vector=node.embedding,
+                        payload={
+                            "chunk_id": node.node_id,
+                            "doc_id": parsed.doc_id,
+                            "content": node.content,
+                            "source": source,
+                            "raptor_level": node.level,
+                            "is_summary": True,
+                        },
+                    )
+                )
+            batch_size = get_settings().api.index_batch_size
+            for index in range(0, len(raptor_points), batch_size):
+                await store.upsert(
+                    raptor_points[index:index + batch_size]
+                )
+            logger.info(
+                "RAPTOR: %d summary nodes indexed.",
+                len(raptor_points),
+            )
+        except Exception:
+            logger.exception("RAPTOR indexing skipped.")
+        finally:
+            stage_timings["raptor"] = time.perf_counter() - started
+            await _report_index_progress(
+                progress_callback,
+                stage="raptor",
+                progress=94.0,
+                chunk_count=len(chunks),
+                timings=stage_timings,
+            )
+
+    from mindforge.retrieval.service import index_auxiliary_documents
+
+    auxiliary_docs = [
+        {
+            "id": chunk.chunk_id,
+            "text": chunk.content,
+            "doc_id": parsed.doc_id,
+            "chunk_id": chunk.chunk_id,
+            "source": source,
+            "metadata": dict(chunk.metadata),
+        }
+        for chunk in chunks
+    ]
+    await index_auxiliary_documents(
+        auxiliary_docs,
+        graph_llm=enrichment_llm,
+        use_graphrag=bool(enable_graphrag and enrichment_llm),
+        progress_callback=progress_callback,
+        timings=stage_timings,
+        start_progress=94.0 if enable_raptor and enrichment_llm else 88.0,
+    )
+    return chunks
+
+
+async def _rollback_document_index(doc_id: str) -> None:
+    """Best-effort rollback for a partially indexed document."""
+    try:
+        await get_vector_store().delete(doc_id)
+        from mindforge.retrieval.service import delete_auxiliary_document
+        from mindforge.services.document_assets import remove_document_assets
+
+        await delete_auxiliary_document(doc_id)
+        await asyncio.to_thread(remove_document_assets, doc_id)
+    except Exception:
+        logger.exception(
+            "Failed to roll back partial index for document %s.",
+            doc_id,
+        )
+
+
+async def _index_with_lifecycle(
+    *,
+    parsed: Any,
+    source: str,
+    strategy: str = "auto",
+    metadata: dict[str, Any] | None = None,
+    use_raptor: bool = False,
+    use_graphrag: bool = False,
+    progress_callback: IndexProgressCallback | None = None,
+    timings: dict[str, float] | None = None,
+    source_path: str | Path | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[DocumentChunk]:
+    """Index one document under a bounded slot and persist its state."""
+    from mindforge.services.indexing import build_index_signature
+
+    index_signature = build_index_signature(
+        strategy=strategy,
+        use_raptor=use_raptor,
+        use_graphrag=use_graphrag,
+    )
+    await set_document_status(
+        doc_id=parsed.doc_id,
+        filename=source,
+        status="indexing",
+        parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
+    )
+    try:
+        async with index_slot():
+            if source_path is not None:
+                from mindforge.services.document_assets import (
+                    DocumentAssetCancelledError,
+                    persist_document_assets,
+                )
+
+                await _report_index_progress(
+                    progress_callback,
+                    stage="assets",
+                    progress=20.0,
+                    chunk_count=0,
+                    timings=timings or {},
+                )
+                asset_started = time.perf_counter()
+                try:
+                    await asyncio.to_thread(
+                        persist_document_assets,
+                        source_path=source_path,
+                        parsed=parsed,
+                        cancelled=cancelled,
+                    )
+                except DocumentAssetCancelledError as exc:
+                    raise IndexingCancelledError(str(exc)) from exc
+                if timings is not None:
+                    timings["asset_persistence"] = (
+                        time.perf_counter() - asset_started
+                    )
+                await set_document_status(
+                    doc_id=parsed.doc_id,
+                    filename=source,
+                    status="indexing",
+                    parser_metadata=dict(
+                        getattr(parsed, "metadata", {}) or {}
+                    ),
+                )
+                if cancelled is not None and cancelled():
+                    raise IndexingCancelledError("Indexing was cancelled.")
+            chunks = await _index_parsed_document(
+                parsed=parsed,
+                source=source,
+                strategy=strategy,
+                metadata=metadata,
+                use_raptor=use_raptor,
+                use_graphrag=use_graphrag,
+                progress_callback=progress_callback,
+                timings=timings,
+                cancelled=cancelled,
+            )
+    except (asyncio.CancelledError, IndexingCancelledError):
+        await _rollback_document_index(parsed.doc_id)
+        await set_document_status(
+            doc_id=parsed.doc_id,
+            filename=source,
+            status="cancelled",
+        )
+        raise
+    except Exception as exc:
+        await _rollback_document_index(parsed.doc_id)
+        await set_document_status(
+            doc_id=parsed.doc_id,
+            filename=source,
+            status="failed",
+            error=str(exc)[:2000],
+        )
+        raise
+
+    await set_document_status(
+        doc_id=parsed.doc_id,
+        filename=source,
+        status="indexed",
+        chunk_count=len(chunks),
+        index_signature=index_signature,
+        parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
+    )
+    return chunks
+
+
+def _reconstruct_document_content(
+    chunks: list[dict[str, Any]],
+) -> str:
+    """Rebuild original content without duplicating overlapping regions."""
+    if not chunks:
+        return ""
+    ordered = sorted(
+        chunks,
+        key=lambda chunk: (
+            chunk.get("chunk_start") is None,
+            chunk.get("chunk_start")
+            if chunk.get("chunk_start") is not None
+            else chunk.get("chunk_index") or 0,
+        ),
+    )
+    if any(chunk.get("chunk_start") is None for chunk in ordered):
+        return "\n\n".join(str(chunk.get("content", "")) for chunk in ordered)
+
+    output = ""
+    covered_until = 0
+    for chunk in ordered:
+        content = str(chunk.get("content", ""))
+        start = int(chunk.get("chunk_start") or 0)
+        end = chunk.get("chunk_end")
+        if end is None:
+            end = start + len(content)
+        overlap = max(0, covered_until - start)
+        if overlap < len(content):
+            output += content[overlap:]
+        covered_until = max(covered_until, int(end))
+    return output
+
+
+def _serialize_datetime_utc(value: datetime | None) -> str | None:
+    """Serialize database timestamps with an explicit UTC designator."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query(body: QueryRequest):
     """Submit a research task. Falls back to retrieval-only if LLM is unavailable."""
     start = time.time()
-    orch = get_orchestrator()
 
     if body.stream:
+        try:
+            orch = await asyncio.to_thread(get_orchestrator)
+        except LLMConfigurationError as exc:
+            logger.warning(
+                "Agent initialization unavailable for SSE; "
+                "using retrieval fallback: %s",
+                exc,
+            )
+            orch = None
+        except Exception:
+            logger.exception(
+                "Agent initialization failed for SSE; using retrieval fallback."
+            )
+            orch = None
         return StreamingResponse(
             _stream_response(orch, body.task),
             media_type="text/event-stream",
@@ -128,7 +792,12 @@ async def query(body: QueryRequest):
 
     # Try full Agent pipeline first, fall back to retrieval-only on failure
     try:
+        orch = await asyncio.to_thread(get_orchestrator)
         result = await orch.run(body.task)
+        if not result.success:
+            raise RuntimeError(
+                result.output or "Agent pipeline returned an unsuccessful result."
+            )
         latency = (time.time() - start) * 1000
         return QueryResponse(
             task_id=uuid.uuid4().hex[:12],
@@ -139,32 +808,47 @@ async def query(body: QueryRequest):
             cost_usd=round(float(result.metadata.get("cost", 0)), 6),
             iterations=int(result.metadata.get("subtask_count", 0)),
         )
+    except LLMConfigurationError as exc:
+        logger.warning(
+            "Agent pipeline unavailable; using retrieval fallback: %s",
+            exc,
+        )
     except Exception:
         logger.exception("Agent pipeline failed, falling back to retrieval-only.")
-        # Fallback: search knowledge base directly (no LLM needed)
-        try:
-            from mindforge.tools.rag_tool import RAGTool
-            rag = RAGTool()
-            result = rag.safe_execute(query=body.task, mode="hybrid", top_k=5)
-            latency = (time.time() - start) * 1000
-            fallback_quality = float(result.data.get("quality", 0.0)) if result.data else 0.0
-            return QueryResponse(
-                task_id=uuid.uuid4().hex[:12],
-                report=result.output if result.success else f"检索失败: {result.error}",
-                sources=list(
-                    result.data.get("sources", [])
-                    if result.data
-                    else []
-                ),
-                quality_score=fallback_quality,
-                latency_ms=round(latency, 2),
-                cost_usd=0.0,
-                iterations=0,
+
+    # Fallback: search knowledge base directly (no LLM needed)
+    try:
+        from mindforge.tools.rag_tool import RAGTool
+        rag = RAGTool()
+        result = await rag.execute_async(
+            query=body.task,
+            mode="hybrid",
+        )
+        if not result.success:
+            raise RuntimeError(
+                result.error or "Retrieval fallback failed."
             )
-        except Exception:
-            logger.exception("Fallback retrieval also failed.")
-            logger.exception("All research paths failed")
-            raise HTTPException(status_code=500, detail="Research service temporarily unavailable")
+        latency = (time.time() - start) * 1000
+        fallback_quality = float(result.data.get("quality", 0.0)) if result.data else 0.0
+        return QueryResponse(
+            task_id=uuid.uuid4().hex[:12],
+            report=result.output,
+            sources=list(
+                result.data.get("sources", [])
+                if result.data
+                else []
+            ),
+            quality_score=fallback_quality,
+            latency_ms=round(latency, 2),
+            cost_usd=0.0,
+            iterations=0,
+        )
+    except Exception:
+        logger.exception("Fallback retrieval also failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Research service temporarily unavailable",
+        )
 
 
 @router.post("/index", response_model=IndexResponse)
@@ -201,120 +885,15 @@ async def index_document(body: IndexRequest):
         ) from exc
     file_path = str(resolved_file)
     parser = DocumentParser()
-    doc = parser.parse(file_path)
-
-    splitter = TextSplitter()
-    chunks = splitter.split(doc.doc_id, doc.content)
-    if len(chunks) > get_settings().api.max_chunks_per_document:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                "Document produced too many chunks; configured maximum is "
-                f"{get_settings().api.max_chunks_per_document}."
-            ),
-        )
-
-    # Embed and store in Qdrant
-    from mindforge.ingestion.embedder import get_embedder
-    from qdrant_client.models import PointStruct
-    import hashlib as _hashlib
-
-    embedder = get_embedder()
-    store = get_vector_store()
-    store.ensure_collection()
-
-    # Batch embed all chunks at once (GPU-friendly)
-    texts = [ch.content for ch in chunks]
-    logger.info("嵌入 %d 个文本块...", len(texts))
-    vectors = embedder.embed(texts)
-    logger.info("嵌入完成，写入 Qdrant...")
-
-    points = []
-    for chunk_index, (ch, vec) in enumerate(zip(chunks, vectors)):
-        points.append(PointStruct(
-            id=int(_hashlib.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63),
-            vector=vec,
-            payload={
-                "chunk_id": ch.chunk_id,
-                "doc_id": doc.doc_id,
-                "content": ch.content[:2000],
-                "source": doc.filename,
-                "chunk_index": chunk_index,
-                "chunk_start": ch.metadata.get("chunk_start"),
-                "chunk_end": ch.metadata.get("chunk_end"),
-                "is_summary": False,
-            },
-        ))
-
-    index_batch_size = get_settings().api.index_batch_size
-    for i in range(0, len(points), index_batch_size):
-        batch = points[i:i + index_batch_size]
-        await store.upsert(batch)
-
-    # LLM for enrichment — skip for tiny docs
-    if (body.use_raptor or body.use_graphrag) and len(chunks) <= 5:
-        logger.info("Skipping RAPTOR/GraphRAG — only %d chunks.", len(chunks))
-        body.use_raptor = False
-        body.use_graphrag = False
-
-    enrichment_llm = None
-    if body.use_raptor or body.use_graphrag:
-        try:
-            from mindforge.models.base import LLMFactory
-
-            settings = get_settings()
-            enrichment_llm = LLMFactory.create(
-                settings.llm.llm_provider,
-                settings.llm.get_model("researcher"),
-            )
-        except Exception as e:
-            logger.warning(f"Enrichment LLM init failed: {e}")
-
-    # RAPTOR indexing (if requested)
-    if body.use_raptor and enrichment_llm:
-        try:
-            raptor = RAPTORIndexer(embedder=embedder, llm=enrichment_llm)
-            tree_nodes = await raptor.build_tree(chunks)
-            raptor_points = []
-            for node in tree_nodes:
-                if node.level > 0:
-                    # embedding 已在 build_tree 内生成，避免重复计算
-                    vec = node.embedding or embedder.embed_single(node.content)
-                    raptor_points.append(PointStruct(
-                        id=int(_hashlib.md5(node.node_id.encode()).hexdigest(), 16) % (2**63),
-                        vector=vec,
-                        payload={
-                            "chunk_id": node.node_id,
-                            "doc_id": doc.doc_id,
-                            "content": node.content[:2000],
-                            "source": doc.filename,
-                            "raptor_level": node.level,
-                            "is_summary": True,
-                        },
-                    ))
-            for i in range(0, len(raptor_points), 100):
-                batch = raptor_points[i:i+100]
-                await store.upsert(batch)
-            logger.info(f"RAPTOR: {len(raptor_points)} summary nodes indexed")
-        except Exception as e:
-            logger.warning(f"RAPTOR indexing skipped: {e}")
-
-    from mindforge.retrieval.service import index_auxiliary_documents
-
-    auxiliary_docs = [
-        {
-            "id": ch.chunk_id,
-            "text": ch.content,
-            "doc_id": doc.doc_id,
-            "chunk_id": ch.chunk_id,
-            "source": doc.filename,
-        }
-        for ch in chunks
-    ]
-    await index_auxiliary_documents(
-        auxiliary_docs,
-        graph_llm=enrichment_llm,
-        use_graphrag=bool(body.use_graphrag and enrichment_llm),
+    doc = await _parse_document_file(parser, file_path)
+    chunks = await _index_with_lifecycle(
+        parsed=doc,
+        source=doc.filename,
+        strategy=body.strategy,
+        metadata=body.metadata,
+        use_raptor=body.use_raptor,
+        use_graphrag=body.use_graphrag,
+        source_path=file_path,
     )
 
     logger.info(f"Indexed {doc.filename}: {len(chunks)} chunks")
@@ -326,76 +905,111 @@ async def index_document(body: IndexRequest):
     )
 
 
+@router.post(
+    "/index-jobs",
+    response_model=IndexJobResponse,
+    status_code=202,
+)
+async def create_index_job(
+    file: UploadFile = File(...),
+    strategy: Literal["auto", "fixed", "semantic"] = Form("auto"),
+    use_raptor: bool = Form(False),
+    use_graphrag: bool = Form(False),
+):
+    """Persist an upload and return before heavyweight indexing starts."""
+    from mindforge.services.index_jobs import get_index_job_service
+
+    job_id = uuid.uuid4().hex
+    filename = _sanitize_upload_filename(file.filename)
+    job_dir = (
+        resolve_project_path(get_settings().app.data_dir)
+        / "index-jobs"
+    )
+    file_path = await _persist_upload(
+        file,
+        target_dir=job_dir,
+        unique_prefix=job_id,
+    )
+    try:
+        return await get_index_job_service().create(
+            job_id=job_id,
+            filename=filename,
+            file_path=str(file_path),
+            strategy=strategy,
+            use_raptor=use_raptor,
+            use_graphrag=use_graphrag,
+        )
+    except Exception:
+        await asyncio.to_thread(file_path.unlink, missing_ok=True)
+        raise
+
+
+@router.get("/index-jobs", response_model=list[IndexJobResponse])
+async def list_index_job_records(
+    active: bool = Query(False),
+    limit: int = Query(20, ge=1, le=100),
+):
+    from mindforge.services.index_jobs import get_index_job_service
+
+    return await get_index_job_service().list(
+        active_only=active,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/index-jobs/{job_id}",
+    response_model=IndexJobResponse,
+)
+async def get_index_job_record(job_id: str):
+    from mindforge.services.index_jobs import get_index_job_service
+
+    job = await get_index_job_service().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Index job not found.")
+    return job
+
+
+@router.delete(
+    "/index-jobs/{job_id}",
+    response_model=IndexJobResponse,
+    status_code=202,
+)
+async def cancel_index_job(job_id: str):
+    from mindforge.services.index_jobs import get_index_job_service
+
+    job = await get_index_job_service().cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Index job not found.")
+    return job
+
+
 async def _probe_qdrant_connection() -> bool:
     try:
-        store = get_vector_store()
-        await store.ping()
+        await get_vector_store().ping()
         return True
     except Exception:
         return False
 
 
 async def _probe_redis_connection() -> bool:
-    try:
-        import redis.asyncio as aioredis
-
-        redis_url = get_settings().cache.redis_url
-        rc = aioredis.from_url(redis_url)
-        try:
-            await rc.ping()
-            return True
-        finally:
-            await rc.aclose()
-    except Exception:
-        return False
+    return await get_health_monitor()._probe_redis()
 
 
 async def _probe_postgres_connection() -> bool:
-    def _probe() -> bool:
-        from sqlalchemy import text
-        from mindforge.db import SessionLocal
-
-        with SessionLocal() as db:
-            db.execute(text("SELECT 1"))
-        return True
-
-    try:
-        return await asyncio.to_thread(_probe)
-    except Exception:
-        return False
+    return await get_health_monitor()._probe_postgres()
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check with real core-service connectivity."""
-    qdrant_ok, redis_ok, postgres_ok = await asyncio.gather(
-        _probe_qdrant_connection(),
-        _probe_redis_connection(),
-        _probe_postgres_connection(),
-    )
-
-    # Check MCP registry
-    mcp_ok = False
-    mcp_configured = False
-    try:
-        _reg = get_mcp_registry()
-        mcp_configured = bool(_reg and _reg.servers)
-        mcp_ok = _reg is not None and _reg.is_any_running
-    except Exception:
-        pass
-
+    """Return the latest background dependency-health snapshot."""
+    snapshot = await get_health_monitor().get_snapshot()
     return HealthResponse(
-        status=(
-            "ok"
-            if qdrant_ok and redis_ok and postgres_ok
-            else "degraded"
-        ),
+        status=snapshot.status,
         version=__version__,
-        qdrant_connected=qdrant_ok,
-        redis_connected=redis_ok,
-        postgres_connected=postgres_ok,
-        mcp_configured=mcp_configured,
-        mcp_tools_available=mcp_ok,
+        qdrant_connected=snapshot.qdrant_connected,
+        redis_connected=snapshot.redis_connected,
+        postgres_connected=snapshot.postgres_connected,
     )
 
 
@@ -406,7 +1020,14 @@ async def health():
 )
 async def readiness():
     """Strict readiness probe for deployment orchestration."""
-    result = await health()
+    snapshot = await get_health_monitor().refresh()
+    result = HealthResponse(
+        status=snapshot.status,
+        version=__version__,
+        qdrant_connected=snapshot.qdrant_connected,
+        redis_connected=snapshot.redis_connected,
+        postgres_connected=snapshot.postgres_connected,
+    )
     if result.status != "ok":
         return JSONResponse(
             status_code=503,
@@ -418,29 +1039,23 @@ async def readiness():
 @router.get("/stats")
 async def stats():
     """System statistics from Qdrant — counts unique documents, not chunks."""
-    store = get_vector_store()
-    document_count = 0
-    chunk_count = 0
-    qdrant_connected = False
+    from mindforge.repositories.documents import get_document_stats
+
     try:
-        points = await store.scroll_all()
-        qdrant_connected = True
-        payloads = [point.payload or {} for point in points]
-        doc_ids = {
-            payload.get("doc_id")
-            for payload in payloads
-            if payload.get("doc_id")
-        }
-        document_count = len(doc_ids)
-        chunk_count = sum(
-            1 for payload in payloads if not payload.get("is_summary", False)
+        document_count, chunk_count = await asyncio.to_thread(
+            get_document_stats
         )
     except Exception:
-        logger.exception("Failed to load Qdrant statistics.")
+        logger.exception("Failed to load document statistics.")
+        document_count, chunk_count = 0, 0
+    snapshot = await get_health_monitor().get_snapshot()
+    from mindforge.ingestion.embedder import get_embedder_status
+
+    embedding = get_embedder_status()
     return {
         "documents_indexed": document_count,
         "chunks_indexed": chunk_count,
-        "qdrant_connected": qdrant_connected,
+        "qdrant_connected": snapshot.qdrant_connected,
         "qdrant_url": _public_service_url(
             get_settings().vector_store.qdrant_url
         ),
@@ -448,28 +1063,21 @@ async def stats():
             get_settings().cache.redis_url
         ),
         "max_upload_mb": get_settings().api.max_upload_mb,
+        "max_pdf_pages": get_settings().api.max_pdf_pages,
+        "embedding_provider": embedding["provider"],
+        "embedding_device": embedding["device"],
     }
 
 
 @router.get("/documents", response_model=list[DocumentItem])
 async def list_documents():
     """List all indexed documents with metadata."""
-    from collections import defaultdict
-    store = get_vector_store()
+    from mindforge.repositories.documents import (
+        list_documents as list_document_records,
+    )
+
     try:
-        points = await store.scroll_all()
-        docs: dict[str, dict] = defaultdict(
-            lambda: {"doc_id": "", "filename": "", "chunk_count": 0, "status": "indexed"}
-        )
-        for p in points:
-            pl = p.payload or {}
-            if pl.get("is_summary", False):
-                continue
-            did = pl.get("doc_id", "unknown")
-            docs[did]["doc_id"] = did
-            docs[did]["filename"] = pl.get("source", docs[did]["filename"] or "")
-            docs[did]["chunk_count"] += 1
-        return list(docs.values())
+        return await asyncio.to_thread(list_document_records)
     except Exception:
         logger.exception("Failed to list documents.")
         raise HTTPException(
@@ -485,8 +1093,11 @@ async def delete_document(doc_id: str):
     try:
         await store.delete(doc_id)
         from mindforge.retrieval.service import delete_auxiliary_document
+        from mindforge.services.document_assets import remove_document_assets
 
         await delete_auxiliary_document(doc_id)
+        await asyncio.to_thread(remove_document_assets, doc_id)
+        await remove_document_status(doc_id)
     except Exception:
         logger.exception("Delete failed for document %s.", doc_id)
         raise HTTPException(
@@ -496,12 +1107,62 @@ async def delete_document(doc_id: str):
     return None
 
 
+@router.get("/documents/{doc_id}/assets")
+async def list_document_asset_records(doc_id: str):
+    """List persisted visual and structural assets without exposing source files."""
+    from mindforge.repositories.document_assets import list_document_assets
+
+    assets = await asyncio.to_thread(list_document_assets, doc_id)
+    return [
+        {
+            **asset,
+            "url": (
+                f"/api/v1/documents/{doc_id}/assets/{asset['asset_id']}"
+                if asset.get("relative_path")
+                and asset.get("kind") in {"image", "page_preview"}
+                else None
+            ),
+        }
+        for asset in assets
+    ]
+
+
+@router.get("/documents/{doc_id}/assets/{asset_id}")
+async def get_document_asset_file(doc_id: str, asset_id: str):
+    """Serve only rendered visual assets registered for the requested document."""
+    from mindforge.repositories.document_assets import get_document_asset
+    from mindforge.services.document_assets import (
+        DocumentAssetError,
+        resolve_asset_path,
+    )
+
+    asset = await asyncio.to_thread(get_document_asset, asset_id)
+    if asset is None or asset["doc_id"] != doc_id:
+        raise HTTPException(status_code=404, detail="Document asset not found.")
+    if asset.get("kind") not in {"image", "page_preview"}:
+        raise HTTPException(status_code=404, detail="Document asset is not visual.")
+    try:
+        path = resolve_asset_path(str(asset.get("relative_path") or ""))
+    except DocumentAssetError as exc:
+        raise HTTPException(status_code=404, detail="Document asset is unavailable.") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Document asset is unavailable.")
+    return FileResponse(
+        path,
+        media_type=str(asset.get("content_type") or "image/png"),
+        filename=path.name,
+    )
+
+
 # ------------------------------------------------------------------
 # Document content
 # ------------------------------------------------------------------
 
 @router.get("/documents/{doc_id}/content", response_model=DocumentContentResponse)
-async def get_document_content(doc_id: str):
+async def get_document_content(
+    doc_id: str,
+    include_chunks: bool = Query(True),
+):
     """Return full content of an indexed document (all chunks)."""
     store = get_vector_store()
     points = await store.scroll_all(filters={"doc_id": doc_id})
@@ -518,6 +1179,7 @@ async def get_document_content(doc_id: str):
                 "content": pl.get("content", ""),
                 "chunk_index": pl.get("chunk_index"),
                 "chunk_start": pl.get("chunk_start"),
+                "chunk_end": pl.get("chunk_end"),
             })
             if not filename:
                 filename = pl.get("source", "")
@@ -531,13 +1193,13 @@ async def get_document_content(doc_id: str):
             else chunk.get("chunk_start") or 0,
         )
     )
-    full_content = "\n\n".join(c["content"] for c in chunks)
+    full_content = _reconstruct_document_content(chunks)
     return DocumentContentResponse(
         doc_id=doc_id,
         filename=filename,
         content=full_content,
         chunk_count=len(chunks),
-        chunks=chunks,
+        chunks=chunks if include_chunks else [],
     )
 
 
@@ -571,7 +1233,11 @@ async def upload_document(
     # Size limit: stream to disk so large uploads do not occupy equal RAM.
     MAX_UPLOAD_BYTES = get_settings().api.max_upload_mb * 1024 * 1024
     upload_dir = resolve_project_path(get_settings().app.data_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(
+        upload_dir.mkdir,
+        parents=True,
+        exist_ok=True,
+    )
     unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
     file_path = str(upload_dir / unique_name)
     parsed = None
@@ -591,149 +1257,25 @@ async def upload_document(
                             f"{get_settings().api.max_upload_mb}MB）"
                         ),
                     )
-                f.write(block)
+                await asyncio.to_thread(f.write, block)
 
         parser = DocumentParser()
-        parsed = parser.parse(file_path)
-        splitter = TextSplitter()
-        chunks = splitter.split(doc_id=parsed.doc_id, content=parsed.content)
-        if len(chunks) > get_settings().api.max_chunks_per_document:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    "文档分块数量过多（最大 "
-                    f"{get_settings().api.max_chunks_per_document}）"
-                ),
-            )
-
-        # RAPTOR / GraphRAG enrichment — skip for tiny docs (≤5 chunks, no value)
-        if (use_raptor or use_graphrag) and len(chunks) <= 5:
-            logger.info(
-                "Skipping RAPTOR/GraphRAG for '%s' (%d chunks) — document too short.",
-                file.filename, len(chunks),
-            )
-            use_raptor = False
-            use_graphrag = False
-
-        enrichment_llm = None
-        if use_raptor or use_graphrag:
-            try:
-                from mindforge.models.base import LLMFactory
-
-                settings = get_settings()
-                enrichment_llm = LLMFactory.create(
-                    settings.llm.llm_provider,
-                    settings.llm.get_model("researcher"),
-                )
-            except Exception as e:
-                logger.warning("Enrichment LLM init failed: %s", e)
-
-        if use_raptor and enrichment_llm:
-            try:
-                from mindforge.ingestion.raptor import RAPTORIndexer
-                from mindforge.ingestion.embedder import get_embedder
-                from qdrant_client.models import PointStruct
-                import hashlib as _raptor_hashlib
-                _raptor_embedder = get_embedder()
-                _raptor_store = get_vector_store()
-                raptor = RAPTORIndexer(embedder=_raptor_embedder, llm=enrichment_llm)
-                tree_nodes = await raptor.build_tree(chunks)
-                raptor_points = []
-                for node in tree_nodes:
-                    if node.level > 0:
-                        vec = node.embedding or _raptor_embedder.embed_single(node.content)
-                        raptor_points.append(PointStruct(
-                            id=int(_raptor_hashlib.md5(node.node_id.encode()).hexdigest(), 16) % (2**63),
-                            vector=vec,
-                            payload={
-                                "chunk_id": node.node_id,
-                                "doc_id": parsed.doc_id,
-                                "content": node.content[:2000],
-                                "source": file.filename or parsed.filename,
-                                "raptor_level": node.level,
-                                "is_summary": True,
-                            },
-                        ))
-                for i in range(0, len(raptor_points), 100):
-                    await _raptor_store.upsert(raptor_points[i:i+100])
-                logger.info("RAPTOR: %d summary nodes indexed", len(raptor_points))
-            except Exception as e:
-                logger.warning("RAPTOR indexing skipped: %s", e)
-
-        from mindforge.ingestion.embedder import get_embedder
-        embedder = get_embedder()
-        store = get_vector_store()
-        store.ensure_collection()
-
-        from qdrant_client.models import PointStruct
-        import hashlib as _hl
-
-        # Batch embed all chunks at once (GPU-friendly)
-        texts = [ch.content for ch in chunks]
-        logger.info("嵌入 %d 个文本块...", len(texts))
-        vectors = embedder.embed(texts)
-        logger.info("嵌入完成，写入 Qdrant...")
-
-        points = []
-        for chunk_index, (ch, vec) in enumerate(zip(chunks, vectors)):
-            stable_id = int(_hl.md5(ch.chunk_id.encode()).hexdigest(), 16) % (2**63)
-            points.append(PointStruct(
-                id=stable_id,
-                vector=vec,
-                payload={
-                    "chunk_id": ch.chunk_id,
-                    "doc_id": parsed.doc_id,
-                    "content": ch.content[:2000],
-                    "source": file.filename or parsed.filename,
-                    "chunk_index": chunk_index,
-                    "chunk_start": ch.metadata.get("chunk_start"),
-                    "chunk_end": ch.metadata.get("chunk_end"),
-                    "is_summary": False,
-                },
-            ))
-        index_batch_size = get_settings().api.index_batch_size
-        for i in range(0, len(points), index_batch_size):
-            await store.upsert(points[i:i + index_batch_size])
-
-        from mindforge.retrieval.service import index_auxiliary_documents
-
-        auxiliary_docs = [
-            {
-                "id": ch.chunk_id,
-                "text": ch.content,
-                "doc_id": parsed.doc_id,
-                "chunk_id": ch.chunk_id,
-                "source": file.filename or parsed.filename,
-            }
-            for ch in chunks
-        ]
-        await index_auxiliary_documents(
-            auxiliary_docs,
-            graph_llm=enrichment_llm,
-            use_graphrag=bool(use_graphrag and enrichment_llm),
+        parsed = await _parse_document_file(parser, file_path)
+        source = file.filename or parsed.filename
+        chunks = await _index_with_lifecycle(
+            parsed=parsed,
+            source=source,
+            use_raptor=use_raptor,
+            use_graphrag=use_graphrag,
+            source_path=file_path,
         )
 
         return IndexResponse(
             doc_id=parsed.doc_id,
-            filename=file.filename or parsed.filename,
+            filename=source,
             chunk_count=len(chunks),
             status="indexed",
         )
-    except Exception:
-        if parsed is not None:
-            try:
-                await get_vector_store().delete(parsed.doc_id)
-                from mindforge.retrieval.service import (
-                    delete_auxiliary_document,
-                )
-
-                await delete_auxiliary_document(parsed.doc_id)
-            except Exception:
-                logger.exception(
-                    "Failed to roll back partial index for document %s.",
-                    parsed.doc_id,
-                )
-        raise
     finally:
         # Always attempt cleanup of the uploaded temp file after indexing
         try:
@@ -862,13 +1404,45 @@ def _restore_env_file(
 
 @router.put("/settings")
 def update_settings_api(body: SettingsUpdateRequest):
+    with _SETTINGS_UPDATE_LOCK:
+        return _update_settings_locked(body)
+
+
+def _update_settings_locked(body: SettingsUpdateRequest):
     """Save user settings (API keys encrypted in DB, synced to .env)."""
+    current_settings = get_settings()
+    if (
+        body.embedding_provider is not None
+        and body.embedding_provider
+        != current_settings.llm.embedding_provider
+    ):
+        try:
+            point_count = get_vector_store().get_point_count()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Embedding provider cannot be changed while the "
+                    "knowledge-base state is unavailable."
+                ),
+            ) from exc
+        if point_count > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Embedding provider cannot be changed while indexed "
+                    "documents exist. Delete and reindex the knowledge base "
+                    "with the new provider."
+                ),
+            )
+
     from mindforge.db import (
         ApiKey,
         SessionLocal,
         encrypt_api_key,
         get_default_user_id,
     )
+
     db = SessionLocal()
     try:
         db.query(ApiKey).first()  # ensure table exists for single-user mode
@@ -990,15 +1564,34 @@ def update_settings_api(body: SettingsUpdateRequest):
 def reset_runtime_components() -> None:
     """Recreate configuration-bound singletons after settings updates."""
     global _orchestrator
+    previous_orchestrator = _orchestrator
     _orchestrator = None
+    if previous_orchestrator is not None:
+        try:
+            previous_orchestrator.close()
+        except Exception:
+            logger.exception(
+                "Failed to close the previous orchestrator during reset."
+            )
 
     from mindforge.ingestion.embedder import reset_embedder
     from mindforge.retrieval.service import reset_retrieval_service
     from mindforge.retrieval.vector_store import reset_vector_store
+    from mindforge.services.indexing import reset_indexing_service
 
-    reset_embedder()
-    reset_vector_store()
-    reset_retrieval_service()
+    for component_name, reset in (
+        ("embedder", reset_embedder),
+        ("vector store", reset_vector_store),
+        ("retrieval service", reset_retrieval_service),
+        ("indexing service", reset_indexing_service),
+    ):
+        try:
+            reset()
+        except Exception:
+            logger.exception(
+                "Failed to reset the %s after settings update.",
+                component_name,
+            )
 
 
 # ------------------------------------------------------------------
@@ -1039,7 +1632,7 @@ def list_history(
                     report=e.report[:500] if e.report else None,
                     quality_score=e.quality_score,
                     model_used=e.model_used,
-                    created_at=e.created_at.isoformat() if e.created_at else None,
+                    created_at=_serialize_datetime_utc(e.created_at),
                 ).model_dump()
                 for e in entries
             ],
@@ -1081,11 +1674,7 @@ def get_history_entry(history_id: int):
             report=entry.report,
             quality_score=entry.quality_score,
             model_used=entry.model_used,
-            created_at=(
-                entry.created_at.isoformat()
-                if entry.created_at
-                else None
-            ),
+            created_at=_serialize_datetime_utc(entry.created_at),
         )
     finally:
         db.close()
@@ -1189,60 +1778,6 @@ def clear_history():
         db.close()
 
 
-@router.post("/mcp")
-async def mcp_endpoint(request: dict):
-    """MCP JSON-RPC endpoint — exposes MindForce tools via MCP over HTTP.
-
-    Accepts standard MCP JSON-RPC messages (initialize, tools/list, tools/call)
-    and delegates to MindForgeMCPServer. Enables external MCP clients to
-    call Agent capabilities over HTTP.
-    """
-    try:
-        from mindforge.mcp.server import MindForgeMCPServer
-        mcp_server = MindForgeMCPServer()
-        result = await mcp_server.handle_request(request)
-        return result
-    except Exception:
-        logger.exception("MCP endpoint error")
-        raise HTTPException(status_code=500, detail="MCP service error")
-
-
-@router.get("/mcp")
-async def mcp_info():
-    """Return MCP endpoint metadata."""
-    return {
-        "protocol": "Model Context Protocol",
-        "version": "2025-03-26",
-        "endpoint": "/api/v1/mcp",
-        "transport": "HTTP POST (JSON-RPC)",
-        "tools": [
-            {"name": "search_knowledge_base", "description": "Search the knowledge base"},
-            {"name": "run_research_task", "description": "Run a multi-step research task"},
-            {"name": "verify_citation", "description": "Verify citation markers"},
-            {"name": "system_status", "description": "Get MindForge system status"},
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Module-level MCP registry for preloading (set by server startup)
-# ---------------------------------------------------------------------------
-
-_mcp_registry: Any = None
-
-
-def get_mcp_registry() -> Any:
-    """Get the preloaded MCP registry singleton."""
-    global _mcp_registry
-    return _mcp_registry
-
-
-def set_mcp_registry(registry: Any) -> None:
-    """Set the preloaded MCP registry (called at startup)."""
-    global _mcp_registry
-    _mcp_registry = registry
-
-
 def _serialize_event(event: dict) -> dict:
     """Convert dataclass values in an event dict to plain dicts for JSON serialization."""
     import dataclasses as _dc
@@ -1258,10 +1793,36 @@ def _serialize_event(event: dict) -> dict:
     return serialized
 
 
-async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[bytes, None]:
+async def _stream_response(
+    orch: Orchestrator | None,
+    task: str,
+) -> AsyncGenerator[bytes, None]:
     """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
     try:
+        if orch is None:
+            raise RuntimeError("Agent pipeline is unavailable.")
         async for event in orch.stream_run(task):
+            if event.get("type") == "done":
+                result = event.get("result")
+                success = (
+                    result.success
+                    if isinstance(result, AgentResult)
+                    else (
+                        result.get("success")
+                        if isinstance(result, dict)
+                        else None
+                    )
+                )
+                if success is False:
+                    output = (
+                        result.output
+                        if isinstance(result, AgentResult)
+                        else str(result.get("output", ""))
+                    )
+                    raise RuntimeError(
+                        output
+                        or "Agent pipeline returned an unsuccessful result."
+                    )
             try:
                 payload = json.dumps(_serialize_event(event), ensure_ascii=False)
             except TypeError:
@@ -1272,30 +1833,56 @@ async def _stream_response(orch: Orchestrator, task: str) -> AsyncGenerator[byte
         from mindforge.tools.rag_tool import RAGTool
         try:
             rag = RAGTool()
-            result = rag.safe_execute(query=task, mode="hybrid", top_k=5)
-            fallback = {
-                "type": "done",
-                "result": {
-                    "agent_name": "orchestrator",
-                    "success": True,
-                    "output": result.output if result.success else f"检索失败: {result.error}",
-                    "data": {
-                        "plan": None,
-                        "subtask_outputs": [],
-                        "critic_score": None,
-                        "refine_rounds": 0,
-                        "fallback": True,
+            result = await rag.execute_async(
+                query=task,
+                mode="hybrid",
+                top_k=5,
+            )
+            if result.success:
+                fallback = {
+                    "type": "done",
+                    "result": {
+                        "agent_name": "orchestrator",
+                        "success": True,
+                        "output": result.output,
+                        "data": {
+                            "plan": None,
+                            "subtask_outputs": [],
+                            "critic_score": None,
+                            "refine_rounds": 0,
+                            "fallback": True,
+                        },
+                        "metadata": {
+                            "quality": (
+                                float(result.data.get("quality", 0.0))
+                                if result.data
+                                else 0.0
+                            ),
+                            "cost": 0.0,
+                            "subtask_count": 0,
+                            "refine_rounds": 0,
+                            "model": "fallback-retrieval",
+                        },
                     },
-                    "metadata": {
-                        "quality": float(result.data.get("quality", 0.0)) if result.data else 0.0,
-                        "cost": 0.0,
-                        "subtask_count": 0,
-                        "refine_rounds": 0,
-                        "model": "fallback-retrieval",
-                    },
-                },
-            }
-            yield f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n".encode("utf-8")
+                }
+            else:
+                fallback = {
+                    "type": "error",
+                    "content": (
+                        "研究失败，知识库检索回退也未成功："
+                        f"{result.error or '未知错误'}"
+                    ),
+                }
+            yield (
+                f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
+            ).encode("utf-8")
         except Exception:
-            yield f"data: {json.dumps({'type': 'error', 'content': f'研究失败: {exc}'}, ensure_ascii=False)}\n\n".encode("utf-8")
+            logger.exception("Retrieval fallback failed during SSE streaming.")
+            fallback = {
+                "type": "error",
+                "content": "研究服务暂时不可用，请稍后重试。",
+            }
+            yield (
+                f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
+            ).encode("utf-8")
     yield b"data: [DONE]\n\n"

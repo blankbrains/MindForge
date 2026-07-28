@@ -157,17 +157,30 @@ class SynthesizerAgent(BaseAgent):
 
             temp = temperature if temperature is not None else 0.4
             result = await self._chat(messages, temperature=temp, _llm_override=_llm_override)
+            output = result.content or ""
+            success = bool(output.strip())
+            if not success:
+                output = ""
 
             return AgentResult(
                 agent_name=self.name,
-                success=True,
-                output=result.content or "",
+                success=success,
+                output=output,
                 data={
                     "subtask_count": len(subtask_results),
                     "source_count": len(all_sources) if all_sources else 0,
+                    "failure_reason": (
+                        None if success else "empty_llm_response"
+                    ),
                 },
                 token_usage=result.usage or {},
-                metadata={"model": self._model_name},
+                metadata={
+                    "model": getattr(
+                        _llm_override,
+                        "_model",
+                        self._model_name,
+                    )
+                },
             )
         except Exception:
             raise
@@ -237,6 +250,11 @@ class SynthesizerAgent(BaseAgent):
         ]
         temp = temperature if temperature is not None else 0.4
 
-        async for event in _llm_override.chat(messages, temperature=temp, stream=True):
+        stream = await _llm_override.chat(
+            messages,
+            temperature=temp,
+            stream=True,
+        )
+        async for event in stream:
             if event.type == "chunk" and event.content:
                 yield event.content

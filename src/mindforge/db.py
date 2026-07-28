@@ -28,8 +28,18 @@ except Exception:
     pass
 
 from sqlalchemy import (
-    String, Text, Float, DateTime, ForeignKey, UniqueConstraint,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
     create_engine,
+    inspect,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken
@@ -191,6 +201,14 @@ class ApiKey(Base):
 
 class ResearchHistory(Base):
     __tablename__ = "research_history"
+    __table_args__ = (
+        Index(
+            "ix_research_history_user_created_id",
+            "user_id",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
@@ -204,13 +222,200 @@ class ResearchHistory(Base):
     )
 
 
+class DocumentCatalog(Base):
+    """Persistent document metadata independent of Qdrant chunk payloads."""
+
+    __tablename__ = "document_catalog"
+
+    doc_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="indexing",
+        index=True,
+    )
+    index_signature: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    parser_metadata: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class IndexJob(Base):
+    """Persistent state for asynchronous document indexing."""
+
+    __tablename__ = "index_jobs"
+    __table_args__ = (
+        Index("ix_index_jobs_status_created", "status", "created_at"),
+    )
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    doc_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="queued",
+    )
+    stage: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="queued",
+    )
+    progress: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.0,
+    )
+    chunk_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    timings: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    metrics: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    strategy: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="auto",
+    )
+    use_raptor: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    use_graphrag: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class DocumentAsset(Base):
+    """Persistent visual and structural assets emitted during document parsing."""
+
+    __tablename__ = "document_assets"
+    __table_args__ = (
+        Index("ix_document_assets_doc_page", "doc_id", "page"),
+        Index("ix_document_assets_doc_element", "doc_id", "element_index"),
+    )
+
+    asset_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    doc_id: Mapped[str] = mapped_column(
+        ForeignKey("document_catalog.doc_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    element_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    relative_path: Mapped[Optional[str]] = mapped_column(
+        String(1024),
+        nullable=True,
+    )
+    content_type: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Init
 # ---------------------------------------------------------------------------
 
+def _alembic_config():
+    from alembic.config import Config
+    from mindforge.config import get_project_root
+
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        str(get_project_root() / "migrations"),
+    )
+    config.set_main_option("sqlalchemy.url", _DB_URL.replace("%", "%%"))
+    return config
+
+
+def run_migrations() -> None:
+    """Upgrade the database, safely adopting pre-Alembic installations."""
+    from alembic import command
+
+    config = _alembic_config()
+    with _engine.begin() as connection:
+        config.attributes["connection"] = connection
+        tables = set(inspect(connection).get_table_names())
+        legacy_core = {"users", "api_keys", "research_history"}
+        if "alembic_version" not in tables and legacy_core.issubset(tables):
+            command.stamp(config, "0001_baseline")
+        command.upgrade(config, "head")
+
+
 def init_db() -> None:
-    """Create all tables if they don't exist."""
-    Base.metadata.create_all(bind=_engine)
+    """Apply schema migrations and ensure the single-user account exists."""
+    run_migrations()
 
     # Ensure default user exists
     with SessionLocal() as db:

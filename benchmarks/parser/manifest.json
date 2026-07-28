@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "description": "Private parser benchmark manifest. Do not commit source documents or extracted output.",
+  "cases": [
+    {
+      "id": "native-text",
+      "source": "native-text.pdf",
+      "tags": ["native", "reading-order"],
+      "expect": {
+        "minimum_native_text_pages": 1,
+        "required_element_types": ["text"]
+      }
+    },
+    {
+      "id": "scanned-ocr",
+      "source": "scanned-ocr.pdf",
+      "tags": ["ocr", "image-only"],
+      "expect": {
+        "minimum_ocr_pages": 1,
+        "required_element_types": ["text", "image"]
+      }
+    },
+    {
+      "id": "native-table",
+      "source": "native-table.pdf",
+      "tags": ["table", "native"],
+      "expect": {
+        "required_element_types": ["table"]
+      }
+    },
+    {
+      "id": "mixed-layout",
+      "source": "mixed-layout.pdf",
+      "tags": ["mixed", "ocr", "table", "image"],
+      "expect": {
+        "required_element_types": ["text", "image"]
+      }
+    },
+    {
+      "id": "formula-chart",
+      "source": "formula-chart.pdf",
+      "tags": ["formula", "chart", "visual-routing"],
+      "expect": {
+        "required_element_types": ["text", "image"],
+        "required_routing_reasons": ["formula_candidate"]
+      }
+    },
+    {
+      "id": "handwritten-scan",
+      "source": "handwritten-scan.pdf",
+      "tags": ["ocr", "handwriting", "visual-routing"],
+      "expect": {
+        "minimum_ocr_pages": 1,
+        "required_element_types": ["image"]
+      }
+    }
+  ]
+}

@@ -4,7 +4,13 @@ from typing import List, Optional, AsyncIterator, Union
 
 import openai
 
-from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, StreamEvent
+from mindforge.models.base import (
+    BaseLLM,
+    ChatMessage,
+    ChatResult,
+    LLMConfigurationError,
+    StreamEvent,
+)
 
 
 class OpenAIAdapter(BaseLLM):
@@ -13,8 +19,14 @@ class OpenAIAdapter(BaseLLM):
                  embed_model: str = "text-embedding-3-small", **kwargs):
         self.model = model
         self.embed_model = embed_model
+        key = api_key or ""
+        if not key.strip():
+            raise LLMConfigurationError(
+                "OpenAI API key is not configured. "
+                "Set LLM_OPENAI_API_KEY in .env or pass api_key."
+            )
         self.client = openai.AsyncOpenAI(
-            api_key=api_key or "",
+            api_key=key,
             base_url=base_url,
             max_retries=max_retries,
         )

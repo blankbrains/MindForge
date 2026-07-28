@@ -2,6 +2,16 @@ import { createParser, type EventSourceMessage } from "eventsource-parser";
 
 export type SSECallback<T> = (event: T) => void;
 
+export class SSEConnectionError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SSEConnectionError";
+    this.status = status;
+  }
+}
+
 function positiveEnvInt(name: string, fallback: number): number {
   const value = Number.parseInt(import.meta.env[name] || "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -37,7 +47,11 @@ export function createSSEConnection<T>(
       });
 
       if (!response.ok) {
-        throw new Error(`SSE connection failed: ${response.status}`);
+        const detail = await response.text().catch(() => "");
+        throw new SSEConnectionError(
+          detail || `SSE connection failed: ${response.status}`,
+          response.status,
+        );
       }
       if (!response.body) {
         throw new Error("Response has no body stream");

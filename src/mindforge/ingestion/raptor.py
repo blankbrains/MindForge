@@ -41,26 +41,51 @@ class RAPTORIndexer:
                 "limit."
             )
         leaves = [RAPTORNode(node_id=ch.chunk_id, content=ch.content, level=0, embedding=ch.embedding) for ch in chunks]
+        missing_leaves = [
+            node for node in leaves if node.embedding is None
+        ]
+        if missing_leaves and self.embedder:
+            vectors = await asyncio.to_thread(
+                self.embedder.embed,
+                [node.content for node in missing_leaves],
+            )
+            if len(vectors) != len(missing_leaves):
+                raise ValueError(
+                    "RAPTOR leaf embedding count does not match input count."
+                )
+            for node, vector in zip(missing_leaves, vectors):
+                node.embedding = vector
         all_nodes = [leaves]
         current_level = leaves
         for level in range(1, self.num_levels):
             if len(current_level) <= 3:
                 break
-            clusters = self._cluster_nodes(current_level)
+            clusters = await asyncio.to_thread(
+                self._cluster_nodes,
+                current_level,
+            )
             semaphore = asyncio.Semaphore(self.summary_concurrency)
             # 同层所有 cluster 并行 LLM 摘要（独立无依赖）
             async def _summarize_one(i: int, cluster: list) -> RAPTORNode:
                 async with semaphore:
                     summary = await self._summarize_cluster(cluster, level)
+                child_fingerprint = hashlib.md5(
+                    "|".join(
+                        child.node_id for child in cluster
+                    ).encode()
+                ).hexdigest()[:8]
                 node = RAPTORNode(
-                    node_id=f"raptor_l{level}_c{i}_{hashlib.md5(summary.encode()).hexdigest()[:8]}",
+                    node_id=(
+                        f"raptor_l{level}_c{i}_{child_fingerprint}_"
+                        f"{hashlib.md5(summary.encode()).hexdigest()[:8]}"
+                    ),
                     content=summary, summary=summary, level=level, children=cluster,
                 )
                 if self.embedder:
-                    try:
-                        node.embedding = self.embedder.embed_single(summary[:512])
-                    except Exception:
-                        pass
+                    node.embedding = await asyncio.to_thread(
+                        self.embedder.embed_single,
+                        summary,
+                    )
                 return node
 
             batch = await asyncio.gather(*[
@@ -85,11 +110,6 @@ class RAPTORIndexer:
         embeddings = []
         embedding_indices = []  # maps embedding_idx -> node_idx
         for i, node in enumerate(nodes):
-            if node.embedding is None and self.embedder:
-                try:
-                    node.embedding = self.embedder.embed_single(node.content[:512])
-                except Exception:
-                    pass
             if node.embedding is not None:
                 embeddings.append(node.embedding)
                 embedding_indices.append(i)

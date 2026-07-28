@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,9 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import Response
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
 
 from mindforge.agents.base import AgentResult
 from mindforge.agents.critic import CriticScore
@@ -21,7 +24,7 @@ from mindforge.api import routes
 from mindforge.api import server
 from mindforge.api.schemas import HistorySaveRequest, SettingsUpdateRequest
 from mindforge.ingestion.embedder import EmbeddingManager
-from mindforge.mcp.registry import MCPRegistry
+from mindforge.retrieval.bm25 import BM25Retriever
 from mindforge.retrieval.graphrag import Entity, GraphRAGEngine
 from mindforge.retrieval.hybrid import HybridRetriever
 from mindforge.retrieval.reranker import CrossEncoderReranker
@@ -493,6 +496,21 @@ class _NoopSynthesizer:
         )
 
 
+class _EmptySynthesizer:
+    async def synthesize(self, **kwargs) -> AgentResult:
+        del kwargs
+        return AgentResult(
+            agent_name="synthesizer",
+            success=False,
+            output="",
+        )
+
+    async def synthesize_stream(self, **kwargs):
+        del kwargs
+        if False:
+            yield ""
+
+
 class _NoopCritic:
     async def evaluate(self, **kwargs):
         del kwargs
@@ -525,6 +543,46 @@ async def test_orchestrator_passes_dependency_context_and_cost() -> None:
     assert "result for first" in (researcher.calls[1][1] or "")
     assert result.cost_usd == pytest.approx(0.5)
     assert "cost_usd" not in result.token_usage
+
+
+def _empty_synthesis_orchestrator() -> Orchestrator:
+    orchestrator = Orchestrator(
+        planner=_FakePlanner(),
+        researcher=_ContextResearcher(),
+        synthesizer=_EmptySynthesizer(),
+        critic=_NoopCritic(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_timeout=30,
+            subtask_timeout=5,
+            max_refine_rounds=0,
+            stream_chunk_size=512,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+        observability=SimpleNamespace(enable_tracing=False),
+    )
+    return orchestrator
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_rejects_empty_synthesis() -> None:
+    result = await _empty_synthesis_orchestrator().run("task")
+
+    assert result.success is False
+    assert "synthesis" in result.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_streaming_orchestrator_rejects_empty_synthesis() -> None:
+    events = [
+        event
+        async for event in _empty_synthesis_orchestrator().stream_run("task")
+    ]
+
+    done = [event for event in events if event["type"] == "done"]
+    assert len(done) == 1
+    assert done[0]["result"].success is False
 
 
 class _FailedResearcher:
@@ -668,6 +726,30 @@ def test_code_executor_rejects_non_whitelisted_import() -> None:
     assert "Module not allowed" in (result.error or "")
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            "import numpy as np\nprint(int(np.array([1, 2, 3]).sum()))",
+            "6",
+        ),
+        (
+            "import pandas as pd\n"
+            "print(int(pd.Series([1, 2, 3]).sum()))",
+            "6",
+        ),
+    ],
+)
+def test_code_executor_runs_whitelisted_scientific_modules(
+    code: str,
+    expected: str,
+) -> None:
+    result = CodeExecutor().execute(code, timeout=10)
+
+    assert result.success is True, result.data.get("stderr", "")
+    assert result.output.strip() == expected
+
+
 def test_code_executor_blocks_scientific_library_file_access() -> None:
     result = CodeExecutor().execute(
         "import numpy as np\n"
@@ -687,6 +769,100 @@ def test_code_executor_bounds_child_output_before_parent_capture() -> None:
     assert result.success is True
     assert result.truncated is True
     assert len(result.output) <= executor._settings.sandbox.max_output_length
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import pandas as pd\npd.io.common.os.listdir('.')",
+        (
+            "import pandas as pd\n"
+            "os_alias = pd.io.common.os\n"
+            "os_alias.remove('zzzz_no_target_4f6a9c')"
+        ),
+    ],
+)
+def test_code_executor_blocks_aliased_filesystem_operations(
+    code: str,
+) -> None:
+    result = CodeExecutor().execute(code, timeout=5)
+
+    assert result.success is False
+    assert "File API not allowed" in (result.error or "")
+
+
+def test_code_executor_handles_non_ascii_child_errors() -> None:
+    result = CodeExecutor().execute(
+        "raise ValueError('中文错误')",
+        timeout=5,
+    )
+
+    assert result.success is False
+    assert "ValueError" in (result.error or "")
+
+
+def test_bm25_search_is_consistent_during_concurrent_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = BM25Retriever()
+    retriever.documents = ["old document"]
+    retriever.doc_ids = ["old"]
+    retriever.metadatas = [{}]
+    search_entered = threading.Event()
+    release_search = threading.Event()
+    build_finished = threading.Event()
+    search_result: list[dict[str, Any]] = []
+
+    class BlockingIndex:
+        def retrieve(self, query_tokens, k):
+            import numpy as np
+
+            search_entered.set()
+            assert release_search.wait(timeout=5)
+            return np.array([[0]]), np.array([[1.0]])
+
+    retriever.retriever = BlockingIndex()
+    monkeypatch.setattr(retriever, "_rebuild_retriever", lambda: None)
+
+    search_thread = threading.Thread(
+        target=lambda: search_result.extend(retriever.search("old")),
+    )
+
+    def rebuild() -> None:
+        retriever.build_index(
+            [{"id": "new", "text": "new document"}],
+        )
+        build_finished.set()
+
+    build_thread = threading.Thread(target=rebuild)
+
+    search_thread.start()
+    assert search_entered.wait(timeout=5)
+    build_thread.start()
+    build_completed_while_searching = build_finished.wait(timeout=0.2)
+    release_search.set()
+    search_thread.join(timeout=5)
+    build_thread.join(timeout=5)
+
+    assert build_completed_while_searching is False
+    assert search_result[0]["id"] == "old"
+    assert build_finished.is_set()
+
+
+def test_bm25s_0310_result_order_is_indices_then_scores() -> None:
+    retriever = BM25Retriever()
+    retriever.build_index(
+        [
+            {"id": "alpha", "text": "alpha beta"},
+            {"id": "gamma", "text": "gamma delta"},
+        ]
+    )
+
+    results = retriever.search("alpha", top_k=2)
+
+    assert results
+    assert results[0]["id"] == "alpha"
+    assert isinstance(results[0]["score"], float)
 
 
 @pytest.mark.asyncio
@@ -747,9 +923,30 @@ def test_reranker_pins_configured_model_revision(monkeypatch) -> None:
     assert calls == [
         (
             "example/reranker",
-            {"revision": "immutable-revision"},
+            {"revision": "immutable-revision", "device": "cpu"},
         )
     ]
+
+
+def test_reranker_model_load_failure_is_cached(monkeypatch) -> None:
+    attempts = 0
+
+    class FailingCrossEncoder:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("model unavailable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(CrossEncoder=FailingCrossEncoder),
+    )
+    reranker = CrossEncoderReranker("unavailable")
+
+    assert reranker.model is None
+    assert reranker.model is None
+    assert attempts == 1
 
 
 def test_embedding_manager_pins_configured_model_revision(
@@ -781,6 +978,7 @@ def test_embedding_manager_pins_configured_model_revision(
 
     assert calls[0][1]["revision"]
     assert calls[0][1]["local_files_only"] is True
+    assert calls[0][1]["device"] == "cpu"
 
 
 def test_embedding_dimension_adapter_preserves_geometry() -> None:
@@ -883,109 +1081,78 @@ async def test_qdrant_probe_checks_service_without_requiring_collection(
 
 @pytest.mark.asyncio
 async def test_health_reports_real_core_status(monkeypatch) -> None:
-    async def connected() -> bool:
-        return True
-
-    registry = SimpleNamespace(
-        servers={"configured": object()},
-        is_any_running=True,
-    )
-    monkeypatch.setattr(
-        routes,
-        "_probe_qdrant_connection",
-        connected,
-    )
-    monkeypatch.setattr(
-        routes,
-        "_probe_redis_connection",
-        connected,
-    )
-    monkeypatch.setattr(
-        routes,
-        "_probe_postgres_connection",
-        connected,
-    )
-    monkeypatch.setattr(
-        routes,
-        "get_mcp_registry",
-        lambda: registry,
+    snapshot = SimpleNamespace(
+        status="ok",
+        qdrant_connected=True,
+        redis_connected=True,
+        postgres_connected=True,
     )
 
+    class Monitor:
+        async def get_snapshot(self):
+            return snapshot
+
+    monkeypatch.setattr(routes, "get_health_monitor", Monitor)
     response = await _api_get("/api/v1/health")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["postgres_connected"] is True
-    assert payload["mcp_configured"] is True
-    assert payload["mcp_tools_available"] is True
+    assert not any(key.startswith("mcp_") for key in payload)
 
 
 @pytest.mark.asyncio
 async def test_health_reports_degraded_when_core_dependency_fails(
     monkeypatch,
 ) -> None:
-    async def connected() -> bool:
-        return True
-
-    async def disconnected() -> bool:
-        return False
-
-    monkeypatch.setattr(
-        routes,
-        "_probe_qdrant_connection",
-        disconnected,
-    )
-    monkeypatch.setattr(
-        routes,
-        "_probe_redis_connection",
-        connected,
-    )
-    monkeypatch.setattr(
-        routes,
-        "_probe_postgres_connection",
-        connected,
-    )
-    monkeypatch.setattr(
-        routes,
-        "get_mcp_registry",
-        lambda: None,
+    snapshot = SimpleNamespace(
+        status="degraded",
+        qdrant_connected=False,
+        redis_connected=True,
+        postgres_connected=True,
     )
 
+    class Monitor:
+        async def get_snapshot(self):
+            return snapshot
+
+    monkeypatch.setattr(routes, "get_health_monitor", Monitor)
     response = await _api_get("/api/v1/health")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "degraded"
     assert payload["qdrant_connected"] is False
-    assert payload["mcp_configured"] is False
+    assert not any(key.startswith("mcp_") for key in payload)
 
 
 @pytest.mark.asyncio
 async def test_readiness_uses_http_status_for_core_health(
     monkeypatch,
 ) -> None:
-    async def healthy():
-        return routes.HealthResponse(
+    class Monitor:
+        snapshot = SimpleNamespace(
             status="ok",
             qdrant_connected=True,
             redis_connected=True,
             postgres_connected=True,
         )
 
-    monkeypatch.setattr(routes, "health", healthy)
+        async def refresh(self):
+            return self.snapshot
+
+    monitor = Monitor()
+    monkeypatch.setattr(routes, "get_health_monitor", lambda: monitor)
     ready = await _api_get("/api/v1/ready")
     assert ready.status_code == 200
 
-    async def degraded():
-        return routes.HealthResponse(
-            status="degraded",
-            qdrant_connected=False,
-            redis_connected=True,
-            postgres_connected=True,
-        )
-
-    monkeypatch.setattr(routes, "health", degraded)
+    monitor.snapshot = SimpleNamespace(
+        status="degraded",
+        qdrant_connected=False,
+        redis_connected=True,
+        postgres_connected=True,
+    )
     unavailable = await _api_get("/api/v1/ready")
     assert unavailable.status_code == 503
     assert unavailable.json()["status"] == "degraded"
@@ -1049,20 +1216,6 @@ async def test_history_detail_returns_complete_report(
     assert response.json()["report"] == "x" * 4_000
 
 
-def test_mcp_registry_loads_inline_json_and_validates_shape() -> None:
-    registry = MCPRegistry()
-    registry.load_config_json(
-        '{"mcpServers":{"demo":{"command":"python",'
-        '"args":["-m","demo"],"enabled":true}}}'
-    )
-
-    assert list(registry.servers) == ["demo"]
-    assert registry.servers["demo"].config.args == ["-m", "demo"]
-
-    with pytest.raises(ValueError, match="invalid JSON"):
-        registry.load_config_json("{")
-
-
 def test_frontend_path_rejects_sibling_prefix_traversal(
     monkeypatch,
     tmp_path,
@@ -1077,6 +1230,35 @@ def test_frontend_path_rejects_sibling_prefix_traversal(
     assert server._safe_frontend_candidate(
         "../dist-private/secret.txt"
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_frontend_cache_headers_distinguish_html_and_assets() -> None:
+    middleware = server.SecurityHeadersMiddleware(app=lambda *_: None)
+
+    async def call_next(_request):
+        return Response()
+
+    html_request = Request(
+        {"type": "http", "method": "GET", "path": "/settings", "headers": []}
+    )
+    html_response = await middleware.dispatch(html_request, call_next)
+    assert html_response.headers["cache-control"] == (
+        "no-store, no-cache, must-revalidate"
+    )
+
+    asset_request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/assets/settings-page.js",
+            "headers": [],
+        }
+    )
+    asset_response = await middleware.dispatch(asset_request, call_next)
+    assert asset_response.headers["cache-control"] == (
+        "public, max-age=31536000, immutable"
+    )
 
 
 @pytest.mark.asyncio

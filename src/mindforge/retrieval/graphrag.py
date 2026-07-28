@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Set, Tuple
 import logging
 import math
+import threading
 from collections import deque
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,8 @@ class GraphRAGEngine:
 
         # Adjacency list for BFS traversal
         self._adjacency: Dict[str, Set[str]] = {}
+        self._operation_lock = asyncio.Lock()
+        self._state_lock = threading.RLock()
 
     @staticmethod
     def _normalise_entity_provenance(entity: Entity) -> None:
@@ -214,6 +217,10 @@ class GraphRAGEngine:
     async def build_graph(self, documents: List[Dict[str, Any]]) -> None:
         """Extract entities and relations from documents via LLM, build the
         graph, discover communities, and generate community summaries."""
+        async with self._operation_lock:
+            await self._build_graph(documents)
+
+    async def _build_graph(self, documents: List[Dict[str, Any]]) -> None:
         if not documents:
             logger.warning("No documents provided; graph will be empty.")
             return
@@ -235,8 +242,7 @@ class GraphRAGEngine:
                 combined = combined[:8000] + "\n\n[...truncated]"
             await self._extract_entities_and_relations(combined, doc_id)
 
-        self._build_adjacency()
-        self._discover_communities()
+        await asyncio.to_thread(self._rebuild_graph_structure)
         await self._summarize_communities()
 
         logger.info(
@@ -253,20 +259,21 @@ class GraphRAGEngine:
 
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "entities": {eid: {"id": e.id, "name": e.name, "type": e.type,
-                               "description": e.description, "metadata": e.metadata}
-                         for eid, e in self.entities.items()},
-            "relations": [{"source": r.source, "target": r.target,
-                           "relation_type": r.relation_type, "weight": r.weight,
-                           "metadata": r.metadata}
-                          for r in self.relations],
-            # Community 无 label / entity_ids 字段，只序列化已有字段
-            "communities": [{"id": c.id,
-                             "entity_ids": [e.id for e in c.entities],
-                             "summary": c.summary}
-                            for c in self.communities],
-        }
+        with self._state_lock:
+            payload = {
+                "entities": {eid: {"id": e.id, "name": e.name, "type": e.type,
+                                   "description": e.description, "metadata": e.metadata}
+                             for eid, e in self.entities.items()},
+                "relations": [{"source": r.source, "target": r.target,
+                               "relation_type": r.relation_type, "weight": r.weight,
+                               "metadata": r.metadata}
+                              for r in self.relations],
+                # Community 无 label / entity_ids 字段，只序列化已有字段
+                "communities": [{"id": c.id,
+                                 "entity_ids": [e.id for e in c.entities],
+                                 "summary": c.summary}
+                                for c in self.communities],
+            }
         with target.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         logger.info("GraphRAG state saved to %s", target)
@@ -456,6 +463,15 @@ class GraphRAGEngine:
 
     def delete_document(self, doc_id: str) -> None:
         """Remove graph contributions belonging to one source document."""
+        with self._state_lock:
+            self._delete_document_locked(doc_id)
+
+    async def delete_document_async(self, doc_id: str) -> None:
+        """Serialize deletion with graph builds and queries."""
+        async with self._operation_lock:
+            await asyncio.to_thread(self.delete_document, doc_id)
+
+    def _delete_document_locked(self, doc_id: str) -> None:
         for entity_id, entity in list(self.entities.items()):
             self._normalise_entity_provenance(entity)
             metadata = entity.metadata
@@ -500,6 +516,11 @@ class GraphRAGEngine:
         self.relations = retained_relations
         self._build_adjacency()
         self._discover_communities()
+
+    def _rebuild_graph_structure(self) -> None:
+        with self._state_lock:
+            self._build_adjacency()
+            self._discover_communities()
 
     def _parse_extraction(self, raw: str) -> List[Dict[str, Any]]:
         """Parse LLM JSON array output, handling nested JSON with bracket counting."""
@@ -634,6 +655,49 @@ class GraphRAGEngine:
         Returns a list of result dicts with keys: ``id``, ``text``, ``score``,
         ``source`` (always ``"graph"``).
         """
+        if not isinstance(query, str) or not query.strip():
+            return []
+        if (
+            isinstance(top_k_entities, bool)
+            or not isinstance(top_k_entities, int)
+            or not 1 <= top_k_entities <= self.max_total_entities
+        ):
+            raise ValueError("top_k_entities is outside the configured range.")
+        if (
+            isinstance(top_k_communities, bool)
+            or not isinstance(top_k_communities, int)
+            or not 1 <= top_k_communities <= self.max_communities
+        ):
+            raise ValueError(
+                "top_k_communities is outside the configured range."
+            )
+        async with self._operation_lock:
+            return await asyncio.to_thread(
+                self._query_sync,
+                query.strip(),
+                top_k_entities,
+                top_k_communities,
+            )
+
+    def _query_sync(
+        self,
+        query: str,
+        top_k_entities: int,
+        top_k_communities: int,
+    ) -> List[Dict[str, Any]]:
+        with self._state_lock:
+            return self._query_locked(
+                query,
+                top_k_entities,
+                top_k_communities,
+            )
+
+    def _query_locked(
+        self,
+        query: str,
+        top_k_entities: int,
+        top_k_communities: int,
+    ) -> List[Dict[str, Any]]:
         if not self.entities:
             logger.warning("Graph is empty; returning no results.")
             return []

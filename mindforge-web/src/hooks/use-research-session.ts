@@ -3,7 +3,9 @@ import { API_BASE } from "@/lib/constants";
 import type { SSEEvent } from "@/types/research";
 import { useResearchStore } from "@/store/research-store";
 import { useHistoryStore } from "@/store/history-store";
+import { useSettingsStore } from "@/store/settings-store";
 import { createSSEConnection } from "@/lib/sse-parser";
+import { useShallow } from "zustand/react/shallow";
 
 const configuredResearchTimeout = Number.parseInt(
   import.meta.env.VITE_RESEARCH_TIMEOUT_MS || "",
@@ -36,7 +38,19 @@ export function useResearchSession() {
   const researchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingAnswerRef = useRef("");
-  const store = useResearchStore();
+  const requestGenerationRef = useRef(0);
+  const sessionState = useResearchStore(
+    useShallow((state) => ({
+      status: state.status,
+      error: state.error,
+      plan: state.plan,
+      subtasks: state.subtasks,
+      synthesizing: state.synthesizing,
+      criticScore: state.criticScore,
+      refineRound: state.refineRound,
+      finalResult: state.finalResult,
+    })),
+  );
   const addFromResearch = useHistoryStore((s) => s.addFromResearch);
 
   const flushPendingAnswer = useCallback(() => {
@@ -57,6 +71,7 @@ export function useResearchSession() {
   // 组件卸载时清理 SSE 连接和超时
   useEffect(() => {
     return () => {
+      requestGenerationRef.current += 1;
       abortRef.current?.abort();
       if (streamFlushRef.current) clearTimeout(streamFlushRef.current);
       pendingAnswerRef.current = "";
@@ -69,6 +84,8 @@ export function useResearchSession() {
 
   const startResearch = useCallback(
     (task: string) => {
+      const generation = requestGenerationRef.current + 1;
+      requestGenerationRef.current = generation;
       if (researchTimeoutRef.current) { clearTimeout(researchTimeoutRef.current); researchTimeoutRef.current = null; }
       abortRef.current?.abort();
       if (streamFlushRef.current) {
@@ -85,18 +102,28 @@ export function useResearchSession() {
       });
       useResearchStore.getState().setTask(task);
 
+      const configuredSeconds =
+        useSettingsStore.getState().researchTimeout;
+      const timeoutMs =
+        Number.isFinite(configuredSeconds) && configuredSeconds > 0
+          ? configuredSeconds * 1000
+          : RESEARCH_TIMEOUT_MS;
       const timeoutId = setTimeout(() => {
+        if (requestGenerationRef.current !== generation) return;
+        researchTimeoutRef.current = null;
         useResearchStore.getState().setStatus(
-          "error", "研究超时（15 分钟），请尝试简化问题"
+          "error",
+          `研究超时（${Math.ceil(timeoutMs / 60_000)} 分钟），请尝试简化问题`,
         );
         abortRef.current?.abort();
-      }, RESEARCH_TIMEOUT_MS);
+      }, timeoutMs);
       researchTimeoutRef.current = timeoutId;
 
       abortRef.current = createSSEConnection<SSEEvent>(
         `${API_BASE}/query`,
         { task, stream: true },
         (event) => {
+          if (requestGenerationRef.current !== generation) return;
           if (event.type === "answer_chunk") {
             const currentLength =
               useResearchStore.getState().streamingAnswer.length;
@@ -118,7 +145,7 @@ export function useResearchSession() {
             return;
           }
           flushPendingAnswer();
-          store.handleEvent(event);
+          useResearchStore.getState().handleEvent(event);
           if (event.type === "error") {
             clearTimeout(timeoutId);
             abortRef.current?.abort();
@@ -135,7 +162,10 @@ export function useResearchSession() {
           }
         },
         () => {
+          if (requestGenerationRef.current !== generation) return;
           clearTimeout(timeoutId);
+          researchTimeoutRef.current = null;
+          abortRef.current = null;
           // 仅当 done 事件已将 finalResult 写入后才置 completed，
           // 避免 [DONE] 标记先于 done 事件到达时出现"已完成但无报告"白屏
           const current = useResearchStore.getState();
@@ -149,42 +179,47 @@ export function useResearchSession() {
           }
         },
         (err) => {
+          if (requestGenerationRef.current !== generation) return;
           clearTimeout(timeoutId);
+          researchTimeoutRef.current = null;
+          abortRef.current = null;
           const msg = err.message || "";
           // 分类错误信息，提供用户友好的中文提示
           if (err instanceof Error && "status" in err) {
             const status = (err as unknown as Record<string, unknown>).status as number;
             if (status === 401 || status === 403) {
-              store.setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
+              useResearchStore.getState().setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
               return;
             }
             if (status >= 500) {
-              store.setStatus("error", "服务器繁忙，请稍后重试。若持续出现请检查 API Key 余额。");
+              useResearchStore.getState().setStatus("error", "服务器繁忙，请稍后重试。若持续出现请检查 API Key 余额。");
               return;
             }
           }
           const lower = msg.toLowerCase();
           if (lower.includes("401") || lower.includes("403") || lower.includes("auth")) {
-            store.setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
+            useResearchStore.getState().setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
           } else if (lower.includes("timeout") || lower.includes("abort")) {
-            store.setStatus("error", "研究超时，请尝试简化问题或减少问题范围。");
+            useResearchStore.getState().setStatus("error", "研究超时，请尝试简化问题或减少问题范围。");
           } else if (lower.includes("network") || lower.includes("fetch") || lower.includes("connect")) {
-            store.setStatus("error", "网络连接失败，请检查网络后重试。");
+            useResearchStore.getState().setStatus("error", "网络连接失败，请检查网络后重试。");
           } else if (msg && msg.length < 80) {
             // 简短的后端消息，可能是中文错误，直接展示
-            store.setStatus("error", msg);
+            useResearchStore.getState().setStatus("error", msg);
           } else {
             // 长错误/未知错误，给通用提示
-            store.setStatus("error", "研究请求失败，请稍后重试。如持续出现请检查 API Key 余额。");
+            useResearchStore.getState().setStatus("error", "研究请求失败，请稍后重试。如持续出现请检查 API Key 余额。");
           }
         },
       );
     },
-    [store, addFromResearch, flushPendingAnswer],
+    [addFromResearch, flushPendingAnswer],
   );
 
   const cancelResearch = useCallback(() => {
+    requestGenerationRef.current += 1;
     abortRef.current?.abort();
+    abortRef.current = null;
     if (streamFlushRef.current) {
       clearTimeout(streamFlushRef.current);
       streamFlushRef.current = null;
@@ -195,12 +230,14 @@ export function useResearchSession() {
   }, []);
 
   return {
-    ...store,
+    ...sessionState,
     startResearch,
     cancelResearch,
-    isIdle: store.status === "idle",
-    isStreaming: store.status === "streaming" || store.status === "connecting",
-    isCompleted: store.status === "completed",
-    isError: store.status === "error",
+    isIdle: sessionState.status === "idle",
+    isStreaming:
+      sessionState.status === "streaming"
+      || sessionState.status === "connecting",
+    isCompleted: sessionState.status === "completed",
+    isError: sessionState.status === "error",
   };
 }

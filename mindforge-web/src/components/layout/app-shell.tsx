@@ -1,13 +1,23 @@
+import { useEffect } from "react";
 import { Outlet, Link } from "@tanstack/react-router";
 import { Sidebar } from "./sidebar";
 import { Header } from "./header";
 import { useIsMobile } from "@/hooks/use-media-query";
+import { useSettingsStore } from "@/store/settings-store";
 import { useUIStore } from "@/store/ui-store";
 
 export function AppShell() {
   const isMobile = useIsMobile();
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  const settingsLoaded = useSettingsStore((s) => s.loaded);
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
+
+  useEffect(() => {
+    if (!settingsLoaded) {
+      void loadSettings();
+    }
+  }, [loadSettings, settingsLoaded]);
 
   return (
     <div className="flex min-h-screen">
@@ -33,10 +43,10 @@ export function AppShell() {
         </>
       )}
 
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <Header title="MindForge" />
 
-        <main className="flex-1 overflow-y-auto p-6 pb-20 xl:pb-6">
+        <main className="min-w-0 flex-1 overflow-y-auto p-6 pb-20 xl:pb-6">
           <Outlet />
         </main>
       </div>
@@ -55,6 +65,7 @@ export function AppShell() {
               key={to}
               to={to}
               search={{}}
+              reloadDocument={to === "/settings"}
               className="flex flex-col items-center gap-0.5 px-3 py-1 text-xs text-text-muted [&.active]:text-primary"
             >
               {label}

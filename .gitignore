@@ -18,6 +18,8 @@ __pycache__/
 
 # Project data
 data/
+benchmarks/parser/corpus/
+benchmarks/parser/results/
 .chromadb/
 .chroma/
 .embedding_cache/
@@ -30,6 +32,7 @@ data/
 dist/
 build/
 *.egg-info/
+.coverage
 
 # Docker
 .docker/

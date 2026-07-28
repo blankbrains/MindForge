@@ -180,7 +180,12 @@ class SemanticMemory:
     async def store(self, task: str, output: str) -> None:
         """Async alias for ``add_fact`` — used by Orchestrator."""
         async with self._lock:
-            self.add_fact(content=output, sources=[f"task: {task[:100]}"], confidence=0.8)
+            await asyncio.to_thread(
+                self.add_fact,
+                content=output,
+                sources=[f"task: {task[:100]}"],
+                confidence=0.8,
+            )
 
     def search_facts(self, query: str, top_k: int = 5) -> list[Fact]:
         """Simple keyword-based fact retrieval.

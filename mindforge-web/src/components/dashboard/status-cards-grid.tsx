@@ -2,7 +2,7 @@ import { useHealth } from "@/hooks/use-health";
 import { useStats } from "@/hooks/use-stats";
 import { cn } from "@/lib/utils";
 import { Link } from "@tanstack/react-router";
-import { Database, BarChart3, Files, Plug, Server } from "lucide-react";
+import { Database, BarChart3, Files, Server } from "lucide-react";
 
 export function StatusCardsGrid() {
   const { data: health, isLoading: healthLoading } = useHealth();
@@ -27,12 +27,6 @@ export function StatusCardsGrid() {
       ok: health?.postgres_connected ?? false,
     },
     {
-      label: "MCP 协议",
-      icon: Plug,
-      ok: health?.mcp_tools_available ?? false,
-      neutral: health ? !health.mcp_configured : false,
-    },
-    {
       label: "已索引文档",
       icon: Files,
       ok: true,
@@ -43,8 +37,8 @@ export function StatusCardsGrid() {
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-5">
-      {cards.map(({ label, icon: Icon, ok, value, isCount, linkTo, neutral }) => {
+    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      {cards.map(({ label, icon: Icon, ok, value, isCount, linkTo }) => {
         const inner = (
           <>
             <div className="flex items-center justify-between">
@@ -61,24 +55,18 @@ export function StatusCardsGrid() {
                   <span
                     className={cn(
                       "h-2.5 w-2.5 rounded-full",
-                      neutral
-                        ? "bg-text-muted"
-                        : ok
-                          ? "bg-green-500"
-                          : "bg-red-500",
+                      ok ? "bg-green-500" : "bg-red-500",
                     )}
                   />
                   <span
                     className={cn(
                       "text-lg font-semibold",
-                      neutral
-                        ? "text-text-muted"
-                        : ok
-                          ? "text-green-600 dark:text-green-400"
-                          : "text-red-600 dark:text-red-400",
+                      ok
+                        ? "text-green-600 dark:text-green-400"
+                        : "text-red-600 dark:text-red-400",
                     )}
                   >
-                    {neutral ? "未配置" : ok ? "正常" : "离线"}
+                    {ok ? "正常" : "离线"}
                   </span>
                 </>
               )}

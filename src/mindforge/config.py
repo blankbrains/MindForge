@@ -4,7 +4,7 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
@@ -104,6 +104,8 @@ class LLMConfig(BaseSettings):
     )
     local_embedding_dim: int = 1024
     sentence_transformers_device: str = "cpu"
+    embedding_batch_size: int = Field(default=32, ge=1, le=1024)
+    torch_num_threads: int = Field(default=0, ge=0, le=256)
     hf_endpoint: str = "https://hf-mirror.com"
     hf_hub_download_timeout: int = Field(default=30, ge=1)
 
@@ -142,6 +144,12 @@ class APIConfig(BaseSettings):
     max_docx_parts: int = Field(default=5000, ge=10, le=100_000)
     max_chunks_per_document: int = Field(default=2000, ge=1, le=100_000)
     index_batch_size: int = Field(default=128, ge=1, le=1000)
+    max_concurrent_index_jobs: int = Field(default=1, ge=1, le=16)
+    pdf_parse_executor: Literal["process", "thread"] = "process"
+    pdf_parse_workers: int = Field(default=12, ge=1, le=64)
+    pdf_parallel_page_threshold: int = Field(default=10, ge=1, le=1000)
+    pdf_parse_batch_pages: int = Field(default=8, ge=1, le=128)
+    health_refresh_seconds: int = Field(default=15, ge=5, le=300)
     max_history_entries: int = Field(default=1000, ge=1, le=100_000)
     allow_local_file_index: bool = Field(default=False)
     model_config = SettingsConfigDict(env_prefix="API_", extra="ignore")
@@ -184,6 +192,8 @@ class RetrievalConfig(BaseSettings):
         pattern=r"^[0-9a-fA-F]{40}$",
         description="Immutable Hugging Face revision for the reranker model.",
     )
+    reranker_device: str = "cpu"
+    reranker_preload: bool = True
     bm25_index_dir: Optional[str] = Field(
         default=None,
         description="Persistent BM25 corpus directory.",
@@ -197,6 +207,60 @@ class ChunkingConfig(BaseSettings):
     chunk_overlap: int = Field(default=64)
     use_semantic_chunking: bool = Field(default=False)
     model_config = SettingsConfigDict(env_prefix="CHUNK_", extra="ignore")
+
+
+class ParserConfig(BaseSettings):
+    """Adaptive document parsing controls."""
+
+    mode: Literal["auto", "native", "ocr"] = "auto"
+    ocr_enabled: bool = True
+    ocr_provider: Literal["paddle"] = "paddle"
+    ocr_language: str = Field(default="ch", min_length=1, max_length=32)
+    ocr_device: str = Field(default="cpu", min_length=1, max_length=64)
+    ocr_model_source: Literal["BOS", "HUGGINGFACE"] = "BOS"
+    ocr_enable_mkldnn: bool = False
+    ocr_dpi: int = Field(default=200, ge=72, le=400)
+    ocr_min_native_text_chars: int = Field(default=30, ge=0, le=10_000)
+    ocr_min_printable_ratio: float = Field(default=0.65, ge=0.0, le=1.0)
+    ocr_max_pages: int = Field(default=600, ge=1, le=10_000)
+    layout_enabled: bool = True
+    table_extraction_enabled: bool = True
+    table_max_cells: int = Field(default=10_000, ge=1, le=1_000_000)
+    image_extraction_enabled: bool = True
+    image_max_per_page: int = Field(default=20, ge=0, le=1_000)
+    asset_persistence_enabled: bool = True
+    source_retention_enabled: bool = True
+    asset_storage_dir: str = "data/document-assets"
+    asset_dpi: int = Field(default=144, ge=72, le=300)
+    asset_max_per_document: int = Field(default=120, ge=0, le=2_000)
+    asset_max_total_mb: int = Field(default=512, ge=1, le=10_240)
+    asset_render_ocr_pages: bool = True
+    ocr_handwriting_confidence: float = Field(default=0.62, ge=0.0, le=1.0)
+    ocr_model_version: str = Field(default="PP-OCRv5", max_length=128)
+    table_model_version: str = Field(default="PP-StructureV3", max_length=128)
+    pipeline_version: int = Field(default=5, ge=1, le=1000)
+    model_config = SettingsConfigDict(env_prefix="PARSER_", extra="ignore")
+
+
+class VisualRetrievalConfig(BaseSettings):
+    """Optional vision captioning before text-vector retrieval."""
+
+    enabled: bool = False
+    provider: Literal["openai_compatible"] = "openai_compatible"
+    api_key: str = ""
+    base_url: Optional[str] = None
+    model: str = ""
+    detail: Literal["low", "high", "auto"] = "low"
+    max_assets_per_document: int = Field(default=24, ge=1, le=500)
+    max_asset_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=64 * 1024,
+        le=64 * 1024 * 1024,
+    )
+    max_tokens: int = Field(default=500, ge=64, le=4_000)
+    request_timeout_seconds: int = Field(default=60, ge=5, le=600)
+    prompt_version: str = Field(default="v1", min_length=1, max_length=64)
+    model_config = SettingsConfigDict(env_prefix="VISUAL_", extra="ignore")
 
 
 class RAPTORConfig(BaseSettings):
@@ -244,42 +308,6 @@ class AgentConfig(BaseSettings):
     max_tool_calls_total: int = Field(default=12, ge=1, le=100)
     stream_chunk_size: int = Field(default=512, ge=64, le=8192)
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
-
-
-class MCPConfig(BaseSettings):
-    mcp_config_path: str = Field(
-        default="",
-        description=(
-            "Optional legacy JSON config path. Prefer MCP_MCP_SERVERS_JSON "
-            "in the project-root .env."
-        ),
-    )
-    mcp_servers_json: str = Field(default="")
-    mcp_auto_discover: bool = Field(default=True)
-    mcp_tool_timeout: int = Field(default=30, ge=5)
-    mcp_max_response_bytes: int = Field(
-        default=1024 * 1024,
-        ge=64 * 1024,
-        le=100 * 1024 * 1024,
-    )
-    agent_tools_enabled: bool = Field(default=False)
-    agent_allowed_tools: str = Field(default="")
-    agent_allowed_servers: str = Field(default="")
-    model_config = SettingsConfigDict(env_prefix="MCP_", extra="ignore")
-
-    def allowed_agent_tools(self) -> set[str]:
-        return {
-            value.strip()
-            for value in self.agent_allowed_tools.split(",")
-            if value.strip()
-        }
-
-    def allowed_agent_servers(self) -> set[str]:
-        return {
-            value.strip()
-            for value in self.agent_allowed_servers.split(",")
-            if value.strip()
-        }
 
 
 class CacheConfig(BaseSettings):
@@ -357,10 +385,13 @@ class Settings(BaseSettings):
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
+    parser: ParserConfig = Field(default_factory=ParserConfig)
+    visual_retrieval: VisualRetrievalConfig = Field(
+        default_factory=VisualRetrievalConfig
+    )
     raptor: RAPTORConfig = Field(default_factory=RAPTORConfig)
     graphrag: GraphRAGConfig = Field(default_factory=GraphRAGConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
-    mcp: MCPConfig = Field(default_factory=MCPConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

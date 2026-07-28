@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useHistoryStore } from "@/store/history-store";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Modal } from "@/components/shared/modal";
@@ -27,27 +27,35 @@ export function HistoryPage() {
   const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const detailRequestGenerationRef = useRef(0);
 
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
 
   const toggleEntry = async (id: number) => {
+    const generation = detailRequestGenerationRef.current + 1;
+    detailRequestGenerationRef.current = generation;
     if (expandedId === id) {
       setExpandedId(null);
+      setDetailLoadingId(null);
       return;
     }
     setActionError(null);
     setDetailLoadingId(id);
     try {
       await loadEntry(id);
+      if (detailRequestGenerationRef.current !== generation) return;
       setExpandedId(id);
     } catch (error) {
+      if (detailRequestGenerationRef.current !== generation) return;
       setActionError(
         error instanceof Error ? error.message : "历史详情加载失败",
       );
     } finally {
-      setDetailLoadingId(null);
+      if (detailRequestGenerationRef.current === generation) {
+        setDetailLoadingId(null);
+      }
     }
   };
 
@@ -57,6 +65,7 @@ export function HistoryPage() {
     setActionError(null);
     try {
       await removeEntry(deleteTargetId);
+      detailRequestGenerationRef.current += 1;
       setDeleteTargetId(null);
       if (expandedId === deleteTargetId) setExpandedId(null);
     } catch (error) {
@@ -73,6 +82,7 @@ export function HistoryPage() {
     setActionError(null);
     try {
       await clearAll();
+      detailRequestGenerationRef.current += 1;
       setShowClearConfirm(false);
       setExpandedId(null);
     } catch (error) {

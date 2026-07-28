@@ -24,9 +24,9 @@ const ReportViewer = lazy(() =>
     default: module.ReportViewer,
   })),
 );
-const StreamingMarkdown = lazy(() =>
+const StreamingAnswerPanel = lazy(() =>
   import("@/components/research/streaming-markdown").then(
-    (module) => ({ default: module.StreamingMarkdown }),
+    (module) => ({ default: module.StreamingAnswerPanel }),
   ),
 );
 
@@ -88,13 +88,9 @@ export function ResearchPage() {
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
           <div className="xl:col-span-2 space-y-6">
             {/* 流式答案：逐字渲染，在报告完成前就给用户看到内容 */}
-            {session.streamingAnswer && (
-              <div className="rounded-xl border border-border bg-surface p-6">
-                <Suspense fallback={<LoadingSkeleton variant="text" count={4} />}>
-                  <StreamingMarkdown content={session.streamingAnswer} />
-                </Suspense>
-              </div>
-            )}
+            <Suspense fallback={<LoadingSkeleton variant="text" count={4} />}>
+              <StreamingAnswerPanel />
+            </Suspense>
             <div>
               <h4 className="mb-2 text-sm font-semibold">任务 DAG</h4>
               <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>

@@ -18,11 +18,14 @@ class CrossEncoderReranker:
         model_name: str | None = None,
         model_revision: str | None = None,
         max_candidates: int = 100,
+        device: str = "cpu",
     ):
         self.model_name = model_name
         self.model_revision = model_revision
         self.max_candidates = max(1, max_candidates)
+        self.device = device
         self._model = None
+        self._load_failed = False
         self._model_lock = threading.Lock()
         if model_name is None:
             logger.info("Reranker: no model configured — reranking disabled (results returned in original order)")
@@ -36,6 +39,8 @@ class CrossEncoderReranker:
         """Lazy-loaded CrossEncoder instance. Returns None if no model configured."""
         if self.model_name is None:
             return None
+        if self._load_failed:
+            return None
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
@@ -44,17 +49,25 @@ class CrossEncoderReranker:
                         self._model = CrossEncoder(
                             self.model_name,
                             revision=self.model_revision,
+                            device=self.device,
                         )
                         logger.info("Loaded CrossEncoder model '%s'.", self.model_name)
                     except ImportError:
-                        raise ImportError(
+                        self._load_failed = True
+                        logger.error(
                             "sentence-transformers is required for CrossEncoderReranker. "
                             "Install it with: pip install sentence-transformers"
                         )
+                        return None
                     except Exception:
+                        self._load_failed = True
                         logger.exception("Failed to load CrossEncoder model '%s'.", self.model_name)
-                        raise
+                        return None
         return self._model
+
+    def preload(self) -> bool:
+        """Load the model once and retain a failed state for this process."""
+        return self.model is not None
 
     # ------------------------------------------------------------------
     # Rerank

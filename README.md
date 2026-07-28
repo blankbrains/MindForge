@@ -1,6 +1,6 @@
 # MindForge — 自适应研究助理系统
 
-> **全栈 Multi-Agent RAG** · React 19 前端 · FastAPI 后端 · MCP 协议 · GraphRAG · SSE 流式
+> **全栈 Multi-Agent RAG** · React 19 前端 · FastAPI 后端 · GraphRAG · SSE 流式
 
 [![CI](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml/badge.svg)](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml)
 
@@ -12,7 +12,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 
 | 页面 | 功能 |
 |------|------|
-| 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / PostgreSQL / MCP）+ 快捷操作入口 |
+| 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / PostgreSQL）+ 快捷操作入口 |
 | 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
 | 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
 | 🕐 **研究历史** | 自动捕获研究结果、可展开预览、删除 / 清空管理 |
@@ -26,7 +26,9 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 | 🔍 **多源信息检索** | 同时检索内部知识库（Qdrant 向量库）和互联网实时信息 |
 | 🎯 **自适应检索策略** | 根据问题类型（事实/概念/比较/流程/分析/关系）自动选择最优检索策略 |
 | 🔄 **自我批评优化** | Critic Agent 从 5 个维度评分，低于阈值自动触发精炼循环 |
-| 🔌 **标准化工具接入** | 通过 MCP 协议动态发现和调用外部工具，支持热插拔 |
+| 🧱 **可靠索引流水线** | 解析、分块、批量 Embedding、向量校验、RAPTOR/GraphRAG 与失败回滚 |
+| 📄 **自适应文档解析** | 原生 PDF 文本优先、按页 OCR 兜底；保留块级阅读顺序、表格结构、图片资产、页码、坐标、置信度与来源方法 |
+| 🖼️ **可选视觉检索** | 图片与 OCR 页面预览可持久化；显式启用兼容视觉模型后，以事实描述进入既有文本检索链路 |
 | ⚡ **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，适配 OpenAI 与 DeepSeek 全系模型 |
 | 📡 **SSE 流式输出** | 实时推送 Agent 思考过程、工具调用、合成进度 |
 | 🎨 **React 19 前端** | 暗色模式、响应式布局、React Flow DAG 可视化、Recharts 雷达图 |
@@ -46,18 +48,15 @@ flowchart TD
         C2[🌐 WebSearch]
         C3[💻 CodeExecutor]
         C4[✅ CitationVerify]
-        C5[🔌 MCP Adapter]
     end
     C0 --> C1
     C0 --> C2
     C0 --> C3
     C0 --> C4
-    C0 --> C5
     C1 --> D1
     C2 --> D1
     C3 --> D1
     C4 --> D1
-    C5 --> D1
     subgraph D[📝 Synthesizer]
         D1[综合子任务结果] --> D2[生成结构化报告]
     end
@@ -81,10 +80,11 @@ flowchart TD
 | 🔎 **检索引擎** | Qdrant 向量库 + BM25 稀疏检索 + RRF 融合 + CrossEncoder 精排 |
 | 🏗️ **层次化检索** | RAPTOR Tree（自底向上摘要树） |
 | 🕸️ **图谱检索** | GraphRAG（跨文档实体关系发现） |
-| 🔌 **工具协议** | MCP（Model Context Protocol）— 标准化工具接入 |
+| 🧰 **Agent 工具** | 知识库检索 · Web 搜索 · 代码执行 · 引用支持检查 |
 | 🧩 **模型** | OpenAI GPT-4o / DeepSeek（deepseek-chat / deepseek-reasoner）一键切换 |
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
-| 🔤 **Embedding** | BGE-M3 (1024维) · 国内 hf-mirror 镜像 · hash fallback 兜底 |
+| 🔤 **Embedding** | BGE-M3 (1024维) 或 OpenAI；显式后端失败时拒绝写入不兼容向量 |
+| 📄 **文档解析** | pdfplumber + PaddleOCR 3；混合 PDF 按页处理，表格保留 Markdown + HTML + 单元格 JSON，图片与源文件具备生命周期管理 |
 | 🗄️ **数据库** | PostgreSQL 16 · SQLAlchemy ORM |
 | ⚡ **API** | FastAPI + SSE 流式 + Pydantic v2 + streaming answer_chunk |
 | 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
@@ -99,6 +99,8 @@ MindForge/
 ├── pyproject.toml                  # 后端依赖管理（Python）
 ├── docker-compose.yml              # Docker 编排（Qdrant + Redis + PostgreSQL）
 ├── Dockerfile                      # 容器构建
+├── migrations/                     # Alembic 数据库迁移
+├── benchmarks/parser/               # 私有解析基准清单（语料与结果不提交）
 ├── .env.example                    # 环境变量模板
 ├── .github/workflows/ci.yml        # CI（ruff + pytest + frontend + Compose）
 ├── docs/                           # 项目说明、踩坑记录、面试材料
@@ -145,9 +147,10 @@ MindForge/
 │   ├── config.py                   # 统一配置管理（Pydantic Settings）
 │   ├── db.py                       # 数据库层（SQLAlchemy + PostgreSQL）
 │   ├── ingestion/                  # 文档处理流水线
-│   │   ├── parsers.py              # 多格式解析（PDF/DOCX/HTML/MD/TXT）
-│   │   ├── chunker.py              # 文本分块（递归分割 + 语义分割）
-│   │   ├── embedder.py             # Embedding（SentenceTransformer / OpenAI / fallback）
+│   │   ├── parsers.py              # 自适应解析（原生 PDF/OCR/表格/图片元素）
+│   │   ├── chunker.py              # 文本、语义与结构化元素感知分块
+│   │   ├── embedder.py             # Embedding（SentenceTransformer / OpenAI）
+│   │   ├── visual.py               # 可选视觉描述与图像检索 Chunk
 │   │   └── raptor.py               # RAPTOR 层次化索引
 │   ├── retrieval/                  # 检索系统
 │   │   ├── vector_store.py         # Qdrant 向量库封装
@@ -164,8 +167,9 @@ MindForge/
 │   │   ├── synthesizer.py          # Synthesizer Agent（报告生成）
 │   │   └── orchestrator.py         # 编排器（多 Agent 调度 + SSE 事件）
 │   ├── memory/                     # 三层记忆系统
-│   ├── tools/                      # Agent 工具集（RAG/Web/Code/Citation/MCP）
-│   ├── mcp/                        # MCP 协议（Server + Client 双端）
+│   ├── tools/                      # Agent 工具集（RAG/Web/Code/Citation）
+│   ├── repositories/               # PostgreSQL 文档目录、任务与资产 Repository
+│   ├── services/                   # 健康监视、索引并发控制与资产生命周期
 │   ├── models/                     # LLM 适配器（OpenAI / DeepSeek）
 │   ├── observability/              # 追踪 & 指标（LangFuse + JSONL）
 │   └── api/                        # FastAPI 路由 + 静态文件托管
@@ -175,10 +179,11 @@ MindForge/
 │
 ├── tests/                          # Python 测试（pytest + pytest-cov）
 │   ├── test_retrieval.py           # 检索、Agent 与真实 API 回归测试
-│   ├── test_mcp_adapter.py         # MCP 适配器测试
+│   ├── test_regressions.py         # 已确认生产问题的回归测试
 │   └── test_models.py              # 模型适配器测试
 │
 ├── scripts/                        # CLI 辅助脚本
+│   └── benchmark_parser.py         # 私有解析语料的可重复基准运行器
 └── data/                           # 文档存放目录
 ```
 
@@ -231,7 +236,6 @@ npm run dev     # 开发模式 → http://localhost:5173
 - 后端通过 Pydantic Settings 读取 `.env`
 - Vite 通过 `envDir` 读取同一个 `.env`
 - Docker Compose 自动读取同一个 `.env`
-- MCP Client 通过 `MCP_MCP_SERVERS_JSON` 读取内联 JSON
 - QA 生成脚本通过 `QA_*` 参数读取模型、并发、批大小和输出目录
 
 `DATABASE_URL` 是后端启动必填项，必须与 `POSTGRES_USER`、`POSTGRES_PASSWORD`
@@ -241,6 +245,11 @@ npm run dev     # 开发模式 → http://localhost:5173
 `.env.example` 包含完整键集合，实际 `.env` 不提交到 Git。`pyproject.toml`、
 `package.json`、`docker-compose.yml`、Vite/TypeScript/ESLint 与 CI 文件是各工具
 必须识别的结构文件，不存放密钥或部署环境值。
+
+远程部署时不要用本地 `.env` 整文件覆盖服务器 `.env`。数据库端口、应用绑定
+地址、容器主机名、数据目录及 `APP_UID/APP_GID` 可能因环境不同而变化；应
+备份远端文件并按键合并新增配置，再执行 `docker compose config --quiet` 和
+就绪检查。
 
 ### 🚢 3. 生产部署（单端口）
 
@@ -259,69 +268,72 @@ MindForge；不要直接公开应用或基础设施端口。
 逐级启动和验证后，再使用 `.env` 中固定的 `1.18.3` 镜像；全新部署
 可直接使用该镜像。
 
-## 🔌 MCP 协议集成
+### ⚡ 4. 性能基线
 
-MindForge 实现了**双向 MCP**：既可以作为 MCP Client 调用外部工具，也可以作为 MCP Server 暴露自身能力。
+2026-07-28 使用同一份 28.96 MB、523 页、396,579 字符的 PDF，在服务器
+CPU 与 NVIDIA GPU GPU 容器中实测：
 
-### 📤 作为 MCP Server（给 MCP Host 使用）
+| 场景 | 优化前 | CPU 优化后 | GPU 当前结果 |
+|------|-------:|-----------:|---------------:|
+| 首次完整索引 | 302.38 秒 | 228.44-232.59 秒 | 13.09-13.99 秒 |
+| PDF 解析 | 约 71 秒（含上传/分块） | 3.25-3.42 秒 | 3.02-3.15 秒 |
+| BGE-M3 Embedding | 约 229.7 秒 | 222.89-226.30 秒 | 9.07-10.09 秒 |
+| 相同内容重复上传 | 再次完整索引 | 3.27-3.97 秒 | 解析后直接复用 |
+| 实际混合检索查询 | 未形成稳定基线 | 约 802 ms | 约 802 ms |
 
-在支持 MCP 协议的客户端（Claude Code、Cline、Cursor、Continue 等）的 `mcp.json` 中添加：
+大 PDF 使用可配置的多进程页解析；上传通过持久化异步任务返回任务 ID，并提供
+阶段、进度、取消和重启恢复。知识库页面不展示历史索引任务，也不轮询任务列表；
+上传弹窗先显示字节级文件传输进度，再切换到当前文件的服务端索引进度。文档 ID
+基于解析内容的 SHA-256，索引签名覆盖
+分块、Embedding、RAPTOR 和 GraphRAG 配置；只有 PostgreSQL、Qdrant 与 BM25
+三方记录完整一致时才复用已有索引。
 
-```json
-{
-  "mcpServers": {
-    "mindforge": {
-      "command": "python",
-      "args": ["-m", "mindforge.mcp.server"],
-      "env": {
-        "LLM_LLM_PROVIDER": "deepseek",
-        "LLM_DEEPSEEK_API_KEY": "sk-xxx"
-      }
-    }
-  }
-}
+目标环境未使用 NVIDIA Container Toolkit，但已通过显式映射 NVIDIA 设备节点和
+宿主机驱动库完成容器 GPU 直通。生产容器运行 `torch==2.13.0+cu130`，
+`torch.cuda.is_available()` 为 `True`，BGE-M3 使用 `cuda`、batch size 32。
+当前默认 `auto` 策略完整索引较 CPU 优化结果缩短约 94%。Reranker 固定 revision
+未缓存且容器无外网，启动预加载失败后会熔断；向量 + BM25 + RRF 检索继续工作，
+当前不能声称 CrossEncoder 精排已启用。
+
+### 📄 5. 解析资产与视觉检索
+
+上传文档会以持久化索引任务处理，解析过程在分页、OCR 和表格识别边界检查取消
+请求，并记录阶段、页级耗时、OCR 页数和预计剩余时间。识别到的图片、OCR 页面
+预览、原始文件和表格结构会保存到 `PARSER_ASSET_STORAGE_DIR`，并在任务失败、
+取消或文档删除时一并清理。
+
+原生和 OCR 表格同时保留 Markdown、HTML 与规范化单元格 JSON。大型结构数据不
+重复写入 Qdrant/BM25 Chunk 元数据，原生文本会排除已识别的表格区域，避免同一
+表格被索引两次。公式候选、嵌入视觉内容和低 OCR 置信度页面会带有路由标记，
+用于人工复核，不会被伪装成已可靠理解的内容。
+
+视觉检索默认关闭。仅在 `.env` 中同时配置 `VISUAL_ENABLED=true`、
+`VISUAL_MODEL` 和 `VISUAL_API_KEY` 后，系统才会把持久化图像发送到兼容的视觉
+端点，生成事实描述并使用现有文本 Embedding 检索。关闭或配置不完整时不会发送
+任何图像，也不会生成视觉 Chunk。
+
+`PARSER_PIPELINE_VERSION`、OCR/表格模型版本、解析设置和非敏感视觉设置会进入
+索引签名；调整后必须重建索引。私有基准语料放在
+`benchmarks/parser/corpus/`，该目录及结果均由 Git 忽略：
+
+```bash
+python scripts/benchmark_parser.py --corpus <private-corpus> --output <result.json>
 ```
 
-HTTP 入口使用 JSON-RPC POST：
+## MCP 状态
 
-```text
-POST /api/v1/mcp
-Content-Type: application/json
-```
-
-暴露的工具：`search_knowledge_base` · `run_research_task` · `verify_citation` · `system_status`
-
-### 📥 作为 MCP Client（接入外部工具）
-
-在项目根目录 `.env` 的 `MCP_MCP_SERVERS_JSON` 中配置外部
-MCP Server。环境变量引用会在启动子进程时展开：
-
-```dotenv
-MCP_MCP_SERVERS_JSON={"mcpServers":{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]},"github":{"command":"npx","args":["-y","@github/github-mcp-server"],"env":{"GITHUB_TOKEN":"${GITHUB_TOKEN}"}}}}
-```
-
-MindForge 默认只读取项目根目录 `.env` 中的
-`MCP_MCP_SERVERS_JSON`。`MCP_MCP_CONFIG_PATH` 默认为空，仅在迁移旧部署
-时显式设置为旧 JSON 文件路径。
-
-外部 MCP 工具默认不会交给 Researcher Agent。需要启用时必须同时设置：
-
-```dotenv
-MCP_AGENT_TOOLS_ENABLED=true
-MCP_AGENT_ALLOWED_SERVERS=context7
-MCP_AGENT_ALLOWED_TOOLS=context7:resolve-library-id,context7:get-library-docs
-```
-
-只允许完成当前工作流所需的最小只读工具集合，不要把仓库写入、命令执行或
-凭证管理工具直接开放给模型。
+当前 Web 应用已停用 MCP：不暴露 `/api/v1/mcp`，启动阶段不读取或启动 MCP
+Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和测试已从
+当前 `main` 工作树移除；相关协议说明只保留在历史学习文档中。
+`pyproject.toml` 和 `.env.example` 不提供 MCP 启动入口或配置项。
 
 ## 🔄 CI/CD
 
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 代码风格 + import 顺序
-- **pytest + coverage** — 76 个单元与真实 API 回归测试
-- **前端质量门禁** — ESLint + TypeScript/Vite 生产构建
+- **pytest + coverage** — 129 个单元与真实 API 回归测试
+- **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验
 
@@ -332,6 +344,8 @@ GitHub Actions 自动运行：
 - [完整实现说明](docs/MindForge完整实现.md)
 - [真实问题与修复记录](docs/MindForge踩过的坑.md)
 - [面试题目与项目讲解](docs/MindForge面试题目.md)
+- [文档解析运维说明](docs/document-parsing-operations.md)
+- [解析管线实施方案](计划方案/解析管线完整性与多模态检索实施方案.md)
 - [前端方案与实施复盘](计划方案/MindForge前端方案.md)
 
 ## ✨ 技术亮点
@@ -342,10 +356,17 @@ GitHub Actions 自动运行：
 - **ReAct 工具循环** — Researcher Agent 遵循 Thought → Action → Observation 模式，逐步收集证据
 - **Self-Refine 精炼** — Critic 从完整性、准确性、深度、清晰度、引用质量 5 维度评分，不合格自动打回重写
 
-### 📡 MCP 双向协议
+### 🛡️ 可靠性与一致性
 
-- **Server 端** — 将 MindForge 的检索和研究能力暴露为 4 个标准 MCP 工具，支持 MCP 协议的客户端（Claude Code、Cline、Cursor 等）可直接调用
-- **Client 端** — Researcher Agent 可动态发现并调用外部 MCP Server（如 GitHub、Context7），支持热插拔
+- **索引一致性** — 空文档、向量数量或维度不匹配会直接失败并回滚，不再静默截断
+- **内容判重** — 稳定内容 ID + 索引签名避免重复 Embedding 和重复存储，复用前核对 Qdrant/BM25 完整性
+- **上传边界** — PDF 页数、解析字符数、DOCX 解压规模和 Chunk 数均由 `.env` 限制；超限返回明确 4xx
+- **文档目录** — `/stats` 与 `/documents` 从 PostgreSQL 聚合，不再全量扫描 Qdrant Chunk
+- **资产生命周期** — 源文件、图片裁剪与表格结构有受限路径、数据库记录和回滚/删除清理
+- **可取消解析** — 分页、OCR、表格和资产阶段协作取消，不留下部分向量或资产
+- **Embedding 隔离** — LLM 供应商与 Embedding 后端解耦，已有索引时拒绝直接切换向量空间
+- **缓存安全** — 情节记忆只复用完全相同且未过期的任务，不用模糊关键词跳过新研究
+- **引用检查** — 除编号存在性外，还保守检查声明与来源文本是否有词汇支持
 
 ### 🔍 自适应混合检索
 
@@ -358,16 +379,19 @@ GitHub Actions 自动运行：
 
 - **实时可视化** — React Flow 渲染 DAG 执行图，Recharts 雷达图展示 Critic 评分，Markdown 渲染报告
 - **暗色模式** — CSS 变量驱动，一键切换，自动跟随系统偏好
-- **SSE 流式渲染** — 后端事件逐条推送，前端实时更新 Agent 思考过程、工具调用、合成进度
+- **SSE 流式渲染** — 后端事件逐条推送；旧会话回调不会污染新任务，超时读取运行时设置
 - **响应式布局** — 桌面侧边栏 + 移动端底部导航，Tailwind CSS 断点适配
 
 ### 🔧 工程化
 
 - **TypeScript 严格模式** — `noUnusedLocals` + `noUnusedParameters` 全开，零类型错误
 - **Zustand 选择器模式** — 精准订阅，避免不必要的重渲染
+- **流式 Markdown 节流** — 增量答案按稳定间隔渲染，完成后再执行完整 Markdown 解析
 - **单端口应用** — 前端构建后由 FastAPI 直接托管；远程访问仍必须置于
   启用 TLS/HTTPS 和身份认证的反向代理之后
 - **CI/CD** — GitHub Actions 自动执行 Ruff、pytest、前端 lint/build 与 Compose 校验
+- **CPU/GPU 可复现镜像** — uv 分别锁定官方 CPU 与 CUDA 13.0 Torch wheel；Compose override 显式映射 GPU 设备和驱动库
+- **数据库演进** — Alembic 迁移已覆盖文档目录、异步任务、索引签名、解析指标和资产表
 
 ## 📄 许可证
 
@@ -380,10 +404,12 @@ GitHub Actions 自动运行：
 - [开发踩坑记录](docs/MindForge踩过的坑.md)
 - [完整实现说明](docs/MindForge完整实现.md)
 - [项目面试题目](docs/MindForge面试题目.md)
+- [文档解析运维说明](docs/document-parsing-operations.md)
+- [解析管线实施方案](计划方案/解析管线完整性与多模态检索实施方案.md)
 - [前端实施与演进方案](计划方案/MindForge前端方案.md)
 
 ---
 
 <p align="center">
-  <sub>Built with ❤️ using React 19 · FastAPI · Qdrant · MCP</sub>
+  <sub>Built with React 19 · FastAPI · Qdrant · PostgreSQL</sub>
 </p>

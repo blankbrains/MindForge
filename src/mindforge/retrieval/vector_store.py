@@ -1,5 +1,6 @@
 """Qdrant vector-store adapter for the configured 1.18.x deployment."""
 from __future__ import annotations
+import asyncio
 from typing import List, Optional, Dict
 import logging
 
@@ -100,15 +101,45 @@ class QdrantStore:
         info = await self._async_client.get_collection(self.collection_name)
         return {"name": self.collection_name, "points": info.points_count, "status": info.status}
 
+    async def count(self, filters: Optional[Dict] = None) -> int:
+        result = await self._async_client.count(
+            collection_name=self.collection_name,
+            count_filter=self._build_filter(filters),
+            exact=True,
+        )
+        return int(result.count)
+
     async def ping(self) -> None:
         """Verify that the Qdrant service is reachable."""
         await self._async_client.get_collections()
+
+    def get_point_count(self) -> int:
+        """Return the current collection size without scanning payloads."""
+        collections = {
+            collection.name
+            for collection in self._sync_client.get_collections().collections
+        }
+        if self.collection_name not in collections:
+            return 0
+        info = self._sync_client.get_collection(self.collection_name)
+        return int(info.points_count or 0)
+
+    def close(self) -> None:
+        """Close both Qdrant client connection pools."""
+        self._sync_client.close()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._async_client.close())
+        else:
+            loop.create_task(self._async_client.close())
 
     async def scroll_all(
         self,
         filters: Optional[Dict] = None,
         *,
         with_vectors: bool = False,
+        payload_fields: list[str] | None = None,
         page_size: int = 256,
         max_records: int | None = None,
     ) -> list:
@@ -130,7 +161,11 @@ class QdrantStore:
                 scroll_filter=self._build_filter(filters),
                 limit=request_limit,
                 offset=offset,
-                with_payload=True,
+                with_payload=(
+                    payload_fields
+                    if payload_fields is not None
+                    else True
+                ),
                 with_vectors=with_vectors,
             )
             records.extend(page)
@@ -155,4 +190,7 @@ def get_vector_store() -> QdrantStore:
 def reset_vector_store() -> None:
     """Drop cached Qdrant clients after connection/configuration changes."""
     global _store
+    previous = _store
     _store = None
+    if previous is not None:
+        previous.close()

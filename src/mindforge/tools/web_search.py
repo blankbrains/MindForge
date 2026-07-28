@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any, Optional
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
+
+from bs4 import BeautifulSoup
 
 from mindforge.tools.base import BaseTool, ToolResult
 
@@ -17,6 +21,8 @@ try:
     import requests
 except ImportError:
     requests = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 
 class WebSearchTool(BaseTool):
@@ -86,14 +92,11 @@ class WebSearchTool(BaseTool):
         include_domains: Optional[list[str]] = None,
     ) -> Optional[ToolResult]:
         """Execute search via Tavily. Returns None if unavailable."""
-        if TavilyClient is None:
-            return None
-
-        api_key = self._tavily_api_key
-        if not api_key:
-            return None
-
-        client = self._tavily_client or TavilyClient(api_key=api_key)
+        client = self._tavily_client
+        if client is None:
+            if TavilyClient is None or not self._tavily_api_key:
+                return None
+            client = TavilyClient(api_key=self._tavily_api_key)
 
         params: dict[str, Any] = {
             "query": query,
@@ -239,41 +242,90 @@ class WebSearchTool(BaseTool):
     def _parse_ddg_html(
         self, html: str, max_results: int
     ) -> list[dict[str, str]]:
-        """Minimal HTML parser for DuckDuckGo search results."""
+        """Parse DuckDuckGo HTML results, including redirect URLs."""
         results: list[dict[str, str]] = []
-        # Naive extraction: look for <a rel="nofollow" class="result__a" ...>
-        # In a production system, use BeautifulSoup or lxml.
-        import re
-
-        # Find result blocks — matched by the result__body class
-        blocks = re.split(r'<div[^>]*class="[^"]*result__body[^"]*"[^>]*>', html)
-        # Skip the first split (everything before the first result)
-        for block in blocks[1:]:
+        soup = BeautifulSoup(html, "html.parser")
+        for block in soup.select(".result__body"):
             if len(results) >= max_results:
                 break
 
-            title_match = re.search(
-                r'<a[^>]*class="result__a"[^>]*>(.*?)</a>', block, re.DOTALL
+            title_node = block.select_one("a.result__a")
+            if title_node is None:
+                continue
+            url = self._normalise_ddg_url(
+                str(title_node.get("href", ""))
             )
-            url_match = re.search(r'<a[^>]*href="(https?://[^"]+)"', block)
-            snippet_match = re.search(
-                r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', block, re.DOTALL
+            if not url:
+                continue
+            snippet_node = block.select_one(".result__snippet")
+            results.append(
+                {
+                    "title": title_node.get_text(" ", strip=True),
+                    "url": url,
+                    "content": (
+                        snippet_node.get_text(" ", strip=True)
+                        if snippet_node is not None
+                        else ""
+                    ),
+                }
             )
-
-            if title_match and url_match:
-                results.append(
-                    {
-                        "title": re.sub(r"<[^>]+>", "", title_match.group(1)).strip(),
-                        "url": url_match.group(1),
-                        "content": (
-                            re.sub(r"<[^>]+>", "", snippet_match.group(1)).strip()
-                            if snippet_match
-                            else ""
-                        ),
-                    }
-                )
 
         return results
+
+    @staticmethod
+    def _normalise_ddg_url(href: str) -> str:
+        if not href:
+            return ""
+        absolute = urljoin("https://duckduckgo.com", href)
+        parsed = urlparse(absolute)
+        if parsed.hostname and parsed.hostname.endswith("duckduckgo.com"):
+            target = parse_qs(parsed.query).get("uddg", [""])[0]
+            if target:
+                absolute = unquote(target)
+                parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        return absolute
+
+    @staticmethod
+    def _validate_arguments(
+        query: Any,
+        max_results: Any,
+        search_depth: Any,
+        include_answer: Any,
+        include_domains: Any,
+    ) -> tuple[str, int, str, bool, Optional[list[str]]]:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("Query must be a non-empty string.")
+        if (
+            isinstance(max_results, bool)
+            or not isinstance(max_results, int)
+            or not 1 <= max_results <= 20
+        ):
+            raise ValueError("max_results must be an integer between 1 and 20.")
+        if search_depth not in {"basic", "advanced"}:
+            raise ValueError(
+                "search_depth must be either 'basic' or 'advanced'."
+            )
+        if not isinstance(include_answer, bool):
+            raise ValueError("include_answer must be a boolean.")
+        domains: Optional[list[str]] = None
+        if include_domains is not None:
+            if not isinstance(include_domains, list) or any(
+                not isinstance(domain, str) or not domain.strip()
+                for domain in include_domains
+            ):
+                raise ValueError(
+                    "include_domains must be a list of non-empty strings."
+                )
+            domains = [domain.strip() for domain in include_domains]
+        return (
+            query.strip(),
+            max_results,
+            search_depth,
+            include_answer,
+            domains,
+        )
 
     def _format_ddg_results(
         self, results: list[dict[str, str]], query: str
@@ -305,20 +357,42 @@ class WebSearchTool(BaseTool):
     ) -> ToolResult:
         start = time.perf_counter()
 
-        if not query or not query.strip():
+        try:
+            (
+                query,
+                max_results,
+                search_depth,
+                include_answer,
+                include_domains,
+            ) = self._validate_arguments(
+                query,
+                max_results,
+                search_depth,
+                include_answer,
+                include_domains,
+            )
+        except ValueError as exc:
             return ToolResult(
                 success=False,
-                error="Query must be a non-empty string.",
+                error=str(exc),
+                execution_time_ms=(time.perf_counter() - start) * 1000,
             )
 
         # 1. Try Tavily
-        result = self._search_tavily(
-            query=query,
-            max_results=max_results,
-            search_depth=search_depth,
-            include_answer=include_answer,
-            include_domains=include_domains,
-        )
+        try:
+            result = self._search_tavily(
+                query=query,
+                max_results=max_results,
+                search_depth=search_depth,
+                include_answer=include_answer,
+                include_domains=include_domains,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Tavily search failed; falling back to DuckDuckGo: %s",
+                type(exc).__name__,
+            )
+            result = None
         if result is not None:
             result.execution_time_ms = (time.perf_counter() - start) * 1000
             return result

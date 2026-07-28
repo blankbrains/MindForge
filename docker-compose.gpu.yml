@@ -1,0 +1,17 @@
+services:
+  mindforge:
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-gpu.lock
+    devices:
+      - "${GPU_DEVICE_0}:/dev/nvidia0"
+      - "${GPU_DEVICE_CTL}:/dev/nvidiactl"
+      - "${GPU_DEVICE_UVM}:/dev/nvidia-uvm"
+      - "${GPU_DEVICE_UVM_TOOLS}:/dev/nvidia-uvm-tools"
+    volumes:
+      - "${GPU_LIBCUDA_PATH}:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro"
+      - "${GPU_LIBNVIDIA_ML_PATH}:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro"
+    environment:
+      LLM_SENTENCE_TRANSFORMERS_DEVICE: cuda
+      LLM_EMBEDDING_BATCH_SIZE: ${GPU_EMBEDDING_BATCH_SIZE}
+      RETRIEVAL_RERANKER_DEVICE: cuda

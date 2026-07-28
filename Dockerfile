@@ -6,17 +6,33 @@ RUN npm ci
 COPY mindforge-web/ ./
 ARG VITE_API_TIMEOUT_MS=30000
 ARG VITE_RESEARCH_TIMEOUT_MS=900000
+ARG VITE_STREAM_MARKDOWN_INTERVAL_MS=350
 ENV VITE_API_TIMEOUT_MS=${VITE_API_TIMEOUT_MS} \
-    VITE_RESEARCH_TIMEOUT_MS=${VITE_RESEARCH_TIMEOUT_MS}
+    VITE_RESEARCH_TIMEOUT_MS=${VITE_RESEARCH_TIMEOUT_MS} \
+    VITE_STREAM_MARKDOWN_INTERVAL_MS=${VITE_STREAM_MARKDOWN_INTERVAL_MS}
 RUN npm run build
+
+
+FROM docker.m.daocloud.io/library/python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 AS python-builder
+
+WORKDIR /build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG REQUIREMENTS_FILE=requirements-cpu.lock
+COPY requirements*.lock ./
+RUN pip install \
+    --no-cache-dir \
+    --require-hashes \
+    --prefix=/install \
+    -r "${REQUIREMENTS_FILE}"
 
 
 FROM docker.m.daocloud.io/library/python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 AS runtime
 
 WORKDIR /app
-
-ARG APP_UID=1000
-ARG APP_GID=1000
 
 ENV PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
@@ -26,14 +42,20 @@ ENV PYTHONIOENCODING=utf-8 \
     PYTHONPATH=/app/src
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl build-essential \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.lock ./
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY --from=python-builder /install /usr/local
 COPY src/ src/
+COPY migrations/ migrations/
 
 COPY --from=frontend-builder /build/mindforge-web/dist /app/mindforge-web/dist
+
+ARG APP_UID=1000
+ARG APP_GID=1000
 
 RUN groupadd --gid "${APP_GID}" appuser \
     && useradd --create-home --uid "${APP_UID}" --gid "${APP_GID}" appuser \

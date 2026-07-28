@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
+import asyncio
 import logging
 
 from mindforge.retrieval.vector_store import QdrantStore
@@ -46,54 +47,67 @@ class HybridRetriever:
         """
         rankings: Dict[str, List[Dict[str, Any]]] = {}
 
-        # --- Path 1: Direct vector search ---
-        if self.vector_store is not None and self.embedding_fn is not None:
+        async def direct_vector() -> tuple[str, List[Dict[str, Any]]]:
             try:
                 dense_vec = await self.embedding_fn(query)
                 vector_hits = await self.vector_store.search(
                     vector=dense_vec, top_k=top_k
                 )
-                rankings["vector"] = [
-                    {
-                        **payload,
-                        "id": payload.get("chunk_id", ""),
-                        "text": payload.get("content", ""),
-                        "document_source": payload.get("source", ""),
-                        "score": float(score),
-                        "source": "vector",
-                    }
-                    for payload, score in vector_hits
-                    if payload.get("chunk_id")
-                ]
+                return (
+                    "vector",
+                    [
+                        {
+                            **payload,
+                            "id": payload.get("chunk_id", ""),
+                            "text": payload.get("content", ""),
+                            "document_source": payload.get("source", ""),
+                            "score": float(score),
+                            "source": "vector",
+                        }
+                        for payload, score in vector_hits
+                        if payload.get("chunk_id")
+                    ],
+                )
             except Exception:
                 logger.exception("Direct vector search failed.")
+                return "vector", []
 
-        # --- Path 2: Direct BM25 search ---
-        if self.bm25_retriever is not None:
+        async def direct_bm25() -> tuple[str, List[Dict[str, Any]]]:
             try:
-                bm25_hits = self.bm25_retriever.search(query=query, top_k=top_k)
-                rankings["bm25"] = [
-                    {
-                        **hit,
-                        "document_source": hit.get("source", ""),
-                        "source": "bm25",
-                    }
-                    for hit in bm25_hits
-                    if hit.get("id")
-                ]
+                bm25_hits = await asyncio.to_thread(
+                    self.bm25_retriever.search,
+                    query=query,
+                    top_k=top_k,
+                )
+                return (
+                    "bm25",
+                    [
+                        {
+                            **hit,
+                            "document_source": hit.get("source", ""),
+                            "source": "bm25",
+                        }
+                        for hit in bm25_hits
+                        if hit.get("id")
+                    ],
+                )
             except Exception:
                 logger.exception("Direct BM25 retrieval failed.")
+                return "bm25", []
 
-        # --- Path 3: HyDE (Hypothetical Document Embedding) ---
-        if use_hyde and self.llm_fn is not None:
+        async def hyde() -> tuple[str, List[Dict[str, Any]]]:
             try:
                 hyp_doc = await self._generate_hypothetic(query)
-                if hyp_doc and self.vector_store is not None and self.embedding_fn is not None:
-                    hyp_vec = await self.embedding_fn(hyp_doc)
-                    hyde_hits = await self.vector_store.search(
-                        vector=hyp_vec, top_k=top_k
-                    )
-                    rankings["hyde"] = [
+                if not hyp_doc:
+                    return "hyde", []
+                hyp_vec = await self.embedding_fn(hyp_doc)
+                hyde_hits = await self.vector_store.search(
+                    vector=hyp_vec,
+                    top_k=top_k,
+                )
+                return (
+                    "hyde",
+                    [
                         {
                             **payload,
                             "id": payload.get("chunk_id", ""),
@@ -104,18 +118,40 @@ class HybridRetriever:
                         }
                         for payload, score in hyde_hits
                         if payload.get("chunk_id")
-                    ]
+                    ],
+                )
             except Exception:
                 logger.exception("HyDE retrieval failed.")
+                return "hyde", []
 
-        # --- Path 4: Multi-Query BM25 ---
-        if use_multi_query and self.llm_fn is not None and self.bm25_retriever is not None:
+        async def multi_query_bm25() -> tuple[str, List[Dict[str, Any]]]:
             try:
                 multi_queries = await self._generate_multi_queries(query)
                 multi_query_hits: List[Dict[str, Any]] = []
-                for mq in multi_queries:
-                    bm25_hits = self.bm25_retriever.search(query=mq, top_k=top_k)
-                    for hit in bm25_hits:
+                query_limit = asyncio.Semaphore(3)
+
+                async def search_one(
+                    expanded_query: str,
+                ) -> List[Dict[str, Any]]:
+                    async with query_limit:
+                        return await asyncio.to_thread(
+                            self.bm25_retriever.search,
+                            query=expanded_query,
+                            top_k=top_k,
+                        )
+
+                search_results = await asyncio.gather(
+                    *[search_one(mq) for mq in multi_queries],
+                    return_exceptions=True,
+                )
+                for result in search_results:
+                    if isinstance(result, BaseException):
+                        logger.warning(
+                            "One multi-query BM25 search failed: %s",
+                            result,
+                        )
+                        continue
+                    for hit in result:
                         multi_query_hits.append(
                             {
                                 **hit,
@@ -123,9 +159,33 @@ class HybridRetriever:
                                 "source": "multi_query",
                             }
                         )
-                rankings["multi_query"] = multi_query_hits
+                return "multi_query", multi_query_hits
             except Exception:
                 logger.exception("Multi-query BM25 retrieval failed.")
+                return "multi_query", []
+
+        path_tasks = []
+        if self.vector_store is not None and self.embedding_fn is not None:
+            path_tasks.append(direct_vector())
+        if self.bm25_retriever is not None:
+            path_tasks.append(direct_bm25())
+        if (
+            use_hyde
+            and self.llm_fn is not None
+            and self.vector_store is not None
+            and self.embedding_fn is not None
+        ):
+            path_tasks.append(hyde())
+        if (
+            use_multi_query
+            and self.llm_fn is not None
+            and self.bm25_retriever is not None
+        ):
+            path_tasks.append(multi_query_bm25())
+
+        for ranking_name, results in await asyncio.gather(*path_tasks):
+            if results:
+                rankings[ranking_name] = results
 
         # --- Fuse with weighted RRF ---
         fused = self._rrf_fuse(

@@ -6,6 +6,7 @@ Defines request / response models used by all API endpoints.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -69,6 +70,27 @@ class IndexResponse(BaseModel):
     filename: str
     chunk_count: int
     status: str = "indexed"
+
+
+class IndexJobResponse(BaseModel):
+    """Persistent state for an asynchronous indexing operation."""
+
+    job_id: str
+    doc_id: str | None = None
+    filename: str
+    status: str
+    stage: str
+    progress: float = Field(ge=0.0, le=100.0)
+    chunk_count: int = 0
+    timings: dict[str, float] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    cancel_requested: bool = False
+    strategy: Literal["auto", "fixed", "semantic"] = "auto"
+    use_raptor: bool = False
+    use_graphrag: bool = False
+    created_at: datetime
+    updated_at: datetime
 
 
 class DocumentItem(BaseModel):
@@ -188,5 +210,3 @@ class HealthResponse(BaseModel):
     qdrant_connected: bool = False
     redis_connected: bool = False
     postgres_connected: bool = False
-    mcp_configured: bool = False
-    mcp_tools_available: bool = False

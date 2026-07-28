@@ -1,6 +1,15 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useSettingsStore, type LLMProvider } from "@/store/settings-store";
-import { Save, RotateCcw, Trash2, CheckCircle2, Eye, EyeOff } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  Loader2,
+  RotateCcw,
+  Save,
+  Trash2,
+} from "lucide-react";
 
 type TabId = "llm" | "retrieval" | "agent";
 
@@ -16,7 +25,12 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const saveSettings = useSettingsStore((s) => s.saveSettings);
   const loadSettings = useSettingsStore((s) => s.loadSettings);
-  useEffect(() => { loadSettings(); }, [loadSettings]);
+  const resetConfigDefaults = useSettingsStore(
+    (s) => s.resetConfigDefaults,
+  );
+  const loaded = useSettingsStore((s) => s.loaded);
+  const loadError = useSettingsStore((s) => s.loadError);
+  const saveError = useSettingsStore((s) => s.saveError);
 
   const handleSave = async () => {
     setSaving(true);
@@ -27,17 +41,55 @@ export function SettingsPage() {
   };
 
   const handleReset = () => {
-    const s = useSettingsStore.getState();
-    s.setLLMProvider("deepseek");
-    s.clearLLMApiKey();
-    s.setRetrievalTopK(20);
-    s.setRerankTopK(6);
-    s.setMaxIterations(3);
-    s.setMaxRefineRounds(1);
-    s.setCriticThreshold(7.0);
-    s.setSubtaskTimeout(30);
-    s.setResearchTimeout(180);
+    resetConfigDefaults();
   };
+
+  if (!loaded) {
+    return (
+      <div
+        className="flex min-h-64 items-center justify-center text-text-muted"
+        role="status"
+        aria-live="polite"
+      >
+        <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+        <span className="ml-3 text-sm">正在加载系统配置</span>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="mx-auto max-w-3xl">
+        <div
+          className="rounded-lg border border-red-200 bg-red-50 p-6 dark:border-red-800 dark:bg-red-950"
+          role="alert"
+        >
+          <div className="flex items-start gap-3">
+            <AlertCircle
+              className="mt-0.5 h-5 w-5 shrink-0 text-red-600"
+              aria-hidden="true"
+            />
+            <div>
+              <h1 className="font-semibold text-red-800 dark:text-red-200">
+                系统配置加载失败
+              </h1>
+              <p className="mt-1 text-sm text-red-700 dark:text-red-300">
+                {loadError}
+              </p>
+              <button
+                type="button"
+                onClick={() => void loadSettings()}
+                className="mt-4 inline-flex items-center gap-2 rounded-md border border-red-300 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-700 dark:text-red-200 dark:hover:bg-red-900"
+              >
+                <RotateCcw className="h-4 w-4" aria-hidden="true" />
+                重新加载
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -51,10 +103,19 @@ export function SettingsPage() {
             <RotateCcw className="h-4 w-4" aria-hidden="true" />重置
           </button>
           <button type="button" onClick={handleSave} disabled={saving} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-dark transition-colors disabled:opacity-50">
-            <Save className="h-4 w-4" aria-hidden="true" />{saving ? "保存中…" : saved ? "已保存 ✓" : "保存配置"}
+            <Save className="h-4 w-4" aria-hidden="true" />{saving ? "保存中..." : saved ? "已保存" : "保存配置"}
           </button>
         </div>
       </div>
+
+      {saveError && (
+        <div
+          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+          role="alert"
+        >
+          {saveError}
+        </div>
+      )}
 
       <div className="flex gap-1 rounded-xl border border-border bg-surface-alt p-1" role="tablist" aria-label="设置分类">
         {tabs.map(({ id, label }) => (
@@ -135,8 +196,8 @@ function LLMTab() {
 
         {hasLLMKey && !editing ? (
           <div className="flex items-center gap-2">
-            <div className="flex-1 rounded-lg border border-green-200 bg-green-50/50 px-3 py-2 text-sm font-mono text-text-muted dark:border-green-800 dark:bg-green-950/30">
-              {apiKey || "(已保存，脱敏显示)"}
+            <div className="flex-1 rounded-lg border border-green-200 bg-green-50/50 px-3 py-2 text-sm text-text-muted dark:border-green-800 dark:bg-green-950/30">
+              {apiKey || "********"}
             </div>
             <button type="button" onClick={startEdit}
               className="rounded-lg border border-border px-3 py-2 text-sm hover:bg-surface-alt transition-colors">
@@ -155,7 +216,7 @@ function LLMTab() {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="sk-..."
-                className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 pr-10 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:outline-none"
+                className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 pr-10 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none"
               />
               <button type="button"
                 onClick={() => setShowKey(!showKey)}
@@ -174,7 +235,7 @@ function LLMTab() {
         )}
         <p className="mt-1 text-xs text-text-muted">
           {hasLLMKey && !editing
-            ? "API Key 已保存。出于安全考虑，完整 Key 不会回显。点击「修改」可更换，点击垃圾桶可删除。"
+            ? "API Key 已保存。完整 Key 不会回显，可使用修改或删除按钮进行管理。"
             : "请输入 API Key。若留空则降级为文档检索模式。"}
         </p>
         {deleteError && (

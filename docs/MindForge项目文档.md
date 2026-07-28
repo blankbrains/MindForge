@@ -2,7 +2,7 @@
 
 > **自适应研究助理系统** · Multi-Agent RAG · 全栈架构详解
 >
-> **同步基线：2026-07-27。** 本文按当前 `main` 分支校正；运行参数以根目录 `.env.example` 为完整键清单，实际行为以源代码和自动化测试为准。
+> **同步基线：2026-07-28。** 本文按当前 `main` 分支和自动化测试结果校正；运行参数以根目录 `.env.example` 为完整键清单，实际行为以源代码和自动化测试为准。
 
 ---
 
@@ -12,7 +12,10 @@ MindForge 是一个基于 **Multi-Agent 架构**的自适应研究助理系统�
 
 传统搜索引擎返回链接列表，用户需要手动浏览和整合；纯 LLM 受限于训练数据截止日期，且存在幻觉问题。MindForge 通过多 Agent 协同 + RAG（检索增强生成）技术，实现从"问题输入"到"结构化报告输出"的端到端自动化。
 
-项目采用 **双分支管理**：`main` 分支是全栈 Web 平台（包含 React 前端和 FastAPI 后端），`mcp-server` 分支是纯 MCP 后端（不包含前端和 API 层），两个分支共享约 80% 的核心代码（Agent、检索、MCP、模型等模块）。
+当前交付目标是 `main` 分支的全栈 Web 平台。历史 `mcp-server` 分支不属于
+当前交付范围；旧 MCP 源码、脚本和测试已从 `main` 工作树移除，只在学习文档
+中保留协议说明。应用不暴露 `/api/v1/mcp`，启动阶段不加载 MCP，
+Researcher 也不注册 MCP 工具。
 
 ---
 
@@ -70,7 +73,7 @@ Researcher 使用 **ReAct 循环**（Thought → Action → Observation）来执
 - **Action**：调用一个具体工具（RAGTool、WebSearch、CodeExecutor 等）。
 - **Observation**：接收工具返回的结果，更新状态，进入下一轮 Thought。
 
-ReAct 模式的优势在于让 Agent 可以逐步收集信息、自我纠错、调整策略。当信息足够时，Agent 给出最终答案并结束循环。为了防止无限循环，设置了 `max_iterations` 上限（默认为 5 步）。
+ReAct 模式的优势在于让 Agent 可以逐步收集信息、自我纠错、调整策略。当信息足够时，Agent 给出最终答案并结束循环。为了防止无限循环，设置了 `max_iterations` 上限（默认为 3 步）。
 
 #### 3.1.4 Synthesizer Agent（综合器）
 
@@ -199,7 +202,9 @@ RAPTOR（Recursive Abstractive Processing for Tree-Organized Retrieval）是一�
 
 为什么 RAPTOR 对复杂问题效果好？传统平面索引的 Top-K 只能找到与查询最相似的几个局部片段，但复杂问题（如"分析微服务架构的优缺点"）需要跨多个段落甚至跨文档整合信息。RAPTOR 的摘要层从全局理解文档主题结构，可以从顶层检索到相关内容后再下钻到细节。
 
-实际效果：在 200+ 长文档测试集上，复杂理解类问题的召回率从 52% 提升至 87%（提升 35%）。
+当前仓库尚未包含可复现的 RAPTOR 专项评测集，因此不声明具体召回率提升。
+可验证的工程改进是：叶子节点复用上传阶段的批量 Embedding，摘要节点并发生成，
+并对节点数和向量维度设置边界。
 
 #### 3.2.8 GraphRAG 引擎（graphrag.py）
 
@@ -227,10 +232,21 @@ GraphRAG 与向量检索是**互补关系**：向量检索擅长找语义相似�
 
 支持 PDF、DOCX、HTML、Markdown、TXT 五种文档格式的解析。每种格式有不同的处理策略：
 
-- **PDF**：提取文本时注意保留段落结构（不断行），表格需要特殊处理。对于扫描件 PDF，需要 OCR 支持。
+- **PDF**：小文件串行解析；大文件默认使用 `spawn` 多进程按页范围解析，
+  worker 数、执行器和并行阈值均由 `.env` 配置，并保留线程回退。扫描件仍需要
+  额外 OCR 支持。
 - **DOCX**：提取带格式的 Word 文档内容，保留标题样式（用于后续的层次化索引）。
 - **HTML**：去除标签和样式，提取正文内容。
 - **Markdown / TXT**：直接提取纯文本。
+
+解析器通过 `.env` 对上传体积、PDF 页数、解析字符数、DOCX 解压规模和最终
+Chunk 数建立硬边界。超限属于客户端输入问题，API 返回带实际值和配置上限的
+4xx，而不是笼统的 500。当前默认 `API_MAX_PDF_PAGES=600`；测试覆盖一份
+523 页、约 28.96 MB 的 PDF 可生成 925 个 Chunk。
+
+解析完成后使用解析内容 SHA-256 生成稳定文档 ID，不再把任务临时文件名或
+mtime 纳入标识。索引签名覆盖分块、Embedding、RAPTOR 和 GraphRAG 配置；
+相同内容只有在 PostgreSQL、Qdrant 和 BM25 三方完整性一致时才复用。
 
 #### 3.3.2 文本分块（chunker.py）
 
@@ -253,7 +269,10 @@ BGE-M3 的特点：
 - 同时支持稠密向量和稀疏向量（与 BM25 互补）。
 - 在 MTEB 中文 Benchmark 上表现优异。
 
-为了保障可用性，还实现了**三层兜底策略**：首选 BGE-M3 → 如果不可用降级到 OpenAI Embedding → 如果仍然不可用使用 hash fallback（一种基于哈希的简易向量，保证服务不崩溃）。
+Embedding 后端由 `.env` 显式指定为 BGE 或 OpenAI。显式后端初始化失败时，
+索引会报错并停止，不再静默写入 hash 向量，因为不同向量空间混入同一
+Collection 会造成不可恢复的检索污染。仅在未指定 provider 的开发模式下保留
+hash fallback。
 
 #### 3.3.4 RAPTOR 索引构建（raptor.py）
 
@@ -271,60 +290,24 @@ Agent 检索内部知识库的主要工具。内部调用混合检索管线（�
 
 #### 3.4.2 WebSearch（web_search.py）
 
-允许 Agent 搜索互联网获取实时信息。内部封装 DuckDuckGo 等搜索引擎 API，返回搜索结果列表。当内部知识库信息不足时，Agent 可以自动调用 WebSearch 补充。
+允许 Agent 搜索互联网获取实时信息。配置 `TAVILY_API_KEY` 时优先使用 `tavily-python`，未配置或 Tavily 请求失败时回退到 DuckDuckGo HTML。运行时会校验结果数、搜索深度和域名列表，并使用结构化 HTML 解析处理 DuckDuckGo 重定向链接。
 
 #### 3.4.3 CodeExecutor（code_executor.py）
 
-Agent 可以在沙箱环境中执行 Python 代码。适合需要计算或数据处理的场景（如"计算这些数据的平均值"）。代码在隔离环境中执行，有超时限制和资源限制，防止恶意代码或死循环。
+Agent 可以在隔离子进程中执行 Python 代码。沙箱限制 CPU、地址空间、代码/变量/输出体积，并通过静态 AST、导入白名单和审计 Hook 拒绝文件修改、进程、网络和动态库操作。`numpy`、`pandas` 等静态声明的白名单科学库会在审计 Hook 安装前完成可信初始化，之后用户代码仍不能新增动态库加载。
 
 #### 3.4.4 CitationVerifier（citation_verifier.py）
 
-负责验证引用准确性。计算生成文本中的声明与来源文本的 Embedding 余弦相似度，低于阈值则标记为"可疑引用"并触发重写。这是 MindForge 将幻觉引用率从约 15% 降至 3% 以下的关键工具。
+负责检查 `[N]` 引用编号、来源是否存在、来源是否为空，以及声明与来源标题/
+正文是否具备最低限度的词汇支持。它是保守的一致性检查器，不等同于事实核查器，
+也不声明未经基准验证的幻觉率指标。
 
-#### 3.4.5 MCPAdapter（mcp_adapter.py）
+#### 3.4.5 MCP 历史说明
 
-允许 Researcher Agent 调用外部 MCP Server 提供的工具（如 GitHub MCP、Context7 MCP）。MCPAdapter 将 MCP 工具包装为 Agent 的标准工具格式，通过 MCP Client 发现和调用。
-
----
-
-### 3.5 MCP 协议实现（mcp/）
-
-MCP（Model Context Protocol）是标准化的 Agent-工具通信协议。MindForge 实现了**双向 MCP**——既是 Server 又是 Client。
-
-#### 3.5.1 设计动机
-
-在 MCP 出现之前，每个 Agent 框架都有自己的工具调用标准，互相不兼容。外部工具的集成需要为每个框架写适配代码。MCP 类比于"Agent 世界的 USB 协议"——有了 MCP，任何 MCP Server 都可以被任何 MCP Client 发现和调用。
-
-#### 3.5.2 MCP Server（server.py）
-
-将 MindForge 的检索和研究能力暴露为 4 个标准 MCP 工具：
-- `search_knowledge_base`：检索内部知识库。
-- `run_research_task`：提交一个完整的研究任务并返回结果。
-- `verify_citation`：验证引用准确性。
-- `system_status`：查询系统当前状态。
-
-支持两种传输模式：
-- **stdio**：作为子进程运行，通过 stdin/stdout 传递 JSON-RPC 消息。适合本地部署。
-- **SSE**：通过 HTTP 端点暴露服务。适合远程部署。
-
-这样，支持 MCP 协议的客户端（Claude Code、Cline、Cursor 等）可以直接调用 MindForge 的检索和研究能力。
-
-#### 3.5.3 MCP Client（client.py）
-
-让 Researcher Agent 可以动态发现并调用外部 MCP Server 的工具。通过 `tools/list` 发现 Server 提供了哪些工具，通过 `tools/call` 调用工具。支持热插拔——新增 MCP Server 后无需重启 Agent 即可发现新工具。
-
-#### 3.5.4 注册中心（registry.py）
-
-管理所有已注册的 MCP Server 列表。Server 启动时注册，停止时注销。Researcher Agent 通过 Registry 获取可用工具列表。
-
-#### 3.5.5 JSON-RPC 通信
-
-MCP 基于 JSON-RPC 2.0 协议。消息格式：
-- **请求**：包含 `id`（唯一标识）、`method`（方法名）、`params`（参数）。
-- **响应**：包含 `id`（匹配请求）、`result`（成功结果）或 `error`（错误信息）。
-- **通知**：不包含 `id`，不需要响应。
-
-**⚠️ 曾踩过的坑**：早期版本使用 `id(params)`（Python 对象内存地址）作为请求 ID，并发请求时 ID 可能重复，导致响应串扰。修复：改用 `uuid.uuid4().hex[:8]` 生成唯一 ID。
+旧 `tools/mcp_adapter.py`、`src/mindforge/mcp/`、演示脚本和隔离测试已从当前
+`main` 工作树移除。JSON-RPC、stdio 子进程与工具发现说明仅保留在学习文档，
+不属于可导入模块或部署能力。若未来重新启用，必须作为独立方案重新完成权限、
+生命周期、并发、超时和端到端测试评审。
 
 ---
 
@@ -397,7 +380,7 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 
 ### 3.9 配置系统（config.py）
 
-使用 `pydantic-settings` 实现统一的配置管理，按功能拆分 15 个子配置类：
+使用 `pydantic-settings` 实现统一的配置管理，按功能拆分 14 个子配置类：
 
 | 配置类 | 前缀 | 说明 |
 |--------|------|------|
@@ -410,7 +393,6 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 | RAPTORConfig | `RAPTOR_` | 层级、节点上限和摘要并发 |
 | GraphRAGConfig | `GRAPH_` | 图谱开关、存储、实体和社区上限 |
 | AgentConfig | `AGENT_` | 迭代、工具调用、流式块和超时 |
-| MCPConfig | `MCP_` | 内联 Server JSON、白名单和响应上限 |
 | CacheConfig | `CACHE_` | Redis、TTL 和 Embedding 缓存 |
 | MemoryConfig | `MEMORY_` | 记忆容量、检索参数 |
 | ObservabilityConfig | `OBSERVABILITY_` | LangFuse、本地追踪和保留策略 |
@@ -429,13 +411,15 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 
 #### 3.10.1 REST 路由（routes.py）
 
-所有路由挂载在 `/api/v1` 前缀下，当前共 18 个路由方法：
+所有路由挂载在 `/api/v1` 前缀下，当前共 20 个路由方法：
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
 | `/query` | POST | 提交研究任务；`stream=true` 时返回 SSE |
 | `/index` | POST | 按服务器允许的本地路径建立索引 |
 | `/upload` | POST | 流式上传并建立向量、BM25、RAPTOR/GraphRAG 索引 |
+| `/index-jobs` | POST/GET | 创建持久化异步索引任务、列出任务 |
+| `/index-jobs/{job_id}` | GET/DELETE | 查询进度或请求取消任务 |
 | `/documents` | GET | 获取文档列表 |
 | `/documents/{doc_id}` | DELETE | 删除文档及关联索引 |
 | `/documents/{doc_id}/content` | GET | 按 Chunk 顺序获取完整文档内容 |
@@ -446,7 +430,6 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 | `/history` | GET/POST/DELETE | 历史分页、保存和清空 |
 | `/history/{history_id}` | GET | 按需获取完整报告 |
 | `/history/{entry_id}` | DELETE | 删除单条历史 |
-| `/mcp` | GET/POST | MCP 能力说明和 JSON-RPC 入口 |
 
 #### 3.10.2 SSE 流式端点
 
@@ -483,6 +466,7 @@ done             →  { type, result: AgentResult }
 - 用户配置（LLM 供应商、API Key 等加密存储）
 - 研究任务历史（问题、结果、执行时间）
 - 文档元数据（文件名、格式、上传时间、索引状态）
+- 持久化索引任务（阶段、进度、耗时、取消状态）和文档索引签名
 - 知识库统计信息
 
 ---
@@ -506,8 +490,8 @@ done             →  { type, result: AgentResult }
 #### 4.2.1 概览 Dashboard
 
 首页，展示系统关键状态：
-- Qdrant / Redis / MCP Server 的连接状态（健康/异常/未连接）。
-- 知识库统计（文档总数、索引 Chunk 数、向量库占用空间）。
+- Qdrant / Redis / PostgreSQL 的连接状态（健康/异常/未连接）。
+- 知识库统计（文档总数和索引 Chunk 数）。
 - 快捷操作入口（"发起新研究"、"上传文档"、"查看历史"）。
 
 设计思路：用户一进来就能快速了解系统"能用不能用"、"有多少知识储备"，而不是看到一个空白的欢迎页。
@@ -523,14 +507,14 @@ done             →  { type, result: AgentResult }
 #### 4.2.3 知识库页面
 
 文档管理界面：
-- 文档上传（支持拖拽上传，自动触发解析和索引）。
-- 文档列表（文件名、格式、上传时间、索引状态）。
+- 文档选择上传，自动触发解析和索引。
+- 文档列表（文件名、Chunk 数、索引状态）。
 - 文档删除（删除时自动清理对应的向量索引）。
-- RAPTOR 和 GraphRAG 索引状态显示。
+- 上传时可选择 RAPTOR 和 GraphRAG 增强索引。
 
 #### 4.2.4 研究历史页面
 
-自动捕获所有已完成（包括失败）的研究任务：
+自动保存成功完成的研究任务：
 - 任务列表（问题摘要、时间、执行时间、是否成功）。
 - 可展开预览（点击查看报告摘要）。
 - 删除 / 清空管理（历史上限由 `API_MAX_HISTORY_ENTRIES` 配置，默认 1000 条）。
@@ -538,9 +522,13 @@ done             →  { type, result: AgentResult }
 #### 4.2.5 系统配置页面
 
 允许用户动态调整配置，无需重启服务：
-- LLM 供应商切换（OpenAI / DeepSeek）、API Key 配置、模型选择。
-- 检索参数（Top-K、检索策略选择、RRF 参数）。
-- Agent 参数（最大迭代次数、精炼轮数、Temperature 等）。
+- LLM 供应商切换（OpenAI / DeepSeek）和 API Key 配置。
+- 向量召回 Top-K 与重排 Top-K。
+- Agent 最大迭代、精炼轮数、评判阈值和超时。
+
+LLM 供应商与 Embedding 后端相互独立。设置页不会随 LLM 切换自动修改
+Embedding；已有索引时后端拒绝直接切换 Embedding provider，必须先清空并重建
+知识库。
 
 ### 4.3 状态管理
 
@@ -589,19 +577,31 @@ done             →  { type, result: AgentResult }
 
 ### 5.3 Docker 部署
 
+本地和服务器使用同一套 `.env.example` 键，但实际值不一定相同。远程更新时
+不能直接用本地 `.env` 覆盖服务器文件，否则可能改变 PostgreSQL 主机端口、
+应用监听地址、容器数据目录或 `APP_UID/APP_GID`。正确流程是先备份远端
+`.env`，按键合并新增配置，再执行 `docker compose config --quiet`、重建目标
+服务并检查 `/api/v1/ready`。切换 UID/GID 时还要迁移应用数据卷和模型缓存
+所有权，并确认绑定挂载文件仍可由容器进程读取。
+
 `Dockerfile` 定义了容器的完整构建过程：
 - 第一阶段：Node.js 22 构建 React 静态资源。
-- 第二阶段：Python 3.11 slim 使用 `requirements.lock` 的哈希锁安装后端依赖。
+- 第二阶段：Python 3.11 slim 使用所选 requirements 哈希锁安装后端依赖。
+  CPU 使用 `requirements-cpu.lock`，GPU 使用 `requirements-gpu.lock`。
 - 运行阶段使用非 root 用户，并配置 `/api/v1/ready` 健康检查。
 
 `docker-compose.yml` 定义了四个服务：Qdrant、Redis、PostgreSQL、MindForge（可选，也可以单独使用宿主机运行）。
+GPU 部署叠加 `docker-compose.gpu.yml`。目标服务器未安装 NVIDIA Container
+Toolkit，因此 override 显式映射 `/dev/nvidia*` 设备节点以及宿主机
+`libcuda.so`、`libnvidia-ml.so`；部署前必须根据驱动版本在服务器 `.env`
+中配置真实库路径。
 
 ### 5.4 CI/CD
 
 GitHub Actions 自动运行：
 - **ruff check**：Python 代码风格检查（替代 flake8 + isort）。
-- **pytest + coverage**：76 项单元与回归测试（跳过带 `integration` 标记的外部依赖测试）。
-- **前端门禁**：ESLint、TypeScript 和 Vite 生产构建。
+- **pytest + coverage**：121 项单元与回归测试。
+- **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
 
@@ -614,18 +614,19 @@ GitHub Actions 自动运行：
 ### 6.1 为什么要两个分支
 
 - **main 分支**：全栈 Web 平台，包含 React 前端、FastAPI 后端、数据库。适合通过浏览器交互的用户。
-- **mcp-server 分支**：纯 MCP 后端，不包含前端和 API 层。适合将 MindForge 作为后台服务被 Claude Code、Cline 等 MCP Host 调用。
+- **mcp-server 分支**：历史实验分支，不属于当前 Web 应用交付与部署范围。
 
 ### 6.2 共享与差异
 
-两个分支共享约 80% 的核心代码（Agent 系统、检索系统、MCP 协议、模型适配器、记忆系统、可观测性），差异在于：
+历史上两个分支共享大部分 Agent、检索、模型和记忆代码，差异在于：
 - mcp-server 分支删除前端目录和 API 路由。
 - pyproject.toml 不包含 fastapi、uvicorn、sqlalchemy 等 Web 依赖。
 - README 是纯 MCP 版而非全栈版。
 
 ### 6.3 同步规则
 
-所有开发在 main 上进行，通过 cherry-pick 将共享代码的修复同步到 mcp-server。**严禁手动删除物理文件**——两个分支通过 git 提交历史自然隔离。
+当前只维护、测试和部署 `main`。历史 `mcp-server` 分支不作为运行事实，也不再
+要求把 `main` 修复同步过去；如未来恢复该分支，应先独立评估其依赖和安全边界。
 
 ---
 
@@ -633,20 +634,29 @@ GitHub Actions 自动运行：
 
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
-| Python 静态检查 | 通过 | `python -m ruff check src tests scripts` |
-| Python 测试 | 76 项通过 | `python -m pytest tests -m "not integration"` |
+| Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
+| Python 测试 | 121 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
+| 前端回归测试 | 16 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
-| 前端依赖审计 | 0 个已知漏洞 | `npm audit --audit-level=moderate` |
-| 配置完整性 | 176 个 `.env.example` 键 | Pydantic、Vite、Compose 和脚本共用根目录 `.env` |
+| 配置完整性 | 182 个 `.env.example` 键 | Pydantic、Vite、Compose 和脚本共用根目录 `.env` |
+| 523 页 CPU 首次索引 | 228.44-232.59 秒 | 925 Chunk，RAPTOR/GraphRAG 关闭 |
+| 523 页 GPU 首次索引 | 13.09-13.99 秒 | NVIDIA GPU，CUDA，batch size 32 |
+| 相同内容重复上传 | 3.27 秒 | 稳定内容 ID + 索引签名 + 三方完整性核验 |
+| 无 LLM Key 混合检索 | 约 802 ms | 向量 + BM25 + RRF，返回 5 个来源 |
+
+完整 Ruff 规则检查当前仍有 419 个历史告警，主要是 import 排序、旧式
+`Optional`、宽泛异常捕获和 `ClassVar` 标注；这不是本次 GPU/上传改动造成，
+但在清理前 GitHub Actions 的完整 Ruff 门禁不会通过。
 
 尚未在仓库中固化可复现的 NDCG、召回率、BLEU/Rouge-L 或幻觉率基准，因此不把历史估算值作为当前项目结论。
+当前 npm 镜像不支持审计接口，因此不声明 `npm audit` 为零漏洞。
 
 ---
 
 ## 八、项目演进方向
 
-1. **MCP 生态深度整合**：探索更多外部 MCP Server 的集成（GitHub、Slack、Jira 等），Agent 的能力边界将大幅扩展。
+1. **检索评测体系**：固化可重复运行的召回率、NDCG 和引用支持率基准。
 2. **端侧 Agent**：探索小模型在端侧运行 Agent 的可能性，降低对云端 API 的依赖。
 3. **持续学习**：强化记忆系统的学习能力，让 Agent 从历史交互中自动总结规则和最佳实践。
 4. **多模态支持**：扩展到图片理解（通过多模态 LLM）和其他非文本格式的检索。

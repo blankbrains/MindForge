@@ -5,6 +5,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
+class LLMConfigurationError(ValueError):
+    """Raised when an LLM provider cannot start from the current configuration."""
+
+
 @dataclass
 class ChatMessage:
     role: str

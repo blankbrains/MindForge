@@ -95,6 +95,63 @@ FORBIDDEN_FILE_API_NAMES: frozenset[str] = frozenset(
         "to_sql",
         "to_stata",
         "to_xml",
+        "listdir",
+        "scandir",
+        "walk",
+        "glob",
+        "iglob",
+        "iterdir",
+        "rglob",
+        "stat",
+        "lstat",
+        "readlink",
+        "remove",
+        "unlink",
+        "rename",
+        "replace",
+        "rmdir",
+        "mkdir",
+        "makedirs",
+        "removedirs",
+        "chdir",
+        "chmod",
+        "chown",
+        "truncate",
+        "link",
+        "symlink",
+        "system",
+        "popen",
+        "fork",
+        "forkpty",
+        "kill",
+        "killpg",
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "posix_spawn",
+        "posix_spawnp",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "ctypeslib",
+        "cdll",
+        "windll",
+        "oledll",
+        "pydll",
+        "CDLL",
+        "PyDLL",
+        "WinDLL",
+        "OleDLL",
     }
 )
 
@@ -312,6 +369,16 @@ class CodeExecutor(BaseTool):
                 error=f"Sandbox process failed: {exc}",
                 execution_time_ms=elapsed,
             )
+        except Exception as exc:
+            elapsed = (time.perf_counter() - start) * 1000
+            return ToolResult(
+                success=False,
+                error=(
+                    "Sandbox process failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                execution_time_ms=elapsed,
+            )
 
         elapsed = (time.perf_counter() - start) * 1000
         stdout = str(completed.get("stdout", ""))
@@ -458,6 +525,7 @@ class CodeExecutor(BaseTool):
                 "code": code,
                 "vars": variables,
                 "allowed_modules": self._settings.sandbox.allowed_modules,
+                "preload_modules": self._extract_preload_modules(code),
                 "cpu_seconds": max(1, timeout),
                 "memory_bytes": (
                     self._settings.sandbox.memory_mb * 1024 * 1024
@@ -488,6 +556,8 @@ class CodeExecutor(BaseTool):
                 "LC_ALL",
             }
         }
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
         with tempfile.TemporaryDirectory(
             prefix="exec-",
             dir=sandbox_base,
@@ -499,6 +569,7 @@ class CodeExecutor(BaseTool):
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 cwd=work_dir,
                 env=child_env,
             )
@@ -516,11 +587,34 @@ class CodeExecutor(BaseTool):
                 stderr.strip()
                 or f"sandbox exited with code {process.returncode}"
             )
+        if not stdout:
+            raise OSError("sandbox produced no JSON response")
         return json.loads(stdout)
+
+    def _extract_preload_modules(self, code: str) -> list[str]:
+        """Return statically declared allow-listed modules in import order."""
+        allowed_modules = set(self._settings.sandbox.allowed_modules)
+        modules: list[str] = []
+        tree = ast.parse(textwrap.dedent(code))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                candidates = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                candidates = [node.module]
+            else:
+                continue
+            for module_name in candidates:
+                if (
+                    module_name.split(".", 1)[0] in allowed_modules
+                    and module_name not in modules
+                ):
+                    modules.append(module_name)
+        return modules
 
 
 _SUBPROCESS_RUNNER = r"""
 import contextlib
+import importlib
 import io
 import json
 import os
@@ -547,6 +641,12 @@ trusted_read_roots = [
     os.path.realpath(path)
     for path in payload["trusted_read_roots"]
 ]
+
+# Import only modules that were statically declared and allow-listed by the
+# parent validator. Native dependencies initialize before the audit hook;
+# subsequent dynamic-library access from user code remains blocked.
+for module_name in payload["preload_modules"]:
+    importlib.import_module(module_name)
 
 def is_within_trusted_root(path):
     try:
@@ -584,10 +684,28 @@ def deny_unsafe_audit_event(event, args):
     elif event in {
         "os.system",
         "os.spawn",
+        "os.exec",
+        "os.posix_spawn",
+        "os.fork",
+        "os.forkpty",
+        "os.kill",
+        "os.remove",
+        "os.rename",
+        "os.rmdir",
+        "os.mkdir",
+        "os.chdir",
+        "os.chmod",
+        "os.chown",
+        "os.truncate",
+        "os.link",
+        "os.symlink",
         "subprocess.Popen",
         "socket.bind",
         "socket.connect",
         "socket.getaddrinfo",
+        "ctypes.dlopen",
+        "ctypes.dlsym",
+        "ctypes.dlsym/handle",
     }:
         raise PermissionError(f"sandbox operation denied: {event}")
 

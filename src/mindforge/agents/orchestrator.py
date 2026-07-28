@@ -16,7 +16,6 @@ from mindforge.tools.citation_verifier import CitationVerifier
 from mindforge.tools.code_executor import CodeExecutor
 from mindforge.tools.rag_tool import RAGTool
 from mindforge.tools.web_search import WebSearchTool
-from mindforge.tools.mcp_adapter import MCPToolAdapter
 from mindforge.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -27,9 +26,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 try:
-    from mindforge.memory import WorkingMemory, EpisodicMemory, SemanticMemory
+    from mindforge.memory import EpisodicMemory, SemanticMemory
 except ImportError:
-    WorkingMemory = None  # type: ignore[assignment,misc]
     EpisodicMemory = None  # type: ignore[assignment,misc]
     SemanticMemory = None  # type: ignore[assignment,misc]
 
@@ -61,7 +59,6 @@ class Orchestrator:
     researcher : ResearcherAgent, optional
     critic : CriticAgent, optional
     synthesizer : SynthesizerAgent, optional
-    working_memory : WorkingMemory, optional
     episodic_memory : EpisodicMemory, optional
     semantic_memory : SemanticMemory, optional
     tracer : Tracer, optional
@@ -73,7 +70,6 @@ class Orchestrator:
         researcher: Optional[ResearcherAgent] = None,
         critic: Optional[CriticAgent] = None,
         synthesizer: Optional[SynthesizerAgent] = None,
-        working_memory: Any = None,
         episodic_memory: Any = None,
         semantic_memory: Any = None,
         tracer: Any = None,
@@ -83,27 +79,30 @@ class Orchestrator:
         self._planner = planner or PlannerAgent()
 
         # Build default tool set for ResearcherAgent
-        _tools: list = [
+        _researcher_tools: list = [
             RAGTool(),
             WebSearchTool(),
             CodeExecutor(),
             CitationVerifier(),
         ]
-        if self._settings.mcp.agent_tools_enabled:
-            try:
-                _tools.append(MCPToolAdapter())
-            except Exception:
-                pass  # MCP not available — non-fatal
-        _researcher_tools = _tools
 
         self._researcher = researcher or ResearcherAgent(tools=_researcher_tools)
         self._critic = critic or CriticAgent()
         self._synthesizer = synthesizer or SynthesizerAgent()
 
-        self._working_memory = working_memory
         self._episodic_memory = episodic_memory
         self._semantic_memory = semantic_memory
         self._tracer = tracer
+
+    def close(self) -> None:
+        """Release resources owned by injected memory implementations."""
+        for memory in (
+            self._episodic_memory,
+            self._semantic_memory,
+        ):
+            close = getattr(memory, "close", None)
+            if callable(close):
+                close()
 
     # ------------------------------------------------------------------
     # Public API
@@ -126,12 +125,17 @@ class Orchestrator:
         if self._episodic_memory is not None:
             try:
                 cached = await self._episodic_memory.recall(task)
-                if cached is not None:
+                cached_output = (
+                    str(cached.get("output", "")).strip()
+                    if isinstance(cached, dict)
+                    else ""
+                )
+                if cached_output:
                     elapsed = (time.perf_counter() - start_time) * 1000
                     return AgentResult(
                         agent_name="orchestrator",
                         success=True,
-                        output=cached.get("output", ""),
+                        output=cached_output,
                         data={"from_cache": True, "pipeline": pipeline_log},
                         latency_ms=elapsed,
                     )
@@ -336,6 +340,39 @@ class Orchestrator:
             self._accumulate_usage(total_usage, draft_result, total_cost)
             pipeline_log["synthesize"] = {"status": "completed"}
 
+        if not draft_result.success or not draft_result.output.strip():
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            pipeline_log["synthesize"] = {
+                "status": "failed",
+                "reason": "empty_response",
+            }
+            return AgentResult(
+                agent_name="orchestrator",
+                success=False,
+                output=(
+                    "Research synthesis failed because the language model "
+                    "returned an empty response."
+                ),
+                data={
+                    "pipeline": pipeline_log,
+                    "plan": plan.to_dict(),
+                    "subtask_outputs": subtask_outputs,
+                    "sources": all_sources,
+                    "critic_score": None,
+                    "refine_rounds": 0,
+                },
+                metadata={
+                    "quality": 0.0,
+                    "cost": total_cost["usd"],
+                    "subtask_count": len(plan.subtasks),
+                    "refine_rounds": 0,
+                    "model": self._settings.llm.llm_provider,
+                },
+                token_usage=total_usage,
+                latency_ms=elapsed_ms,
+                cost_usd=total_cost["usd"],
+            )
+
         # ------------------------------------------------------------------
         # Step 4: Critic + refine loop
         # 简单查询（1 个子任务 + 输出较短）跳过 Critic 以提速
@@ -379,14 +416,29 @@ class Orchestrator:
                     break
 
                 # Refine: re-synthesize with critic feedback
-                current_draft = await self._synthesizer.synthesize(
+                refined_result = await self._synthesizer.synthesize(
                     task=task,
                     subtask_results=subtask_outputs,
                     all_sources=all_sources,
                     critic_feedback=critic_score,
                 )
-                self._accumulate_usage(total_usage, current_draft, total_cost)
-                current_draft = current_draft.output
+                self._accumulate_usage(
+                    total_usage,
+                    refined_result,
+                    total_cost,
+                )
+                if (
+                    not refined_result.success
+                    or not refined_result.output.strip()
+                ):
+                    pipeline_log["critic"] = {
+                        "rounds": refine_round + 1,
+                        "overall_score": critic_score.overall,
+                        "refined": False,
+                        "refinement_failed": True,
+                    }
+                    break
+                current_draft = refined_result.output
                 refine_count = refine_round + 1
 
             # The score shown to users must describe the final refined draft,
@@ -519,12 +571,17 @@ class Orchestrator:
         if self._episodic_memory is not None:
             try:
                 cached = await self._episodic_memory.recall(task)
-                if cached is not None:
+                cached_output = (
+                    str(cached.get("output", "")).strip()
+                    if isinstance(cached, dict)
+                    else ""
+                )
+                if cached_output:
                     elapsed = (time.perf_counter() - start_time) * 1000
                     result = AgentResult(
                         agent_name="orchestrator",
                         success=True,
-                        output=cached.get("output", ""),
+                        output=cached_output,
                         data={"from_cache": True},
                         latency_ms=elapsed,
                     )
@@ -673,10 +730,40 @@ class Orchestrator:
                 yield {"type": "answer_chunk", "content": chunk}
             draft_result = AgentResult(
                 agent_name="synthesizer",
-                success=True,
+                success=bool("".join(draft_chunks).strip()),
                 output="".join(draft_chunks),
             )
             yield {"type": "synthesizing", "status": "done"}
+
+        if not draft_result.success or not draft_result.output.strip():
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            result = AgentResult(
+                agent_name="orchestrator",
+                success=False,
+                output=(
+                    "Research synthesis failed because the language model "
+                    "returned an empty response."
+                ),
+                data={
+                    "plan": plan.to_dict(),
+                    "subtask_outputs": subtask_outputs,
+                    "sources": all_sources,
+                    "critic_score": None,
+                    "refine_rounds": 0,
+                },
+                metadata={
+                    "quality": 0.0,
+                    "cost": total_cost["usd"],
+                    "subtask_count": len(plan.subtasks),
+                    "refine_rounds": 0,
+                    "model": self._settings.llm.llm_provider,
+                },
+                token_usage=total_usage,
+                latency_ms=elapsed_ms,
+                cost_usd=total_cost["usd"],
+            )
+            yield {"type": "done", "result": result}
+            return
 
         # --- Step 4: Critic + refine ---
         current_draft = draft_result.output
@@ -719,14 +806,23 @@ class Orchestrator:
 
                 yield {"type": "refining", "round": refine_round + 1}
 
-                current_draft = await self._synthesizer.synthesize(
+                refined_result = await self._synthesizer.synthesize(
                     task=task,
                     subtask_results=subtask_outputs,
                     all_sources=all_sources,
                     critic_feedback=critic_score,
                 )
-                self._accumulate_usage(total_usage, current_draft, total_cost)
-                current_draft = current_draft.output
+                self._accumulate_usage(
+                    total_usage,
+                    refined_result,
+                    total_cost,
+                )
+                if (
+                    not refined_result.success
+                    or not refined_result.output.strip()
+                ):
+                    break
+                current_draft = refined_result.output
                 refine_count = refine_round + 1
 
             if refine_count > 0:

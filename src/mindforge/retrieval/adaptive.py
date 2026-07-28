@@ -2,6 +2,7 @@ from __future__ import annotations
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
+import asyncio
 import logging
 
 from mindforge.retrieval.hybrid import HybridRetriever
@@ -111,12 +112,22 @@ class AdaptiveRetriever:
         graph_engine=None,
         llm_fn=None,
         max_request_top_k: int = 50,
+        retrieval_top_k: int = 20,
+        rerank_top_k: int = 6,
     ):
         self.hybrid_retriever = hybrid_retriever
         self.reranker = reranker
         self.graph_engine = graph_engine
         self.llm_fn = llm_fn
         self.max_request_top_k = max(1, max_request_top_k)
+        self.retrieval_top_k = min(
+            max(1, retrieval_top_k),
+            self.max_request_top_k,
+        )
+        self.rerank_top_k = min(
+            max(1, rerank_top_k),
+            self.max_request_top_k,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -125,7 +136,7 @@ class AdaptiveRetriever:
     async def retrieve(
         self,
         query: str,
-        top_k: int = 10,
+        top_k: int | None = None,
         mode: Optional[QueryMode] = None,
     ) -> Dict[str, Any]:
         """Classify the query, select strategy, retrieve, rerank, and return.
@@ -143,12 +154,20 @@ class AdaptiveRetriever:
               - ``reasoning``: explanation of the strategy chosen
               - ``raw_results``: unreranked results per source (for debugging)
         """
-        if isinstance(top_k, bool) or not isinstance(top_k, int):
+        if top_k is None:
+            final_top_k = self.rerank_top_k
+        elif isinstance(top_k, bool) or not isinstance(top_k, int):
             raise ValueError("top_k must be an integer.")
-        if not 1 <= top_k <= self.max_request_top_k:
+        else:
+            final_top_k = top_k
+        if not 1 <= final_top_k <= self.max_request_top_k:
             raise ValueError(
                 f"top_k must be between 1 and {self.max_request_top_k}."
             )
+        candidate_top_k = min(
+            self.max_request_top_k,
+            max(self.retrieval_top_k, final_top_k * 2),
+        )
 
         # Step 1: Classify intent
         if mode is not None:
@@ -179,7 +198,7 @@ class AdaptiveRetriever:
                 use_multi_query=config.use_multi_query,
                 vector_weight=config.vector_weight,
                 bm25_weight=config.bm25_weight,
-                top_k=top_k * 2,
+                top_k=candidate_top_k,
             )
             all_results.extend(hybrid_results)
             raw_results["hybrid"] = hybrid_results
@@ -191,8 +210,8 @@ class AdaptiveRetriever:
             try:
                 graph_results = await self.graph_engine.query(
                     query=query,
-                    top_k_entities=top_k,
-                    top_k_communities=min(3, top_k),
+                    top_k_entities=candidate_top_k,
+                    top_k_communities=min(3, candidate_top_k),
                 )
                 all_results.extend(graph_results)
                 raw_results["graph"] = graph_results
@@ -202,18 +221,19 @@ class AdaptiveRetriever:
         # Step 4: Rerank
         if self.reranker is not None and all_results:
             try:
-                final_results = self.reranker.rerank(
+                final_results = await asyncio.to_thread(
+                    self.reranker.rerank,
                     query=query,
                     candidates=all_results,
-                    top_k=top_k,
+                    top_k=final_top_k,
                 )
             except Exception:
                 logger.exception("Reranking failed; falling back to fused order.")
                 all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-                final_results = all_results[:top_k]
+                final_results = all_results[:final_top_k]
         else:
             all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-            final_results = all_results[:top_k]
+            final_results = all_results[:final_top_k]
 
         # Step 5: Return structured output
         return {
