@@ -22,10 +22,12 @@ npm run dev
 ```
 
 默认地址由根目录 `.env` 中的 `VITE_DEV_HOST` 和 `VITE_DEV_PORT` 控制，`/api` 请求代理到 `VITE_API_PROXY_TARGET`。
+设置页从服务端读取运行时配置；浏览器只持久化非敏感参数和 Key 是否已配置的状态，完整 API Key 不写入 localStorage。
 
 ## 质量检查
 
 ```bash
+npm test
 npm run lint
 npm run build
 ```

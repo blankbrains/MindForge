@@ -9,6 +9,7 @@
 | [MindForge踩过的坑.md](MindForge踩过的坑.md) | 已复现问题、根因和修复方式 |
 | [MindForge面试题目.md](MindForge面试题目.md) | Python、Agent、RAG、MCP、部署等题目 |
 | [自适应文档解析管线.md](自适应文档解析管线.md) | PDF 原生文本、OCR、表格、图片元素和索引进度 |
+| [document-parsing-operations.md](document-parsing-operations.md) | 文档资产、视觉检索、版本治理和私有基准运维 |
 | [前端方案](../计划方案/MindForge前端方案.md) | 前端原方案、实际落地结果和后续约束 |
 
 ## 当前事实基线
@@ -18,16 +19,14 @@
 - PostgreSQL-only，不提供 SQLite 回退。
 - 根目录 `.env` 是运行和部署参数的唯一配置源。
 - `DATABASE_URL` 为后端启动必填项；应用不提供内置数据库连接串回退。
-- API 前缀为 `/api/v1`，当前包含 20 个 REST/SSE 路由。
+- API 前缀为 `/api/v1`，当前包含 22 个 REST/SSE 路由方法。
 - 当前 Web 应用已停用 MCP；旧源码、脚本和测试已移除，协议说明仅作历史学习参考。
 - 研究流支持 `answer_chunk` 增量事件，默认最多精炼 1 轮。
-- 当前本地基线包含 Ruff 致命错误检查、121 项 pytest、16 项前端回归测试、ESLint、构建和 Compose 校验。
-- 数据库通过 Alembic 迁移，当前迁移头为 `0004_document_index_signature`。
+- 当前验证基线包含 Ruff 致命错误检查、129 项 pytest、16 项前端回归测试、ESLint、构建和 Compose 校验。
+- 数据库通过 Alembic 迁移，当前迁移头为 `0005_document_assets`。
 - CPU 与 GPU 使用互斥依赖锁；服务器当前运行 `torch==2.13.0+cu130`，
   `torch.cuda.is_available()` 为 `True`，设备为 NVIDIA GPU。
-- PDF 默认最多 600 页；523 页实测文档生成 925 个 Chunk，首次完整索引
-  从 CPU 的 `228.44-232.59s` 降至 GPU 的 `<gpu-baseline>`；相同内容重复上传
-  仍需约 3 秒解析后复用。
+- PDF 默认最多 600 页；大文档使用有界并发解析、持久化索引任务和内容签名复用。
 - 目标环境没有 NVIDIA Container Toolkit，GPU Compose 通过显式映射设备节点和
   驱动库运行。Reranker 模型未缓存且容器无外网，启动熔断后使用
   向量 + BM25 + RRF，不声称 CrossEncoder 已启用。
@@ -35,5 +34,6 @@
   上传完成后只轮询当前索引任务。
 - PDF 解析使用自适应按页管线：原生文本优先，低质量页再使用 PaddleOCR；
   原生表格转 Markdown，OCR/表格/图片元素携带页码、坐标、置信度与来源方法。
+  资产、解析版本和页级指标会持久化；视觉描述检索默认关闭，显式配置后才会执行。
   `PARSER_*` 为完整运行配置，默认使用可访问的 Paddle BOS 模型源。
 - 生产部署使用 Docker Compose，FastAPI 单端口托管 API 与前端静态资源。

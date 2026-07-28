@@ -5350,7 +5350,7 @@ class HybridRetriever:
                        bm25_weight: float = 0.5,
                        top_k: int = 10):
 
-        # 1. 双通道检���
+        # 1. 双通道检索
         query_embedding = await self.embedder.embed(query)
         dense = await self.vector_store.search(query_embedding, top_k=top_k * 2)
         sparse = await self.bm25.search(query, top_k=top_k * 2)
@@ -5434,19 +5434,24 @@ async def full_pipeline(query):
 
 ---
 
-## 87. 5000+ 问答对测试集
+## 87. 项目评测现状与 QA 数据集设计
 
-**Q：** MindForge 自建了 5000+ 问答对测试集，都有什么类型？具体是什么样式？
+**Q：** MindForge 当前有哪些可复现评测？大规模 QA 数据集应该如何设计？
 
 **A：**
 
-### 数据规模
+当前仓库提供 `scripts/generate_qa_dataset.py` 生成私有 QA 语料，但不提交生成
+结果，也没有已验证的检索质量结论。现有可复现入口是私有 PDF 解析基准清单与
+解析回归测试。面试时不应声称已完成大规模 QA、NDCG、BLEU 或 ROUGE 评测；
+下面内容是生成器支持的语料设计和后续评测方法。
+
+### 设计示例（不代表当前仓库数据）
 
 ```
 总数据量：6000 条（6 个领域 × 每个领域 900~1500 条）
 模型：DeepSeek-chat（deepseek-chat）生成
 成本：通过 DeepSeek API 批量生成，成本极低
-生成器：scripts/generate_qa_dataset.py
+生成器：`scripts/generate_qa_dataset.py`，输出到被 Git 忽略的 `data/qa/`
 ```
 
 ### 6 大领域分布
@@ -5488,7 +5493,7 @@ async def full_pipeline(query):
 **A:** {答案内容}
 ```
 
-**实际数据示例：**
+**示例格式：**
 
 ```markdown
 ### Q4
@@ -5551,11 +5556,11 @@ QUESTION_TYPES = [
 5. 文件实时写入，中途中断不丢数据
 ```
 
-### 测试集的用途
+### 数据集建成后的用途
 
 ```
 ① 评估检索系统质量
-   用这 6000 条 QA 作为 query 去检索知识库
+   用已生成并完成标注的 QA 作为 query 去检索知识库
    看能否正确召回对应的文档块
    指标：Hit Rate、MRR、NDCG
 
@@ -5911,20 +5916,17 @@ FACTUAL（事实型）→ 只检层 0：
 
 ---
 
-## 90. 长文档测试集与召回率评测
+## 90. 长文档评测设计与召回率
 
-**Q：** 200+ 长文档测试集是什么样的？召回率从 52% 提升至 87% 你是怎么测的？
+**Q：** 长文档检索应如何设计评测？RAPTOR 的效果如何验证？
 
 **A：**
 
-### 项目记录的数据
+当前仓库没有公开的 200+ 长文档语料、人工标注相关块，也没有可复现的
+“52% 到 87%”召回率结果。项目只保留私有解析基准的清单，不把未固化的检索
+质量数字写成当前结论。
 
-```python
-# MindForge项目文档.md — 第 199 行
-"实际效果：在 200+ 长文档测试集上，复杂理解类问题的召回率从 52% 提升至 87%（提升 35%）。"
-```
-
-### 长文档测试集是什么样的？
+### 长文档评测集设计示例
 
 ```
 规模：200+ 篇长文档
@@ -5940,7 +5942,7 @@ FACTUAL（事实型）→ 只检层 0：
   - "Transformer 原理详解" 技术博客（5000 token）
 ```
 
-### 测试数据——复杂理解类问题
+### 标注数据——复杂理解类问题
 
 从这 200+ 篇长文档中，人工或 LLM 生成了**复杂理解类问题**：
 
@@ -5962,7 +5964,7 @@ FACTUAL（事实型）→ 只检层 0：
     → 跨多个文档的综合分析
 ```
 
-### 召回率怎么算的？
+### 召回率的计算方式
 
 ```python
 Recall = 检索命中的相关文档块数 / 总相关文档块数
@@ -6009,14 +6011,14 @@ async def evaluate_recall(retriever, test_set):
 baseline_recall = await evaluate_recall(baseline_retriever, test_set)
 raptor_recall = await evaluate_recall(raptor_retriever, test_set)
 
-print(f"Baseline（普通分块检索）: {baseline_recall:.1%}")   # 52%
-print(f"RAPTOR（层次化检索）:    {raptor_recall:.1%}")     # 87%
-print(f"提升: +{(raptor_recall - baseline_recall) * 100:.0f}%")  # +35%
+print(f"Baseline（普通分块检索）: {baseline_recall:.1%}")
+print(f"RAPTOR（层次化检索）:    {raptor_recall:.1%}")
+print(f"提升: +{(raptor_recall - baseline_recall) * 100:.1f}%")
 ```
 
-### 为什么从 52% → 87%？
+### 为什么 RAPTOR 可能提高复杂问题的召回？
 
-**对照组（Baseline）：普通平面分块检索（52%）**
+**对照组（Baseline）：普通平面分块检索**
 
 ```
 文档 → 512 token 分块 → 向量化 → 平铺在 Qdrant 里
@@ -6026,10 +6028,10 @@ print(f"提升: +{(raptor_recall - baseline_recall) * 100:.0f}%")  # +35%
   → 要找的块分散在文档各章节
   → 每个块和问题"语义相似度"都不够高
   → 有些块没被召回（因为长得不像问题本身）
-  → 召回率低：52%
+  → 可能遗漏分散在多个章节的相关块
 ```
 
-**实验组（RAPTOR 层次化检索）（87%）**
+**实验组（RAPTOR 层次化检索）**
 
 ```
 文档 → 分块 → 聚类 → 层 1 摘要 → 再聚类 → 层 2 摘要
@@ -6039,7 +6041,7 @@ print(f"提升: +{(raptor_recall - baseline_recall) * 100:.0f}%")  # +35%
   → RAPTOR 层 2 摘要："Python 从 threading 到 multiprocessing
     再到 asyncio 的演进过程…" 直接命中！
   → 同时层 0 的具体原文块也被召回
-  → 召回率大幅提升：87%
+  → 需要以同一语料、标注和参数的对照实验确认实际提升
 ```
 
 ### 提升的本质原因
@@ -6386,12 +6388,12 @@ ROUGE-L = 召回（Recall）为主
 | **适合场景** | 翻译质量评估 | 摘要质量评估 |
 | **MindForge 用途** | 评估 Agent 回答的准确度 | 评估 Agent 回答的覆盖度 |
 
-### 在 MindForge 中的用法
+### 在 MindForge 后续评测中的用法
 
 ```
-项目使用 BLEU/ROUGE-L 作为自动化评估的辅助指标：
+BLEU/ROUGE-L 可以作为未来自动化评估的辅助指标：
 
-用 6000 条 QA 测试集：
+在具备已标注 QA 测试集后：
   QA 中的答案 = 参考文本（Gold Standard）
   Agent 的回答 = 生成文本（Prediction）
 

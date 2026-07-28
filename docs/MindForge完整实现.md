@@ -103,11 +103,13 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │       └── routes/                              # TanStack Router 路由
 │
 ├── scripts/
+│   ├── benchmark_parser.py                      # 私有解析基准运行器
+│   ├── generate_qa_dataset.py                   # 私有 QA 语料生成器
 │   └── run_research.py                          # 快速启动演示
 │
 ├── src/mindforge/                               # Python 后端核心
 │   ├── __init__.py
-│   ├── config.py                                # 统一配置（14 子类 + Pydantic Settings）
+│   ├── config.py                                # 统一配置（16 子类 + Pydantic Settings）
 │   ├── db.py                                    # 🆕 数据库层（SQLAlchemy + PostgreSQL ONLY）
 │   │
 │   ├── ingestion/                               # 文档处理流水线
@@ -115,7 +117,8 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   │   ├── parsers.py                           # 多格式解析（PDF/DOCX/HTML/MD/TXT）
 │   │   ├── chunker.py                           # 递归分块 + 语义分块
 │   │   ├── embedder.py                          # 🆕 多后端 Embedding（ST/OpenAI/fallback）
-│   │   └── raptor.py                            # RAPTOR 层次化索引
+│   │   ├── raptor.py                            # RAPTOR 层次化索引
+│   │   └── visual.py                            # 默认关闭的视觉描述检索
 │   │
 │   ├── retrieval/                               # 检索系统
 │   │   ├── __init__.py
@@ -150,9 +153,13 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   │   └── citation_verifier.py                 # 引用验证
 │   │
 │   ├── repositories/                            # PostgreSQL 文档目录访问层
-│   │   └── documents.py
+│   │   ├── document_assets.py
+│   │   ├── documents.py
+│   │   └── index_jobs.py
 │   ├── services/                                # 后台健康监视与索引并发控制
+│   │   ├── document_assets.py
 │   │   ├── health.py
+│   │   ├── index_jobs.py
 │   │   └── indexing.py
 │   │
 │   ├── models/                                  # LLM 适配器
@@ -169,7 +176,7 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   └── api/                                     # FastAPI 服务层
 │       ├── __init__.py
 │       ├── server.py                            # 应用入口（生命周期 + 静态文件托管）
-│       ├── routes.py                            # REST + SSE 路由（20 个方法）
+│       ├── routes.py                            # REST + SSE 路由（22 个方法）
 │       └── schemas.py                           # Pydantic v2 请求/响应模型
 │
 ├── tests/                                       # 测试
@@ -6445,7 +6452,7 @@ def init_db():
 
 ### 13.1 统一配置与锁文件
 
-项目根目录 `.env` 是运行时和部署参数的唯一配置源，`.env.example` 提供完整键集合。Python 依赖由 `uv.lock` 解析，并生成带哈希的 `requirements.lock` / `requirements-dev.lock`；前端依赖由 `package-lock.json` 锁定。CPU 部署把 Torch 显式绑定到官方 CPU wheel 索引，避免间接依赖引入 CUDA/NVIDIA 运行库。
+项目根目录 `.env` 是运行时和部署参数的唯一配置源，`.env.example` 提供完整键集合。Python 依赖由 `uv.lock` 解析，并生成带哈希的默认、开发、CPU 和 GPU 锁文件；前端依赖由 `package-lock.json` 锁定。CPU 部署把 Torch 显式绑定到官方 CPU wheel 索引，避免间接依赖引入 CUDA/NVIDIA 运行库。
 
 ```bash
 cp .env.example .env
@@ -6467,14 +6474,14 @@ docker compose up -d --build
 docker compose up -d qdrant redis postgres
 ```
 
-当前服务器镜像基线为 Qdrant 1.18.3、Redis 7 Alpine、PostgreSQL 16 Alpine。已有 Qdrant 旧卷升级前必须备份并按官方支持路径逐级验证。
+镜像版本、端口、绑定地址和数据卷名称均由 `.env` 管理。已有数据卷变更前必须先备份，并按上游兼容性要求验证。
 
 ### 13.3 Dockerfile
 
 Dockerfile 使用三阶段构建：
 
 1. Node.js 22 Alpine 执行 `npm ci` 和 Vite 生产构建。
-2. Python Builder 使用 `requirements.lock` 的哈希锁安装后端依赖。
+2. Python Builder 使用 CPU 或 GPU 对应的哈希锁安装后端依赖。
 3. Python 3.11 slim Runtime 复制依赖、前端产物、迁移和源码，以非 root 用户运行。
 
 容器通过 `/api/v1/ready` 执行健康检查，FastAPI 在单端口同时托管 API 与前端静态资源。
@@ -6514,32 +6521,19 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-28 本地基线：Ruff 致命错误检查通过、121 项 pytest 通过、16 项
-Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整 Ruff 规则当前
-仍有 419 个历史告警，在清理前不能声明 CI 的完整 Ruff 门禁已通过。当前 npm
-镜像不支持审计接口，因此不声明 `npm audit` 为零漏洞。
+2026-07-28 验证基线：Ruff 致命错误检查通过、129 项 pytest 通过、16 项
+Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
+GitHub Actions 的实际运行结果为准。
 
-### 13.6 长文档性能实测
+### 13.6 长文档处理
 
-同一份 28,961,284 字节、523 页、396,579 字符、925 Chunk 的 PDF：
+大 PDF 使用有界并发的页级解析，并以持久化索引任务报告文件传输、解析、分块、
+Embedding 和写入进度。重复上传只在内容 ID、索引签名和 PostgreSQL、Qdrant、
+BM25 的完整性一致时复用；否则会完整重建。私有解析基准的语料和结果不提交，
+使用 `scripts/benchmark_parser.py` 在受控环境中验证。
 
-- 优化前同步完整索引：`302.38s`。
-- CPU 优化后完整索引：`228.44-232.59s`，提升约 `23.1%-24.5%`。
-- NVIDIA GPU 默认 `auto` 策略完整索引：`<gpu-baseline>`，较 CPU 优化结果
-  缩短约 `94%`。
-- PDF 多进程解析：`3.25-3.42s`。
-- BGE-M3 CPU Embedding：`<cpu-baseline>`，约占首次索引 97%。
-- BGE-M3 GPU Embedding：`9.07-10.09s`；独立同批数据基准最快 `5.509s`。
-- 相同内容和配置重复上传：`<reuse-duration>`，直接复用完整索引。
-
-重复上传并不是只比较文件名：解析内容生成稳定 SHA-256 文档 ID，索引配置生成
-独立签名，并核对 PostgreSQL、Qdrant、BM25 三方 Chunk 数。配置变化或任一索引
-不完整时会完整重建，避免错误命中缓存。
-
-前端不提供历史“索引任务”查看区，也不轮询任务列表。文件传输使用
-`XMLHttpRequest.upload.onprogress` 展示已上传字节百分比；服务器返回任务 ID
-后切换为单任务轮询，展示索引阶段、进度、Chunk 数、耗时和取消操作。完成或
-取消后刷新文档目录与统计。
+前端不展示历史索引任务，也不轮询任务列表。文件传输使用真实字节进度；服务器
+返回任务 ID 后只轮询当前任务，支持查看阶段、进度和取消。
 
 ---
 ## 第十四章：前端模块（React 19 SPA）
@@ -6577,7 +6571,7 @@ mindforge-web/
     ├── store/                    # Zustand 状态管理
     │   ├── research-store.ts     # 研究会话状态 (SSE handler)
     │   ├── history-store.ts      # 研究历史 (localStorage + API)
-    │   ├── settings-store.ts     # LLM/检索配置 (API Key 加密存储)
+    │   ├── settings-store.ts     # LLM/检索配置与脱敏 Key 状态
     │   └── ui-store.ts           # 主题/侧边栏
     │
     ├── hooks/                    # 自定义 Hooks

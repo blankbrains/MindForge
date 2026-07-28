@@ -97,7 +97,7 @@ Critic 是整个系统的**质量把关者**，从 5 个维度对 Synthesizer �
 | 清晰度 | 结构是否清晰，语言是否易懂 |
 | 引用质量 | 引用是否准确，来源是否可靠 |
 
-Critic 的评分驱动 **Self-Refine 精炼循环**：如果有任一维度低于 7.0 分，将评分反馈和具体改进意见传回 Synthesizer，要求其针对性改进。精炼最多进行 2 轮（防止无限循环）。
+Critic 的评分驱动 **Self-Refine 精炼循环**：如果有任一维度低于 7.0 分，将评分反馈和具体改进意见传回 Synthesizer，要求其针对性改进。默认最多进行 1 轮，设置接口允许在受限范围内调整。
 
 这个机制的本质是"让 AI 检查 AI 的输出"——通过多维度评分 + 迭代精炼，将输出质量提升约 18%（BLEU/Rouge-L 指标）。
 
@@ -380,7 +380,7 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 
 ### 3.9 配置系统（config.py）
 
-使用 `pydantic-settings` 实现统一的配置管理，按功能拆分 14 个子配置类：
+使用 `pydantic-settings` 实现统一的配置管理，按功能拆分 16 个子配置类：
 
 | 配置类 | 前缀 | 说明 |
 |--------|------|------|
@@ -390,6 +390,8 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 | VectorStoreConfig | `VECTOR_` | Qdrant 连接、Collection 参数 |
 | RetrievalConfig | `RETRIEVAL_` | Top-K、RRF 参数、策略选择 |
 | ChunkingConfig | `CHUNK_` | Chunk 大小、重叠和语义分块 |
+| ParserConfig | `PARSER_` | OCR、表格、资产、解析版本与边界 |
+| VisualRetrievalConfig | `VISUAL_` | 默认关闭的视觉描述检索 |
 | RAPTORConfig | `RAPTOR_` | 层级、节点上限和摘要并发 |
 | GraphRAGConfig | `GRAPH_` | 图谱开关、存储、实体和社区上限 |
 | AgentConfig | `AGENT_` | 迭代、工具调用、流式块和超时 |
@@ -411,7 +413,7 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 
 #### 3.10.1 REST 路由（routes.py）
 
-所有路由挂载在 `/api/v1` 前缀下，当前共 20 个路由方法：
+所有路由挂载在 `/api/v1` 前缀下，当前共 22 个路由方法：
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
@@ -422,6 +424,8 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 | `/index-jobs/{job_id}` | GET/DELETE | 查询进度或请求取消任务 |
 | `/documents` | GET | 获取文档列表 |
 | `/documents/{doc_id}` | DELETE | 删除文档及关联索引 |
+| `/documents/{doc_id}/assets` | GET | 列出持久化资产及可访问的视觉资产 URL |
+| `/documents/{doc_id}/assets/{asset_id}` | GET | 读取已登记的图片或页面预览，不暴露源文件路径 |
 | `/documents/{doc_id}/content` | GET | 按 Chunk 顺序获取完整文档内容 |
 | `/settings` | GET/PUT | 系统配置的读写 |
 | `/health` | GET | 服务健康检查 |
@@ -463,10 +467,10 @@ done             →  { type, result: AgentResult }
 提供；缺失时应用会生成并尝试持久化。
 
 主要存储的数据：
-- 用户配置（LLM 供应商、API Key 等加密存储）
+- API Key 的 Fernet 加密副本；根目录 `.env` 仍是重启后的运行时配置来源
 - 研究任务历史（问题、结果、执行时间）
 - 文档元数据（文件名、格式、上传时间、索引状态）
-- 持久化索引任务（阶段、进度、耗时、取消状态）和文档索引签名
+- 持久化索引任务（阶段、进度、耗时、取消状态）、文档索引签名和文档资产
 - 知识库统计信息
 
 ---
@@ -537,7 +541,7 @@ Embedding；已有索引时后端拒绝直接切换 Embedding provider，必须�
 - **research-store**：研究会话状态，管理 SSE 事件处理、子任务状态、当前报告内容。选择器模式确保只有关注该部分的组件会重渲染。
 - **ui-store**：UI 状态，包括主题（亮/暗/自动跟随系统）、侧边栏展开/折叠。
 - **history-store**：研究历史列表与详情缓存，服务端默认保留 1000 条。
-- **settings-store**：用户配置，持久化到 localStorage，页面刷新不丢失。
+- **settings-store**：持久化非敏感的界面与参数草稿；完整 API Key 不写入浏览器持久化存储。
 
 ### 4.4 SSE 流式渲染
 
@@ -600,7 +604,7 @@ Toolkit，因此 override 显式映射 `/dev/nvidia*` 设备节点以及宿主�
 
 GitHub Actions 自动运行：
 - **ruff check**：Python 代码风格检查（替代 flake8 + isort）。
-- **pytest + coverage**：121 项单元与回归测试。
+- **pytest + coverage**：129 项单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -635,19 +639,15 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 121 项通过 | `python -m pytest -q` |
+| Python 测试 | 129 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
 | 前端回归测试 | 16 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
-| 配置完整性 | 182 个 `.env.example` 键 | Pydantic、Vite、Compose 和脚本共用根目录 `.env` |
-| 523 页 CPU 首次索引 | 228.44-232.59 秒 | 925 Chunk，RAPTOR/GraphRAG 关闭 |
-| 523 页 GPU 首次索引 | 13.09-13.99 秒 | NVIDIA GPU，CUDA，batch size 32 |
-| 相同内容重复上传 | 3.27 秒 | 稳定内容 ID + 索引签名 + 三方完整性核验 |
-| 无 LLM Key 混合检索 | 约 802 ms | 向量 + BM25 + RRF，返回 5 个来源 |
+| 配置完整性 | 根目录 `.env` 为唯一运行时来源 | Pydantic、Vite、Compose 和脚本共用同一套键 |
+| 文档处理 | 页级解析、资产生命周期、取消与进度可追踪 | 回归测试与私有解析基准 |
+| 相同内容上传 | 仅在索引完整性一致时复用 | 内容 ID、索引签名与三方完整性核验 |
 
-完整 Ruff 规则检查当前仍有 419 个历史告警，主要是 import 排序、旧式
-`Optional`、宽泛异常捕获和 `ClassVar` 标注；这不是本次 GPU/上传改动造成，
-但在清理前 GitHub Actions 的完整 Ruff 门禁不会通过。
+代码质量门禁以 GitHub Actions 和仓库命令的实际输出为准，不在本文维护易过期的静态告警数量。
 
 尚未在仓库中固化可复现的 NDCG、召回率、BLEU/Rouge-L 或幻觉率基准，因此不把历史估算值作为当前项目结论。
 当前 npm 镜像不支持审计接口，因此不声明 `npm audit` 为零漏洞。
