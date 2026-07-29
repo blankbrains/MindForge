@@ -20,6 +20,7 @@ __pycache__/
 data/
 benchmarks/parser/corpus/
 benchmarks/parser/results/
+计划方案/
 .chromadb/
 .chroma/
 .embedding_cache/

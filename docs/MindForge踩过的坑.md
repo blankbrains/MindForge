@@ -643,9 +643,9 @@ BeautifulSoup 解析 DuckDuckGo。
 
 ### 52. 大 PDF 跨线程共享同一解析对象，错误被吞成空页
 
-**修复**：先改为每个 worker 独立打开 PDF 并处理连续页范围，再用真实 523 页
-文件比较线程与 `spawn` 进程。8 线程为 `<thread-baseline>`，12 进程为 `<process-baseline>`，
-最终默认多进程并保留线程回退；单页失败记录具体页码。
+**修复**：先改为每个 worker 独立打开 PDF 并处理连续页范围，再使用大体量 PDF
+比较线程与 `spawn` 进程，确认进程池能显著降低 CPU 密集型解析耗时。最终默认
+多进程并保留线程回退；单页失败记录具体页码。
 
 ### 53. 设置重置误删 DeepSeek Key，资源关闭失败阻断新配置
 
@@ -700,8 +700,8 @@ API 对该明确配置状态记录 WARNING，未知异常仍保留 ERROR 堆栈�
 
 **修复**：增加文档解析异常层级，将页数、字符数和 Chunk 数等限制映射到
 400/413/422；错误信息同时包含实际值和配置上限。前端优先展示服务端 `detail`，
-知识库上传框显示当前 PDF 页数上限。大体量 PDF 测试 在上限 600 时
-成功生成 925 个 Chunk，601 页测试文件返回 HTTP 413。
+知识库上传框显示当前 PDF 页数上限。大体量 PDF 在配置上限内可进入异步索引
+任务；超过上限的测试文件返回 HTTP 413。
 
 ### 58. 异步任务临时文件名导致相同 PDF 重复索引
 
@@ -714,28 +714,23 @@ Chunk ID 追加。
 
 **修复**：文档 ID 改为解析内容 SHA-256；新增索引签名覆盖分块、Embedding、
 RAPTOR 和 GraphRAG 配置。命中前核对 PostgreSQL、Qdrant 和 BM25 Chunk 数；
-Qdrant 重建时替换同文档 Point，BM25 按文档整体替换。服务器重复上传实测
-`<reuse-duration>`，未进入 Embedding，文档和 Chunk 总数不再增长。
+Qdrant 重建时替换同文档 Point，BM25 按文档整体替换。重复上传验证不会再次
+进入 Embedding，文档和 Chunk 总数不再增长。
 
 ### 59. 服务器有 GPU，但容器只能使用 CPU
 
-**现象**：宿主机存在 NVIDIA GPU，但生产容器运行 `torch==2.13.0+cpu`，
-大体量 PDF 的 BGE-M3 Embedding 仍需 `<cpu-baseline>`。服务器没有
+**现象**：宿主机存在 NVIDIA GPU，但生产容器安装了 CPU 版 Torch，
+`torch.cuda.is_available()` 为 `False`。部分目标环境没有安装
 NVIDIA Container Toolkit，常规 `gpus: all` 配置无法工作。
 
 **根因**：GPU 是否存在和容器是否获得 CUDA 设备是两件事。CPU Torch wheel
 不包含 CUDA 后端，Docker 默认也不会把 `/dev/nvidia*` 和宿主机驱动库暴露给
 容器。
 
-**修复**：保留 CPU/GPU 两套互斥哈希锁；GPU Compose override 显式映射
-`/dev/nvidia0`、`/dev/nvidiactl`、`/dev/nvidia-uvm`、
-`/dev/nvidia-uvm-tools`、`libcuda.so` 和 `libnvidia-ml.so`，并把
-Embedding 设备设为 `cuda`、batch size 设为 32。容器内真实 CUDA 矩阵运算
-通过，大体量 PDF 默认 `auto` 策略完整索引降至 `<gpu-baseline>`。
-
-该方式依赖宿主机驱动库的真实版本路径，驱动升级后需要更新服务器 `.env`。
-如果目标主机具备 NVIDIA Container Toolkit，应优先使用标准 GPU runtime，
-减少对宿主机文件布局的耦合。
+**修复**：保留 CPU/GPU 两套互斥哈希锁；GPU Compose 根据目标环境提供设备和
+驱动配置，并将 Embedding 设备设为 `cuda`。部署后在容器内执行 CUDA 可用性和
+矩阵运算验证。具备 NVIDIA Container Toolkit 的环境应优先使用标准 GPU
+runtime，减少对宿主机文件布局的耦合。
 
 ### 60. 解析完成后图片、源文件和表格结构无法复核
 

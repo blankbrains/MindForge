@@ -104,7 +104,6 @@ MindForge/
 ├── .env.example                    # 环境变量模板
 ├── .github/workflows/ci.yml        # CI（ruff + pytest + frontend + Compose）
 ├── docs/                           # 项目说明、踩坑记录、面试材料
-├── 计划方案/                        # 已实施及后续演进方案
 │
 ├── mindforge-web/                  # React 前端
 │   ├── package.json                # 前端依赖（npm）
@@ -533,12 +532,10 @@ SSE 事件及时反馈状态。当前 LLM Provider 配置不完整时，研究�
 “知识库检索”模式，不初始化 Multi-Agent。RAPTOR、GraphRAG 和 QA 生成未设置
 专用模型覆盖时，会继承当前 Provider 的 Researcher 模型。
 
-目标环境未使用 NVIDIA Container Toolkit，但已通过显式映射 NVIDIA 设备节点和
-宿主机驱动库完成容器 GPU 直通。生产容器运行 `torch==2.13.0+cu130`，
-`torch.cuda.is_available()` 为 `True`，BGE-M3 使用 `cuda`、batch size 32。
-当前默认 `auto` 策略完整索引较 CPU 优化结果缩短约 94%。Reranker 固定 revision
-未缓存且容器无外网，启动预加载失败后会熔断；向量 + BM25 + RRF 检索继续工作，
-当前不能声称 CrossEncoder 精排已启用。
+CPU 与 GPU 依赖使用独立哈希锁；GPU 环境通过 `docker-compose.gpu.yml` 启动，
+部署后应在容器内验证 `torch.cuda.is_available()` 和实际设备。Reranker 模型
+不可用时会熔断，向量 + BM25 + RRF 检索仍可继续工作，不会把未加载的
+CrossEncoder 声称为已启用。
 
 ### 📄 4. 解析资产与视觉检索
 
@@ -591,8 +588,6 @@ GitHub Actions 自动运行：
 - [面试题目与项目讲解](docs/MindForge面试题目.md)
 - [文档解析运维说明](docs/document-parsing-operations.md)
 - [LLM Provider 配置与运维](docs/llm-provider-operations.md)
-- [解析管线实施方案](计划方案/解析管线完整性与多模态检索实施方案.md)
-- [前端方案与实施复盘](计划方案/MindForge前端方案.md)
 
 ## ✨ 技术亮点
 

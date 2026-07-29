@@ -2,7 +2,7 @@
 
 > **自适应研究助理系统** · Multi-Agent RAG · 全栈架构详解
 >
-> **同步基线：2026-07-28。** 本文按当前 `main` 分支和自动化测试结果校正；运行参数以根目录 `.env.example` 为完整键清单，实际行为以源代码和自动化测试为准。
+> **同步基线：2026-07-29。** 本文按当前 `main` 分支代码和自动化测试结果校正；运行参数以根目录 `.env.example` 为完整键清单，实际行为以源代码和自动化测试为准。
 
 ---
 
@@ -12,10 +12,9 @@ MindForge 是一个基于 **Multi-Agent 架构**的自适应研究助理系统�
 
 传统搜索引擎返回链接列表，用户需要手动浏览和整合；纯 LLM 受限于训练数据截止日期，且存在幻觉问题。MindForge 通过多 Agent 协同 + RAG（检索增强生成）技术，实现从"问题输入"到"结构化报告输出"的端到端自动化。
 
-当前交付目标是 `main` 分支的全栈 Web 平台。历史 `mcp-server` 分支不属于
-当前交付范围；旧 MCP 源码、脚本和测试已从 `main` 工作树移除，只在学习文档
-中保留协议说明。应用不暴露 `/api/v1/mcp`，启动阶段不加载 MCP，
-Researcher 也不注册 MCP 工具。
+当前仓库只维护 `main` 分支的全栈 Web 平台。旧 MCP 源码、脚本、测试和实验
+分支均已移除，只在学习文档中保留协议说明。应用不暴露 `/api/v1/mcp`，
+启动阶段不加载 MCP，Researcher 也不注册 MCP 工具。
 
 ---
 
@@ -246,8 +245,8 @@ GraphRAG 和基础混合检索，再统一排序。图谱更新在私有副本�
 
 解析器通过 `.env` 对上传体积、PDF 页数、解析字符数、DOCX 解压规模和最终
 Chunk 数建立硬边界。超限属于客户端输入问题，API 返回带实际值和配置上限的
-4xx，而不是笼统的 500。当前默认 `API_MAX_PDF_PAGES=600`；测试覆盖一份
-523 页、约 28.96 MB 的 PDF 可生成 925 个 Chunk。
+4xx，而不是笼统的 500。当前默认 `API_MAX_PDF_PAGES=600`；大体量 PDF 已覆盖
+异步索引、进度和取消路径。
 
 解析完成后使用解析内容 SHA-256 生成稳定文档 ID，不再把任务临时文件名或
 mtime 纳入标识。索引签名覆盖分块、Embedding、RAPTOR 和 GraphRAG 配置；
@@ -626,10 +625,9 @@ Embedding；已有索引时后端拒绝直接切换 Embedding provider，必须�
 - 运行阶段使用非 root 用户，并配置 `/api/v1/ready` 健康检查。
 
 `docker-compose.yml` 定义了四个服务：Qdrant、Redis、PostgreSQL、MindForge（可选，也可以单独使用宿主机运行）。
-GPU 部署叠加 `docker-compose.gpu.yml`。目标服务器未安装 NVIDIA Container
-Toolkit，因此 override 显式映射 `/dev/nvidia*` 设备节点以及宿主机
-`libcuda.so`、`libnvidia-ml.so`；部署前必须根据驱动版本在服务器 `.env`
-中配置真实库路径。
+GPU 部署叠加 `docker-compose.gpu.yml`。具备 NVIDIA Container Toolkit 的环境
+应优先使用标准 GPU runtime；需要显式设备映射时，具体设备和驱动路径只配置在
+目标环境 `.env` 中，不写入公开文档。
 
 ### 5.4 标准操作流程
 
@@ -669,24 +667,21 @@ GitHub Actions 自动运行：
 
 ---
 
-## 六、双分支管理策略
+## 六、分支管理策略
 
-### 6.1 为什么要两个分支
+### 6.1 当前分支
 
-- **main 分支**：全栈 Web 平台，包含 React 前端、FastAPI 后端、数据库。适合通过浏览器交互的用户。
-- **mcp-server 分支**：历史实验分支，不属于当前 Web 应用交付与部署范围。
+仓库只维护 `main`：全栈 Web 平台，包含 React 前端、FastAPI 后端和 PostgreSQL。
 
-### 6.2 共享与差异
+### 6.2 历史实验
 
-历史上两个分支共享大部分 Agent、检索、模型和记忆代码，差异在于：
-- mcp-server 分支删除前端目录和 API 路由。
-- pyproject.toml 不包含 fastapi、uvicorn、sqlalchemy 等 Web 依赖。
-- README 是纯 MCP 版而非全栈版。
+项目早期曾验证 MCP Client/Server、JSON-RPC 和 stdio 工具发现，但相关运行代码
+与实验分支均已移除，不属于当前仓库能力。
 
-### 6.3 同步规则
+### 6.3 维护规则
 
-当前只维护、测试和部署 `main`。历史 `mcp-server` 分支不作为运行事实，也不再
-要求把 `main` 修复同步过去；如未来恢复该分支，应先独立评估其依赖和安全边界。
+开发、测试、文档和部署只以 `main` 为准。如未来重新引入 MCP，必须新建独立
+方案并重新评估权限、安全、生命周期、并发和端到端测试。
 
 ---
 

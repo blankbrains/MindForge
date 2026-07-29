@@ -11,7 +11,6 @@
 | [自适应文档解析管线.md](自适应文档解析管线.md) | PDF 原生文本、OCR、表格、图片元素和索引进度 |
 | [document-parsing-operations.md](document-parsing-operations.md) | 文档资产、视觉检索、版本治理和私有基准运维 |
 | [llm-provider-operations.md](llm-provider-operations.md) | 云端 API、本地模型、设置页、`.env` 与故障排查 |
-| [前端方案](../计划方案/MindForge前端方案.md) | 前端原方案、实际落地结果和后续约束 |
 
 项目入口 [README.md](../README.md) 提供从首次部署、模型配置、文档上传、研究执行
 到更新、排障和停止服务的可直接执行流程；专题文档用于补充实现细节和故障定位。
@@ -31,11 +30,10 @@
 - 模型层通过 Provider Registry 统一接入 OpenAI、DeepSeek、兼容云 API 与本地
   推理服务；设置页可独立配置 Base URL、Key、角色模型和 Tool/JSON 能力。
 - 数据库通过 Alembic 迁移，当前迁移头为 `0005_document_assets`。
-- CPU 与 GPU 使用互斥依赖锁；服务器当前运行 `torch==2.13.0+cu130`，
-  `torch.cuda.is_available()` 为 `True`，设备为 NVIDIA GPU。
+- CPU 与 GPU 使用互斥依赖锁；GPU 部署后必须在应用容器内验证
+  `torch.cuda.is_available()` 和实际设备。
 - PDF 默认最多 600 页；大文档使用有界并发解析、持久化索引任务和内容签名复用。
-- 目标环境没有 NVIDIA Container Toolkit，GPU Compose 通过显式映射设备节点和
-  驱动库运行。Reranker 模型未缓存且容器无外网，启动熔断后使用
+- GPU Compose 的运行方式由目标环境决定。Reranker 模型不可用时启动熔断并使用
   向量 + BM25 + RRF，不声称 CrossEncoder 已启用。
 - 知识库页面不展示历史索引任务；上传弹窗使用 XHR 显示真实字节传输进度，
   上传完成后只轮询当前索引任务。

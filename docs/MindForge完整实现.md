@@ -1,15 +1,12 @@
 # MindForge — 自适应研究助理系统（完整实现）
 
-> **文档同步说明（2026-07-29）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
+> **文档同步说明（2026-07-29）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
 > **项目定位：** 一个面向文本研究任务的自适应研究助理。不是简单的"问答机器人"，而是能**主动分解问题、迭代检索、综合推理、生成结构化研究报告**的 Agent 系统。
 >
 > **面试定位：** 2026 年 Agent 开发实习面试项目。集成 **Agentic RAG + Multi-Agent 协作 + 自适应记忆 + 流式可观测性**。MCP 章节仅保留历史学习说明，旧源码、脚本和测试已从当前 `main` 工作树移除。
 
-> **🏗️ 分支说明：** 仓库保留两个 Git 分支：
-> - **`main`** — 全栈 Web 平台（FastAPI + React 19 SPA + PostgreSQL + 前端 UI）
-> - **`mcp-server`** — 历史实验分支，不属于当前交付与部署范围
->
-> 当前事实以 `main` 为准：无 `/api/v1/mcp`、无 MCP 启动加载、无 Agent MCP 工具。
+> **🏗️ 分支说明：** 仓库只维护 `main` 全栈 Web 平台。当前运行时无
+> `/api/v1/mcp`、无 MCP 启动加载、无 Agent MCP 工具。
 
 ---
 
@@ -186,8 +183,8 @@ MindForge/                                       # main 分支（全栈 Web 平�
 └── data/                                        # 文档存储
 ```
 
-> **历史分支说明：** `mcp-server` 保留旧实验代码。当前修复、文档和部署只以
-> `main` 为目标，不应把历史分支能力描述为线上功能。
+> **历史实验说明：** MCP 实验代码和分支均已移除。当前修复、文档和部署只以
+> `main` 为目标，不应把历史学习内容描述为线上功能。
 
 ### 1.3 技术选型理由（面试必讲）
 
@@ -6544,12 +6541,10 @@ Dockerfile 使用三阶段构建：
 3. Python 3.11 slim Runtime 复制依赖、前端产物、迁移和源码，以非 root 用户运行。
 
 容器通过 `/api/v1/ready` 执行健康检查，FastAPI 在单端口同时托管 API 与前端静态资源。
-CPU 镜像使用 `requirements-cpu.lock` 和 `torch==2.13.0+cpu`。当前服务器
-生产容器使用 `requirements-gpu.lock` 和 `torch==2.13.0+cu130`，
-`torch.cuda.is_available()` 为 `True`，设备为 NVIDIA GPU。服务器没有
-NVIDIA Container Toolkit，`docker-compose.gpu.yml` 通过显式映射
-`/dev/nvidia*` 设备节点以及宿主机 `libcuda.so`、`libnvidia-ml.so`
-完成 GPU 直通。
+CPU 镜像使用 `requirements-cpu.lock`，GPU 镜像使用
+`requirements-gpu.lock`。GPU 部署通过 `docker-compose.gpu.yml` 叠加目标环境
+所需的设备和驱动配置；部署后必须在容器内验证 `torch.cuda.is_available()`，
+不在公开文档中记录具体服务器型号、驱动路径或内部拓扑。
 
 ### 13.4 启动脚本
 
@@ -7500,10 +7495,9 @@ A:  最大的坑有五个：
        json.loads 直接报错。解决：括号平衡遍历找到正确截断位置再解析。
     面试时主动讲解决问题的过程比讲"一切顺利"更有说服力。
 
-Q23: 为什么要分 main 和 mcp-server 两个分支？
-A:  这是历史实验留下的分支结构。当前交付只以 main 为准，mcp-server 不参与
-    部署，也不应作为当前产品能力宣传。后续若不再需要，应单独评估归档策略，
-    而不是让两个运行时长期分化。
+Q23: 为什么当前只保留 main 分支？
+A:  项目早期曾使用独立分支验证 MCP 协议，但该实验不属于当前 Web 产品能力。
+    删除过时分支可以避免运行事实分化，也减少公开仓库中的无关实现和维护成本。
 
 Q24: 为什么没有用 LangChain/LlamaIndex 而是自己写？
 A:  LangChain 对 Agent 流程的抽象太重，调试困难，而且版本迭代快 API 经常 Breaking。
@@ -7562,7 +7556,7 @@ A:  优势：发现跨文档的实体关系（传统 RAG 只看单文档内的 c
 ```
 优化维度              旧方案                          新方案                          效果
 ─────────────────────────────────────────────────────────────────────────────────────
-PDF 解析              8 线程页范围解析                  spawn 进程池（默认12 workers）  显著降低解析耗时
+PDF 解析              8 线程页范围解析                  spawn 进程池（默认12 workers）  降低 CPU 密集型解析耗时
 文档 Embedding        逐块 embed_single()              embedder.embed(texts) 批量       3-5x 提速
 Qdrant Upsert         逐条写入                         .env 可配置批量写入             降低网络往返
 RAPTOR 摘要           单节点也摘要、逐条向量化           跳过单节点+并发摘要+批量向量      消除无效调用
@@ -7822,7 +7816,7 @@ interface HistoryResponse {
 | PDF 解析 | 8 线程页范围解析 | **spawn ProcessPoolExecutor**，worker/阈值可配置并保留线程回退 |
 | Embedding | 逐块 embed_single() | **批量 embedder.embed(texts)** |
 | Qdrant Upsert | 逐条写入 | **API_INDEX_BATCH_SIZE 可配置批量写入** |
-| 文件上限 | 无限制 | **API_MAX_UPLOAD_MB 配置，模板默认 200MB** |
+| 文件上限 | 无限制 | **由 API_MAX_UPLOAD_MB 配置，模板默认 200MB** |
 | 重复上传 | 每次完整 Embedding | **内容 SHA-256 + 索引签名，完整性通过后直接复用** |
 | 小文档处理 | 一律建 RAPTOR/GraphRAG | **<=5 chunks 自动跳过** |
 | 错误提示 | 英文 | **中文（文件过大/格式不支持/解析失败）** |
@@ -7846,4 +7840,4 @@ interface HistoryResponse {
 | 前端 | 设置页眼睛图标切换，取消编辑恢复脱敏值，删除立即保存 |
 | 历史 | 分页 API（page/page_size），支持大规模历史 |
 | 部署 | Docker Compose 一键启动（Qdrant v1.18.3 + Redis 7 + PostgreSQL 16） |
-| 分支 | 当前交付只以 main 为准；mcp-server 为历史实验分支 |
+| 分支 | 当前只维护和部署 main；历史实验分支已移除 |
