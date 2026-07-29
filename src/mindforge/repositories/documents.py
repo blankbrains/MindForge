@@ -17,6 +17,9 @@ def upsert_document(
     chunk_count: int = 0,
     status: str,
     index_signature: str | None = None,
+    index_strategy: str = "auto",
+    use_raptor: bool = False,
+    use_graphrag: bool = False,
     error: str | None = None,
     parser_metadata: dict[str, Any] | None = None,
 ) -> None:
@@ -29,6 +32,9 @@ def upsert_document(
                 chunk_count=chunk_count,
                 status=status,
                 index_signature=index_signature,
+                index_strategy=index_strategy,
+                use_raptor=use_raptor,
+                use_graphrag=use_graphrag,
                 error=error,
                 parser_metadata=dict(parser_metadata or {}),
             )
@@ -38,6 +44,9 @@ def upsert_document(
             record.chunk_count = chunk_count
             record.status = status
             record.index_signature = index_signature
+            record.index_strategy = index_strategy
+            record.use_raptor = use_raptor
+            record.use_graphrag = use_graphrag
             record.error = error
             if parser_metadata is not None:
                 record.parser_metadata = dict(parser_metadata)
@@ -56,6 +65,9 @@ def get_document(doc_id: str) -> dict[str, Any] | None:
             "chunk_count": record.chunk_count,
             "status": record.status,
             "index_signature": record.index_signature,
+            "index_strategy": record.index_strategy,
+            "use_raptor": record.use_raptor,
+            "use_graphrag": record.use_graphrag,
             "parser_metadata": dict(record.parser_metadata or {}),
         }
 
@@ -84,6 +96,9 @@ def list_documents() -> list[dict[str, Any]]:
                 "filename": record.filename,
                 "chunk_count": record.chunk_count,
                 "status": record.status,
+                "index_strategy": record.index_strategy,
+                "use_raptor": record.use_raptor,
+                "use_graphrag": record.use_graphrag,
             }
             for record in records
         ]
@@ -122,6 +137,13 @@ def bulk_upsert_indexed(documents: list[dict[str, Any]]) -> None:
                         filename=str(document["filename"]),
                         chunk_count=int(document["chunk_count"]),
                         status="indexed",
+                        index_strategy=str(
+                            document.get("index_strategy") or "auto"
+                        ),
+                        use_raptor=bool(document.get("use_raptor", False)),
+                        use_graphrag=bool(
+                            document.get("use_graphrag", False)
+                        ),
                     )
                 )
             elif record.status != "indexed":

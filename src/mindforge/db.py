@@ -240,6 +240,21 @@ class DocumentCatalog(Base):
         String(64),
         nullable=True,
     )
+    index_strategy: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="auto",
+    )
+    use_raptor: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    use_graphrag: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     parser_metadata: Mapped[dict] = mapped_column(
         JSON,

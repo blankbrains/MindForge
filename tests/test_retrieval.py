@@ -377,6 +377,9 @@ def test_real_rrf_ignores_incompatible_raw_score_scales() -> None:
     assert fused[0]["id"] == "shared"
     assert fused[0]["score"] <= 1.0
     assert fused[1]["score"] == fused[2]["score"]
+    assert fused[0]["semantic_score"] == pytest.approx(0.8)
+    assert fused[0]["keyword_score"] == pytest.approx(1.0)
+    assert fused[0]["rrf_score"] == fused[0]["score"]
 
 
 @pytest.mark.asyncio
@@ -832,6 +835,15 @@ def test_code_executor_handles_non_ascii_child_errors() -> None:
 def test_bm25_search_is_consistent_during_concurrent_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from mindforge.retrieval import bm25 as bm25_module
+
+    monkeypatch.setattr(bm25_module, "_BM25S_AVAILABLE", True)
+    monkeypatch.setattr(
+        bm25_module,
+        "jieba",
+        SimpleNamespace(cut_for_search=lambda query: query.split()),
+        raising=False,
+    )
     retriever = BM25Retriever()
     retriever.documents = ["old document"]
     retriever.doc_ids = ["old"]
@@ -975,6 +987,114 @@ def test_reranker_model_load_failure_is_cached(monkeypatch) -> None:
     assert reranker.model is None
     assert reranker.model is None
     assert attempts == 1
+    results = reranker.rerank(
+        "query",
+        [{"id": "first", "text": "first"}],
+    )
+    assert results == [{"id": "first", "text": "first"}]
+    assert "rerank_score" not in results[0]
+
+
+@pytest.mark.asyncio
+async def test_rag_tool_does_not_retrieve_for_greeting() -> None:
+    class UnexpectedRetriever:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            raise AssertionError("greetings must not query the knowledge base")
+
+    result = await RAGTool(
+        retriever=UnexpectedRetriever()
+    ).execute_async("你好")
+
+    assert result.success is True
+    assert result.data["intent"] == "conversation"
+    assert result.data["sources"] == []
+    assert "不会调用大模型进行闲聊" in result.output
+
+
+@pytest.mark.asyncio
+async def test_rag_tool_rejects_rrf_rank_without_relevance_evidence() -> None:
+    class Retriever:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            return {
+                "results": [
+                    {
+                        "id": "noise",
+                        "text": "unrelated",
+                        "score": 1.0,
+                        "rrf_score": 1.0,
+                        "semantic_score": 0.55,
+                        "keyword_score": 0.0,
+                        "retrieval_sources": ["vector"],
+                    }
+                ]
+            }
+
+    result = await RAGTool(retriever=Retriever()).execute_async(
+        "今天天气怎么样",
+        threshold=0.6,
+    )
+
+    assert result.success is True
+    assert result.data["total"] == 0
+    assert result.data["filtered_out"] == 1
+    assert "暂无高度相关的资料" in result.output
+
+
+@pytest.mark.asyncio
+async def test_rag_tool_accepts_positive_keyword_evidence() -> None:
+    class Retriever:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            return {
+                "results": [
+                    {
+                        "id": "rag",
+                        "text": "RAG 使用外部知识增强生成。",
+                        "document_source": "rag.md",
+                        "score": 1.0,
+                        "rrf_score": 1.0,
+                        "semantic_score": 0.4,
+                        "keyword_score": 2.0,
+                        "retrieval_sources": ["bm25", "vector"],
+                    }
+                ]
+            }
+
+    result = await RAGTool(retriever=Retriever()).execute_async(
+        "RAG是什么",
+        threshold=0.6,
+    )
+
+    assert result.success is True
+    assert result.data["total"] == 1
+    assert "rag.md" in result.output
+
+
+def test_rag_tool_formats_code_evidence_as_fenced_markdown() -> None:
+    output = RAGTool()._format_results(
+        [
+            {
+                "text": (
+                    "from llama_cpp import Llama\n"
+                    "MODEL_KWARGS = {\"n_ctx\": 2048}"
+                ),
+                "document_source": "example.pdf",
+                "metadata": {"page": 12},
+            },
+            {
+                "text": "<label>问题</label>\n<input type=\"text\">",
+                "document_source": "web.pdf",
+            },
+        ],
+        "示例",
+    )
+
+    assert "```python" in output
+    assert "```html" in output
+    assert "example.pdf · 第 12 页" in output
+    assert "未经总结或改写" in output
 
 
 def test_embedding_manager_pins_configured_model_revision(

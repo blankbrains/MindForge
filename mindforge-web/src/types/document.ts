@@ -3,6 +3,9 @@ export interface DocumentItem {
   filename: string;
   chunk_count: number;
   status: string;
+  index_strategy: "auto" | "fixed" | "semantic";
+  use_raptor: boolean;
+  use_graphrag: boolean;
   source?: string;
   size_bytes?: number;
   indexed_at?: string;

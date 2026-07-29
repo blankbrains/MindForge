@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import time
 from typing import Any, Optional
 
@@ -62,6 +64,28 @@ class RAGTool(BaseTool):
         },
         "required": ["query"],
     }
+    _CONVERSATIONAL_QUERIES = frozenset(
+        {
+            "hi",
+            "hello",
+            "hey",
+            "你好",
+            "你好啊",
+            "你好呀",
+            "您好",
+            "嗨",
+            "在吗",
+            "早上好",
+            "上午好",
+            "下午好",
+            "晚上好",
+            "谢谢",
+            "多谢",
+            "再见",
+            "你是谁",
+            "你叫什么",
+        }
+    )
 
     def __init__(
         self,
@@ -155,6 +179,22 @@ class RAGTool(BaseTool):
                 success=False,
                 error="threshold 必须在 0 到 1 之间。",
             )
+        if self._is_conversational_query(query):
+            return ToolResult(
+                success=True,
+                output=(
+                    "你好！当前请求处于知识库检索模式，不会调用大模型进行闲聊。\n\n"
+                    "请提出与已上传资料相关的具体问题。"
+                ),
+                data={
+                    "results": [],
+                    "sources": [],
+                    "total": 0,
+                    "quality": 0.0,
+                    "intent": "conversation",
+                },
+                execution_time_ms=(time.perf_counter() - start) * 1000,
+            )
 
         import asyncio
 
@@ -180,39 +220,31 @@ class RAGTool(BaseTool):
         elapsed = (time.perf_counter() - start) * 1000
         results = result_dict.get("results", []) if isinstance(result_dict, dict) else result_dict
 
-        # ── Score filtering ──
-        # Real embeddings (BGE-M3): relevant > 0.3, noise < 0.1
-        # Hash fallback: all scores ~0.01, use minimal threshold
-        if threshold > 0:
-            min_score = threshold
-        else:
-            try:
-                from mindforge.ingestion.embedder import get_embedder
-                if get_embedder().provider == "fallback":
-                    min_score = 0.005   # hash: accept everything
-                else:
-                    min_score = 0.15    # real embeddings: filter noise
-            except Exception:
-                min_score = 0.01
-        qualified = []
-        for r in results:
-            s = 0.0
-            if hasattr(r, "score"):
-                s = r.score
-            elif isinstance(r, dict):
-                s = r.get("score", 0.0)
-            if s >= min_score:
-                qualified.append(r)
+        # RRF scores describe rank consensus, not semantic relevance. Because
+        # they are normalized, the first result is always near 1.0 even for an
+        # unrelated query. Gate on real reranker/vector scores or positive
+        # keyword evidence instead.
+        min_score = (
+            float(threshold)
+            if threshold > 0
+            else float(settings.retrieval.min_score)
+        )
+        qualified = [
+            result
+            for result in results
+            if self._is_relevant_result(result, min_score)
+        ]
 
-        # Quality: average of all result scores, scaled to 0-10.
-        # RRF fusion blends rank signal (0.6) with raw cosine similarity (0.4),
-        # so relevant results score ~0.3-0.6 and noise scores ~0.01.
         total_score = sum(
-            r.get("score", 0.0) if isinstance(r, dict) else getattr(r, "score", 0.0)
-            for r in qualified
+            max(
+                self._relevance_score(result),
+                min_score
+                if self._has_keyword_evidence(result)
+                else 0.0,
+            )
+            for result in qualified
         )
         avg = total_score / max(len(qualified), 1)
-        # Scale: 0.5 avg → 8.0, 0.3 → 5.0, 0.1 → 2.0
         quality = round(min(avg * 16, 10.0), 1)
 
         if not qualified:
@@ -282,57 +314,162 @@ class RAGTool(BaseTool):
                         "content",
                         result.get("text", ""),
                     ),
-                    "score": result.get(
-                        "rerank_score",
-                        result.get("score", 0.0),
-                    ),
+                    "score": RAGTool._relevance_score(result),
+                    "metadata": dict(result.get("metadata") or {}),
                 }
             )
         return sources
 
     def _format_results(self, results: list[Any], query: str) -> str:
-        """Format results as clean Markdown ready for ReactMarkdown rendering.
+        """Format raw retrieval evidence without pretending it is an answer."""
+        lines: list[str] = [
+            "## 知识库检索结果",
+            "",
+            (
+                "> 当前未使用大模型。以下内容是知识库中的原始命中片段，"
+                "未经总结或改写。"
+            ),
+        ]
 
-        Preserves headers, bold, lists. Removes garbage artifacts.
-        Adds proper spacing between sections for readability.
-        """
-        import re as _re
-
-        lines: list[str] = [f"## {query}\n"]
-
-        for doc in results:
+        for index, doc in enumerate(results, start=1):
             if hasattr(doc, "page_content"):
                 content = doc.page_content
+                metadata: dict[str, Any] = {}
+                title = "知识库文档"
             elif isinstance(doc, dict):
                 content = doc.get("content", doc.get("text", str(doc)))
+                metadata = dict(doc.get("metadata") or {})
+                title = str(
+                    doc.get("document_source")
+                    or doc.get("title")
+                    or "知识库文档"
+                )
             else:
                 content = str(doc)
+                metadata = {}
+                title = "知识库文档"
 
             text = str(content).strip()
-
-            # 清理不必要的空白/噪声，保留正常文档内容
-            # 注意：不再删除 `|` 字符（避免破坏 Markdown 表格）
-            # 注意：不再删除 `class Foo:` 类声明（避免破坏代码/文档内容）
-            text = _re.sub(r'_{3,}', '', text)
-            # Collapse whitespace but keep paragraph structure
-            text = _re.sub(r'\n{4,}', '\n\n\n', text)
+            text = re.sub(r"\n{4,}", "\n\n\n", text)
             text = text.strip()
 
-            # Truncate at 20000 chars, but prefer sentence boundaries
             if len(text) > 20000:
                 truncated = text[:20000]
-                last_period = max(truncated.rfind('。'), truncated.rfind('. '), truncated.rfind('\n\n'))
+                last_period = max(
+                    truncated.rfind("。"),
+                    truncated.rfind(". "),
+                    truncated.rfind("\n\n"),
+                )
                 if last_period > 10000:
-                    text = truncated[:last_period+1] + "\n\n…"
+                    text = truncated[:last_period + 1] + "\n\n…"
                 else:
                     text = truncated + "\n\n…"
 
             if text:
-                lines.append(text)
+                page = metadata.get("page")
+                page_label = (
+                    f" · 第 {int(page)} 页"
+                    if isinstance(page, (int, float)) and int(page) > 0
+                    else ""
+                )
+                safe_title = title.replace("[", r"\[").replace("]", r"\]")
+                lines.extend(
+                    [
+                        "",
+                        f"### {index}. {safe_title}{page_label}",
+                        "",
+                    ]
+                )
+                language = self._detect_code_language(text)
+                if language is not None:
+                    lines.append(self._fenced_code(text, language))
+                else:
+                    escaped = html.escape(text, quote=False)
+                    lines.extend(
+                        f"> {line}" if line else ">"
+                        for line in escaped.splitlines()
+                    )
                 lines.append("")
 
-        if len(lines) <= 2:
-            return f"## {query}\n\n当前知识库中暂无高度相关的资料。\n\n建议更换关键词或上传更多文档到知识库。"
+        if len(lines) <= 3:
+            return (
+                f"关于「{query}」，当前知识库中暂无高度相关的资料。\n\n"
+                "建议更换关键词，或上传更多相关文档到知识库。"
+            )
 
-        # Join with double newlines for clear paragraph separation
-        return "\n\n".join(lines)
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _is_conversational_query(cls, query: str) -> bool:
+        normalized = re.sub(r"[\s，。！？!?、,.]+", "", query).casefold()
+        return normalized in cls._CONVERSATIONAL_QUERIES
+
+    @staticmethod
+    def _has_keyword_evidence(result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        sources = {
+            str(source)
+            for source in result.get("retrieval_sources", [])
+        }
+        keyword_score = float(result.get("keyword_score", 0.0) or 0.0)
+        return bool(
+            sources.intersection({"bm25", "multi_query"})
+            and keyword_score > 0.0
+        )
+
+    @staticmethod
+    def _relevance_score(result: Any) -> float:
+        if not isinstance(result, dict):
+            return float(getattr(result, "score", 0.0) or 0.0)
+        if "rerank_score" in result:
+            return float(result.get("rerank_score") or 0.0)
+        if "semantic_score" in result:
+            return float(result.get("semantic_score") or 0.0)
+        if "rrf_score" not in result:
+            return float(result.get("score", 0.0) or 0.0)
+        return 0.0
+
+    @classmethod
+    def _is_relevant_result(
+        cls,
+        result: Any,
+        min_score: float,
+    ) -> bool:
+        return (
+            cls._has_keyword_evidence(result)
+            or cls._relevance_score(result) >= min_score
+        )
+
+    @staticmethod
+    def _detect_code_language(text: str) -> str | None:
+        if re.search(
+            r"</?(?:html|body|div|label|input|script|style|form)\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return "html"
+        if re.search(
+            (
+                r"(^|\n)\s*(?:from\s+\w[\w.]*\s+import|import\s+\w|"
+                r"def\s+\w+\s*\(|class\s+\w+|if\s+__name__\s*==|"
+                r"[A-Z_][A-Z0-9_]*\s*=\s*[\[{])"
+            ),
+            text,
+        ):
+            return "python"
+        if re.search(
+            r"(^|\n)\s*(?:const|let|var|function)\s+\w+|=>|onKeyDown=\{",
+            text,
+        ):
+            return "javascript"
+        if re.search(r"(^|\n)\s*(?:curl|docker|npm|python)\s+", text):
+            return "bash"
+        return None
+
+    @staticmethod
+    def _fenced_code(text: str, language: str) -> str:
+        fence = "```"
+        while fence in text:
+            fence += "`"
+        return f"{fence}{language}\n{text}\n{fence}"

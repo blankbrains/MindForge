@@ -89,6 +89,7 @@ class HybridRetriever:
                         }
                         for hit in bm25_hits
                         if hit.get("id")
+                        and float(hit.get("score", 0.0)) > 0.0
                     ],
                 )
             except Exception:
@@ -279,6 +280,7 @@ class HybridRetriever:
         """
         fused: Dict[str, Dict[str, Any]] = {}
         sources_by_doc: Dict[str, set[str]] = {}
+        scores_by_doc: Dict[str, Dict[str, float]] = {}
 
         for ranking_name, results in rankings.items():
             if ranking_name in ("vector", "hyde"):
@@ -303,9 +305,19 @@ class HybridRetriever:
                         "score": 0.0,
                     }
                     sources_by_doc[doc_id] = set()
+                    scores_by_doc[doc_id] = {}
 
                 fused[doc_id]["score"] += weight / (_RRF_K + rank)
                 sources_by_doc[doc_id].add(ranking_name)
+                raw_score = float(doc.get("score", 0.0))
+                previous_score = scores_by_doc[doc_id].get(
+                    ranking_name,
+                    float("-inf"),
+                )
+                scores_by_doc[doc_id][ranking_name] = max(
+                    previous_score,
+                    raw_score,
+                )
 
         # Normalize scores to [0, 1]
         max_score = max((d["score"] for d in fused.values()), default=0.0)
@@ -318,7 +330,28 @@ class HybridRetriever:
         )
         for doc in sorted_docs:
             retrieval_sources = sorted(sources_by_doc.get(doc["id"], set()))
+            retrieval_scores = scores_by_doc.get(doc["id"], {})
+            semantic_score = max(
+                (
+                    score
+                    for source, score in retrieval_scores.items()
+                    if source in {"vector", "hyde"}
+                ),
+                default=0.0,
+            )
+            keyword_score = max(
+                (
+                    score
+                    for source, score in retrieval_scores.items()
+                    if source in {"bm25", "multi_query"}
+                ),
+                default=0.0,
+            )
             doc["retrieval_sources"] = retrieval_sources
+            doc["retrieval_scores"] = retrieval_scores
+            doc["semantic_score"] = semantic_score
+            doc["keyword_score"] = keyword_score
+            doc["rrf_score"] = doc["score"]
             doc["source"] = retrieval_sources[0] if retrieval_sources else "unknown"
 
         return sorted_docs[:top_k]

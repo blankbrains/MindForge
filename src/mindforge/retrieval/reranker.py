@@ -106,14 +106,17 @@ class CrossEncoderReranker:
 
         model = self.model
         if model is None:
-            logger.warning("No reranker model configured; returning original order.")
-            scores = [0.0] * len(bounded_candidates)
-        else:
-            try:
-                scores = model.predict(pairs)
-            except Exception:
-                logger.exception("Cross-encoder scoring failed; returning original order.")
-                scores = [0.0] * len(bounded_candidates)
+            logger.warning(
+                "No reranker model available; returning original order."
+            )
+            return [dict(candidate) for candidate in bounded_candidates[:top_k]]
+        try:
+            scores = model.predict(pairs)
+        except Exception:
+            logger.exception(
+                "Cross-encoder scoring failed; returning original order."
+            )
+            return [dict(candidate) for candidate in bounded_candidates[:top_k]]
 
         # Attach scores and re-sort
         reranked = []

@@ -682,6 +682,9 @@ async def _index_with_lifecycle(
         doc_id=parsed.doc_id,
         filename=source,
         status="indexing",
+        index_strategy=strategy,
+        use_raptor=use_raptor,
+        use_graphrag=use_graphrag,
         parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
     )
     try:
@@ -717,6 +720,9 @@ async def _index_with_lifecycle(
                     doc_id=parsed.doc_id,
                     filename=source,
                     status="indexing",
+                    index_strategy=strategy,
+                    use_raptor=use_raptor,
+                    use_graphrag=use_graphrag,
                     parser_metadata=dict(
                         getattr(parsed, "metadata", {}) or {}
                     ),
@@ -740,6 +746,9 @@ async def _index_with_lifecycle(
             doc_id=parsed.doc_id,
             filename=source,
             status="cancelled",
+            index_strategy=strategy,
+            use_raptor=use_raptor,
+            use_graphrag=use_graphrag,
         )
         raise
     except Exception as exc:
@@ -748,6 +757,9 @@ async def _index_with_lifecycle(
             doc_id=parsed.doc_id,
             filename=source,
             status="failed",
+            index_strategy=strategy,
+            use_raptor=use_raptor,
+            use_graphrag=use_graphrag,
             error=str(exc)[:2000],
         )
         raise
@@ -758,6 +770,9 @@ async def _index_with_lifecycle(
         status="indexed",
         chunk_count=len(chunks),
         index_signature=index_signature,
+        index_strategy=strategy,
+        use_raptor=use_raptor,
+        use_graphrag=use_graphrag,
         parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
     )
     return chunks
@@ -2108,6 +2123,9 @@ async def _stream_response(
                             "critic_score": None,
                             "refine_rounds": 0,
                             "fallback": True,
+                            "sources": list(
+                                (result.data or {}).get("sources", [])
+                            ),
                         },
                         "metadata": {
                             "quality": (

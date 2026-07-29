@@ -320,7 +320,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 1. 打开“研究工作台”，输入问题。
 2. 按 `Enter` 提交，`Shift+Enter` 换行。
 3. LLM Provider 可用时，界面展示规划、子任务、综合和评判过程；Provider
-   未就绪时自动使用知识库检索模式。
+   未就绪时自动使用知识库检索模式。问候类输入不会触发检索；命中的原始文档
+   片段会明确标注为未总结内容，代码和 HTML 片段使用安全代码块展示。
 4. 完成结果会保存到“研究历史”，可查看完整报告或删除记录。
 
 #### 5. 日常更新、排障和停止
@@ -529,8 +530,11 @@ Embedding。GraphRAG 从文档首中尾均匀取样，在私有图副本上完�
 未变化社区复用已有摘要；`graph` 模式会并行执行图检索和混合检索。研究流程使用
 可配置的请求、子任务和工具调用并发预算，并通过 `planning` 与 `heartbeat`
 SSE 事件及时反馈状态。当前 LLM Provider 配置不完整时，研究页会明确进入
-“知识库检索”模式，不初始化 Multi-Agent。RAPTOR、GraphRAG 和 QA 生成未设置
-专用模型覆盖时，会继承当前 Provider 的 Researcher 模型。
+“知识库检索”模式，不初始化 Multi-Agent；问候类输入直接返回模式说明，检索
+结果按真实语义/关键词证据过滤，原始代码片段以带语法高亮的 Markdown 代码块
+展示。知识库文档卡片会标明基础索引、RAPTOR 和 GraphRAG 的实际启用状态。
+RAPTOR、GraphRAG 和 QA 生成未设置专用模型覆盖时，会继承当前 Provider 的
+Researcher 模型。
 
 CPU 与 GPU 依赖使用独立哈希锁；GPU 环境通过 `docker-compose.gpu.yml` 启动，
 部署后应在容器内验证 `torch.cuda.is_available()` 和实际设备。Reranker 模型

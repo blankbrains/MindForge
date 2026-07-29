@@ -1,7 +1,10 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { StreamingAnswerPanel } from "@/components/research/streaming-markdown";
+import {
+  StreamingAnswerPanel,
+  StreamingMarkdown,
+} from "@/components/research/streaming-markdown";
 import { useResearchStore } from "@/store/research-store";
 
 describe("StreamingAnswerPanel", () => {
@@ -34,5 +37,18 @@ describe("StreamingAnswerPanel", () => {
     });
     expect(screen.getByText("first second")).toBeTruthy();
 
+  });
+
+  it("adds syntax-highlighting classes to fenced code", () => {
+    const { container } = render(
+      <StreamingMarkdown
+        content={"```python\ndef answer():\n    return 42\n```"}
+      />,
+    );
+
+    const code = container.querySelector("pre code");
+    expect(code).not.toBeNull();
+    expect(code?.classList.contains("hljs")).toBe(true);
+    expect(code?.classList.contains("language-python")).toBe(true);
   });
 });

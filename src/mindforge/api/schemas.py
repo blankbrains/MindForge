@@ -71,6 +71,9 @@ class IndexResponse(BaseModel):
     filename: str
     chunk_count: int
     status: str = "indexed"
+    index_strategy: Literal["auto", "fixed", "semantic"] = "auto"
+    use_raptor: bool = False
+    use_graphrag: bool = False
 
 
 class IndexJobResponse(BaseModel):
@@ -101,6 +104,9 @@ class DocumentItem(BaseModel):
     filename: str
     chunk_count: int
     status: str = "indexed"
+    index_strategy: Literal["auto", "fixed", "semantic"] = "auto"
+    use_raptor: bool = False
+    use_graphrag: bool = False
 
 
 DocumentsListResponse = list[DocumentItem]

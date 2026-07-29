@@ -1470,6 +1470,48 @@ async def test_unknown_api_route_returns_json_404() -> None:
     assert response.headers["content-type"].startswith("application/json")
 
 
+@pytest.mark.asyncio
+async def test_document_listing_preserves_index_features(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.repositories import documents
+
+    monkeypatch.setattr(
+        documents,
+        "list_documents",
+        lambda: [
+            {
+                "doc_id": "doc-with-features",
+                "filename": "research.pdf",
+                "chunk_count": 42,
+                "status": "indexed",
+                "index_strategy": "semantic",
+                "use_raptor": True,
+                "use_graphrag": True,
+            }
+        ],
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=_api_app()),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/v1/documents")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "doc_id": "doc-with-features",
+            "filename": "research.pdf",
+            "chunk_count": 42,
+            "status": "indexed",
+            "index_strategy": "semantic",
+            "use_raptor": True,
+            "use_graphrag": True,
+        }
+    ]
+
+
 def test_health_schema_has_no_mcp_fields() -> None:
     payload = routes.HealthResponse().model_dump()
     assert not any(key.startswith("mcp_") for key in payload)

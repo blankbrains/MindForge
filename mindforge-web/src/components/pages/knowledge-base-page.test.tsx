@@ -9,8 +9,24 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const documentState = vi.hoisted(() => ({
   documents: [
-    { doc_id: "first", filename: "first.txt", chunk_count: 1, status: "indexed" },
-    { doc_id: "second", filename: "second.txt", chunk_count: 1, status: "indexed" },
+    {
+      doc_id: "first",
+      filename: "first.txt",
+      chunk_count: 1,
+      status: "indexed",
+      index_strategy: "auto",
+      use_raptor: true,
+      use_graphrag: true,
+    },
+    {
+      doc_id: "second",
+      filename: "second.txt",
+      chunk_count: 1,
+      status: "indexed",
+      index_strategy: "auto",
+      use_raptor: false,
+      use_graphrag: false,
+    },
   ],
 }));
 const runningJob = vi.hoisted(() => ({
@@ -97,6 +113,14 @@ import { KnowledgeBasePage } from "./knowledge-base-page";
 afterEach(() => cleanup());
 
 describe("KnowledgeBasePage", () => {
+  it("shows the indexing features used by each document", () => {
+    render(<KnowledgeBasePage />);
+
+    expect(screen.getAllByText("基础索引")).toHaveLength(2);
+    expect(screen.getByText("RAPTOR 层次索引")).not.toBeNull();
+    expect(screen.getByText("GraphRAG 图谱索引")).not.toBeNull();
+  });
+
   it("shows only the current upload progress, not an index-job history", async () => {
     runningJob.enabled = false;
     uploadState.pending = false;

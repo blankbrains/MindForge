@@ -301,7 +301,7 @@ class RetrievalConfig(BaseSettings):
         default=None,
         description="Persistent BM25 corpus directory.",
     )
-    min_score: float = Field(default=0.35, ge=0.0, le=1.0)
+    min_score: float = Field(default=0.60, ge=0.0, le=1.0)
     model_config = SettingsConfigDict(env_prefix="RETRIEVAL_", extra="ignore")
 
 

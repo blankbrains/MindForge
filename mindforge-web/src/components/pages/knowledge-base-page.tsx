@@ -9,7 +9,9 @@ import {
   Eye,
   FileText,
   HardDrive,
+  Layers3,
   Loader2,
+  Network,
   Trash2,
   Upload,
   X,
@@ -247,7 +249,29 @@ export function KnowledgeBasePage() {
                 className="flex min-w-0 flex-1 items-center gap-4 text-left cursor-pointer"
               >
                 <FileText className="h-5 w-5 text-text-muted shrink-0" />
-                <div className="flex-1 min-w-0"><p className="font-medium truncate">{doc.filename}</p><p className="text-xs text-text-muted">{doc.chunk_count} 块 · {doc.status}</p></div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium">{doc.filename}</p>
+                  <p className="text-xs text-text-muted">
+                    {doc.chunk_count} 块 · {doc.status}
+                  </p>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    <span className="inline-flex items-center rounded-md border border-border bg-surface-alt px-1.5 py-0.5 text-[11px] text-text-muted">
+                      基础索引
+                    </span>
+                    {doc.use_raptor && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary">
+                        <Layers3 className="h-3 w-3" aria-hidden="true" />
+                        RAPTOR 层次索引
+                      </span>
+                    )}
+                    {doc.use_graphrag && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[11px] text-text">
+                        <Network className="h-3 w-3" aria-hidden="true" />
+                        GraphRAG 图谱索引
+                      </span>
+                    )}
+                  </div>
+                </div>
                 <Eye className="h-4 w-4 text-text-muted opacity-50 group-hover:opacity-100 transition-opacity" />
               </button>
               <button

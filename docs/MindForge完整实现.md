@@ -6599,7 +6599,7 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-29 验证基线：143 项 pytest 通过、20 项
+2026-07-29 验证基线：148 项 pytest 通过、22 项
 Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
 GitHub Actions 的实际运行结果为准。
 
@@ -7795,14 +7795,14 @@ interface HistoryResponse {
 | 项目 | 旧方案 | 新方案 |
 |------|--------|--------|
 | RRF 融合 | 原始分数直接混合 | 按检索路径权重执行纯 RRF，避免 BM25/向量分数尺度污染 |
-| 分数过滤 | 固定阈值 | 由检索配置和最终 Top-K 控制，不把不同来源原始分数直接比较 |
-| 输出格式 | 原始元数据（Knowledge Base Results...） | Markdown 标题 + 📌来源标注 + 低分警告 |
+| 分数过滤 | 固定阈值 | 使用真实语义/精排分数或正向关键词证据，RRF 排名分不再冒充相关度 |
+| 输出格式 | 原始元数据（Knowledge Base Results...） | 明确标注未经总结的原始片段，代码与 HTML 使用安全的语法高亮代码块 |
 | 无结果提示 | "No results found" | "⚠️ 当前资料库中暂无高度相关的内容" + 建议 |
 
 ### Agent 稳健性
 | 项目 | 说明 |
 |------|------|
-| LLM 降级 | API Key 无效/缺失时自动回退为文档检索模式 |
+| LLM 降级 | API Key 无效/缺失时自动回退为文档检索模式，问候类输入不触发检索 |
 | SSE 流降级 | `_stream_response` 异常时 yield fallback 结果，不中断连接 |
 | 超时保护 | orchestrator 180s 总超时，前端 SSE 5min 超时 |
 | LLM 状态恢复 | Critic/Synthesizer 添加 try/finally 恢复原始 LLM |

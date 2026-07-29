@@ -156,6 +156,9 @@ async def set_document_status(
     status: str,
     chunk_count: int = 0,
     index_signature: str | None = None,
+    index_strategy: str = "auto",
+    use_raptor: bool = False,
+    use_graphrag: bool = False,
     error: str | None = None,
     parser_metadata: dict | None = None,
 ) -> None:
@@ -166,6 +169,9 @@ async def set_document_status(
         chunk_count=chunk_count,
         status=status,
         index_signature=index_signature,
+        index_strategy=index_strategy,
+        use_raptor=use_raptor,
+        use_graphrag=use_graphrag,
         error=error,
         parser_metadata=parser_metadata,
     )
