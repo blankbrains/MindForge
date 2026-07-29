@@ -558,6 +558,10 @@ class CodeExecutor(BaseTool):
         }
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"
+        child_env["OPENBLAS_NUM_THREADS"] = "1"
+        child_env["OMP_NUM_THREADS"] = "1"
+        child_env["MKL_NUM_THREADS"] = "1"
+        child_env["NUMEXPR_NUM_THREADS"] = "1"
         with tempfile.TemporaryDirectory(
             prefix="exec-",
             dir=sandbox_base,

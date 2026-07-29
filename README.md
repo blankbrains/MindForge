@@ -29,7 +29,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 | 🧱 **可靠索引流水线** | 解析、分块、批量 Embedding、向量校验、RAPTOR/GraphRAG 与失败回滚 |
 | 📄 **自适应文档解析** | 原生 PDF 文本优先、按页 OCR 兜底；保留块级阅读顺序、表格结构、图片资产、页码、坐标、置信度与来源方法 |
 | 🖼️ **可选视觉检索** | 图片与 OCR 页面预览可持久化；显式启用兼容视觉模型后，以事实描述进入既有文本检索链路 |
-| ⚡ **OpenAI / DeepSeek 双引擎** | 模型层抽象化，一键切换，适配 OpenAI 与 DeepSeek 全系模型 |
+| ⚡ **统一多模型接口** | OpenAI、DeepSeek、兼容云 API 与服务器本地模型使用同一套 Agent 接口 |
 | 📡 **SSE 流式输出** | 实时推送 Agent 思考过程、工具调用、合成进度 |
 | 🎨 **React 19 前端** | 暗色模式、响应式布局、React Flow DAG 可视化、Recharts 雷达图 |
 
@@ -81,7 +81,7 @@ flowchart TD
 | 🏗️ **层次化检索** | RAPTOR Tree（自底向上摘要树） |
 | 🕸️ **图谱检索** | GraphRAG（跨文档实体关系发现） |
 | 🧰 **Agent 工具** | 知识库检索 · Web 搜索 · 代码执行 · 引用支持检查 |
-| 🧩 **模型** | OpenAI GPT-4o / DeepSeek（deepseek-chat / deepseek-reasoner）一键切换 |
+| 🧩 **模型** | 注册表驱动 `LLMFactory`；内置 OpenAI、DeepSeek、OpenAI-compatible 与 Local Provider |
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
 | 🔤 **Embedding** | BGE-M3 (1024维) 或 OpenAI；显式后端失败时拒绝写入不兼容向量 |
 | 📄 **文档解析** | pdfplumber + PaddleOCR 3；混合 PDF 按页处理，表格保留 Markdown + HTML + 单元格 JSON，图片与源文件具备生命周期管理 |
@@ -170,7 +170,7 @@ MindForge/
 │   ├── tools/                      # Agent 工具集（RAG/Web/Code/Citation）
 │   ├── repositories/               # PostgreSQL 文档目录、任务与资产 Repository
 │   ├── services/                   # 健康监视、索引并发控制与资产生命周期
-│   ├── models/                     # LLM 适配器（OpenAI / DeepSeek）
+│   ├── models/                     # 统一 LLM 接口、Provider 注册表与兼容适配器
 │   ├── observability/              # 追踪 & 指标（LangFuse + JSONL）
 │   └── api/                        # FastAPI 路由 + 静态文件托管
 │       ├── schemas.py              # Pydantic 请求/响应模型
@@ -251,6 +251,12 @@ npm run dev     # 开发模式 → http://localhost:5173
 备份远端文件并按键合并新增配置，再执行 `docker compose config --quiet` 和
 就绪检查。
 
+LLM Provider 支持 `openai`、`deepseek`、`openai_compatible` 和 `local`。
+兼容云 API 可接入提供 OpenAI-compatible Chat Completions 的服务；本地 Provider
+用于连接同一服务器上的 vLLM、Ollama、LM Studio 等推理服务。各 Provider 独立
+保存 Base URL、API Key、默认模型、四个 Agent 角色模型和工具/JSON 能力开关。
+本地服务可关闭“需要 API Key”，但仍必须配置可访问的 Base URL 与模型名。
+
 ### 🚢 3. 生产部署（单端口）
 
 ```bash
@@ -274,8 +280,9 @@ RAPTOR 会跳过单节点聚类，在生成摘要前检查节点上限，并对�
 Embedding。GraphRAG 从文档首中尾均匀取样，在私有图副本上完成构建后原子替换，
 未变化社区复用已有摘要；`graph` 模式会并行执行图检索和混合检索。研究流程使用
 可配置的请求、子任务和工具调用并发预算，并通过 `planning` 与 `heartbeat`
-SSE 事件及时反馈状态。未配置当前 LLM Provider 的 Key 时，研究页会明确进入
-“知识库检索”模式，不初始化 Multi-Agent。
+SSE 事件及时反馈状态。当前 LLM Provider 配置不完整时，研究页会明确进入
+“知识库检索”模式，不初始化 Multi-Agent。RAPTOR、GraphRAG 和 QA 生成未设置
+专用模型覆盖时，会继承当前 Provider 的 Researcher 模型。
 
 目标环境未使用 NVIDIA Container Toolkit，但已通过显式映射 NVIDIA 设备节点和
 宿主机驱动库完成容器 GPU 直通。生产容器运行 `torch==2.13.0+cu130`，
@@ -321,7 +328,7 @@ Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和�
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 语法、未定义名称和致命静态错误
-- **pytest + coverage** — 139 个单元与真实 API 回归测试
+- **pytest + coverage** — 143 个单元与真实 API 回归测试
 - **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验

@@ -66,11 +66,17 @@ _MODEL_COST_PER_1K: dict[str, tuple[float, float]] = {
 }
 
 
-def _estimate_cost(model: str, usage: dict) -> float:
+def _estimate_cost(
+    model: str,
+    usage: dict,
+    provider: str | None = None,
+) -> float:
     """Estimate USD cost from token usage and model name."""
-    if not usage:
+    if not usage or provider == "local":
         return 0.0
-    rates = _MODEL_COST_PER_1K.get(model, (0.001, 0.002))
+    rates = _MODEL_COST_PER_1K.get(model)
+    if rates is None:
+        return 0.0
     prompt_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
     return (prompt_tokens / 1000) * rates[0] + (completion_tokens / 1000) * rates[1]
@@ -102,13 +108,17 @@ class BaseAgent(ABC):
         tool_queue_timeout: float | None = None,
     ) -> None:
         settings = get_settings()
+        selected_provider = provider or settings.llm.llm_provider
 
         # Resolve model provider
         if llm is not None:
             self._llm = llm
         else:
-            _provider = provider or settings.llm.llm_provider
-            _model = model or settings.llm.get_model(self.model_role)
+            _provider = selected_provider
+            _model = model or settings.llm.get_model(
+                self.model_role,
+                _provider,
+            )
             self._llm = LLMFactory.create(_provider, _model)
 
         self._tools: list[BaseTool] = tools or []
@@ -116,6 +126,11 @@ class BaseAgent(ABC):
         self._temperature = temperature
         self._settings = settings
         self._model_name: str = getattr(self._llm, "_model", model or "unknown")
+        self._provider_name: str = getattr(
+            self._llm,
+            "provider_name",
+            selected_provider,
+        )
         self._tracer: Any = None
         self._tool_semaphore = tool_semaphore
         self._tool_queue_timeout = (
@@ -542,7 +557,11 @@ class BaseAgent(ABC):
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
-        cost = _estimate_cost(model_used, aggregated_usage)
+        cost = _estimate_cost(
+            model_used,
+            aggregated_usage,
+            self._provider_name,
+        )
         success = bool(final_content.strip())
         if not success:
             final_content = ""

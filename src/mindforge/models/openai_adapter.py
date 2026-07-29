@@ -17,7 +17,12 @@ class OpenAIAdapter(BaseLLM):
     def __init__(self, model: str = "gpt-4o", api_key: Optional[str] = None,
                  base_url: Optional[str] = None, max_retries: int = 3,
                  embed_model: str = "text-embedding-3-small", **kwargs):
-        self.model = model
+        normalized_model = model.strip()
+        if not normalized_model:
+            raise LLMConfigurationError("OpenAI model is not configured.")
+        self.model = normalized_model
+        self._model = normalized_model
+        self.provider_name = "openai"
         self.embed_model = embed_model
         key = api_key or ""
         if not key.strip():

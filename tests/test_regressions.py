@@ -18,7 +18,12 @@ from httpx import ASGITransport, AsyncClient
 from mindforge.agents.base import AgentResult, BaseAgent
 from mindforge.agents.synthesizer import SynthesizerAgent
 from mindforge.api import routes, server
-from mindforge.api.schemas import QueryRequest, SettingsUpdateRequest
+from mindforge.api.schemas import (
+    LLMProviderUpdate,
+    QueryRequest,
+    SettingsUpdateRequest,
+)
+from mindforge.config import LLMConfig
 from mindforge.ingestion.chunker import (
     DocumentChunk,
     ElementAwareSplitter,
@@ -983,6 +988,7 @@ async def test_orchestrator_initialization_failure_uses_retrieval_fallback(
         raise LLMConfigurationError("API key missing")
 
     monkeypatch.setattr(routes, "get_orchestrator", failed_orchestrator)
+    monkeypatch.setattr(routes, "has_llm_credentials", lambda: True)
     caplog.set_level(logging.WARNING, logger=routes.__name__)
 
     async def retrieval_without_llm(self, **kwargs) -> ToolResult:
@@ -1524,6 +1530,219 @@ def test_embedding_provider_change_requires_empty_index(
         )
 
     assert exc_info.value.status_code == 409
+
+
+def test_settings_response_exposes_unified_provider_configs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ApiKey:
+        is_active = object()
+
+    rows = [
+        SimpleNamespace(
+            provider="openai_compatible",
+            key_encrypted="encrypted-cloud-key",
+        )
+    ]
+
+    class Query:
+        def filter(self, *args):
+            del args
+            return self
+
+        def all(self):
+            return rows
+
+    class Session:
+        def query(self, model):
+            assert model is ApiKey
+            return Query()
+
+        def close(self):
+            return None
+
+    fake_db = SimpleNamespace(
+        ApiKey=ApiKey,
+        SessionLocal=Session,
+        decrypt_api_key=lambda value: (
+            "cloud-secret-1234"
+            if value == "encrypted-cloud-key"
+            else ""
+        ),
+    )
+    settings = SimpleNamespace(
+        llm=LLMConfig(
+            llm_provider="local",
+            compatible_base_url="https://cloud.example/v1",
+            compatible_model="cloud-model",
+            local_base_url="http://host.docker.internal:11434/v1",
+            local_model="qwen3",
+            local_api_key_required=False,
+        ),
+        retrieval=SimpleNamespace(vector_top_k=20, rerank_top_k=6),
+        agent=SimpleNamespace(
+            max_iterations=3,
+            max_refine_rounds=1,
+            critic_threshold=7.0,
+            subtask_timeout=30,
+            research_timeout=180,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "mindforge.db", fake_db)
+    monkeypatch.setattr(
+        "mindforge.config.get_settings",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        routes,
+        "has_llm_credentials",
+        lambda provider=None: provider == "local",
+    )
+
+    response = routes.get_settings_api()
+    providers = {
+        item.provider: item for item in response.llm_providers
+    }
+
+    assert set(providers) == {
+        "openai",
+        "deepseek",
+        "openai_compatible",
+        "local",
+    }
+    assert response.llm_provider == "local"
+    assert response.llm_configured is True
+    assert providers["local"].configured is True
+    assert providers["local"].api_key_required is False
+    assert providers["local"].default_model == "qwen3"
+    assert providers["openai_compatible"].api_key == "***1234"
+
+
+def test_settings_update_persists_multiple_provider_configs_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Column:
+        def __eq__(self, other):
+            del other
+            return True
+
+    class ApiKey:
+        provider = Column()
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Query:
+        def filter(self, *args):
+            del args
+            return self
+
+        def first(self):
+            return None
+
+    class Session:
+        def query(self, model):
+            assert model is ApiKey
+            return Query()
+
+        def add(self, row):
+            del row
+
+        def delete(self, row):
+            del row
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    fake_db = SimpleNamespace(
+        ApiKey=ApiKey,
+        SessionLocal=Session,
+        encrypt_api_key=lambda value: f"encrypted:{value}",
+        get_default_user_id=lambda db: 1,
+    )
+    captured: dict[str, str] = {}
+    environment_keys = {
+        "LLM_COMPATIBLE_API_KEY",
+        "LLM_COMPATIBLE_BASE_URL",
+        "LLM_COMPATIBLE_MODEL",
+        "LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA",
+        "LLM_LOCAL_API_KEY",
+        "LLM_LOCAL_BASE_URL",
+        "LLM_LOCAL_MODEL",
+        "LLM_LOCAL_API_KEY_REQUIRED",
+        "LLM_LLM_PROVIDER",
+    }
+    for key in environment_keys:
+        monkeypatch.setenv(key, "previous")
+
+    monkeypatch.setitem(sys.modules, "mindforge.db", fake_db)
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm=SimpleNamespace(embedding_provider="bge")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_snapshot_env_file",
+        lambda keys: {key: (False, "") for key in keys},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_sync_env_file",
+        lambda updates: captured.update(updates),
+    )
+    monkeypatch.setattr(
+        "mindforge.config.reload_settings",
+        lambda: None,
+    )
+    monkeypatch.setattr(routes, "reset_runtime_components", lambda: None)
+
+    result = routes._update_settings_locked(
+        SettingsUpdateRequest(
+            llm_provider="local",
+            llm_provider_configs=[
+                LLMProviderUpdate(
+                    provider="openai_compatible",
+                    base_url="https://cloud.example/v1",
+                    api_key="cloud-key",
+                    default_model="cloud-model",
+                    supports_json_schema=True,
+                ),
+                LLMProviderUpdate(
+                    provider="local",
+                    base_url="http://host.docker.internal:8001/v1",
+                    api_key="",
+                    api_key_required=False,
+                    default_model="qwen3",
+                ),
+            ],
+        )
+    )
+
+    assert result == {"status": "saved"}
+    assert captured["LLM_LLM_PROVIDER"] == "local"
+    assert captured["LLM_COMPATIBLE_API_KEY"] == "cloud-key"
+    assert (
+        captured["LLM_COMPATIBLE_BASE_URL"]
+        == "https://cloud.example/v1"
+    )
+    assert captured["LLM_COMPATIBLE_MODEL"] == "cloud-model"
+    assert captured["LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA"] == "true"
+    assert captured["LLM_LOCAL_API_KEY"] == ""
+    assert (
+        captured["LLM_LOCAL_BASE_URL"]
+        == "http://host.docker.internal:8001/v1"
+    )
+    assert captured["LLM_LOCAL_MODEL"] == "qwen3"
+    assert captured["LLM_LOCAL_API_KEY_REQUIRED"] == "false"
 
 
 def test_runtime_component_reset_continues_after_close_failure(

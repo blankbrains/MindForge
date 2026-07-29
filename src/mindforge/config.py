@@ -78,13 +78,41 @@ def require_environment_variable(name: str) -> str:
 
 
 class LLMConfig(BaseSettings):
-    """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
-    llm_provider: str = Field(default="openai", description="openai | deepseek")
+    """Unified cloud and self-hosted LLM provider configuration."""
+
+    llm_provider: str = Field(
+        default="openai",
+        description="openai | deepseek | openai_compatible | local",
+    )
     embedding_provider: str = Field(default="openai", description="openai | bge")
     openai_api_key: str = Field(default="")
     openai_base_url: Optional[str] = Field(default=None)
     deepseek_api_key: str = Field(default="")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
+    compatible_api_key: str = Field(default="")
+    compatible_base_url: str = Field(default="")
+    compatible_api_key_required: bool = Field(default=True)
+    compatible_model: str = Field(default="")
+    compatible_planner_model: str = Field(default="")
+    compatible_researcher_model: str = Field(default="")
+    compatible_critic_model: str = Field(default="")
+    compatible_synthesizer_model: str = Field(default="")
+    compatible_supports_tools: bool = Field(default=True)
+    compatible_supports_json_mode: bool = Field(default=True)
+    compatible_supports_json_schema: bool = Field(default=False)
+    local_api_key: str = Field(default="")
+    local_base_url: str = Field(
+        default="http://host.docker.internal:11434/v1"
+    )
+    local_api_key_required: bool = Field(default=False)
+    local_model: str = Field(default="")
+    local_planner_model: str = Field(default="")
+    local_researcher_model: str = Field(default="")
+    local_critic_model: str = Field(default="")
+    local_synthesizer_model: str = Field(default="")
+    local_supports_tools: bool = Field(default=True)
+    local_supports_json_mode: bool = Field(default=True)
+    local_supports_json_schema: bool = Field(default=False)
     planner_model: str = "gpt-4o"
     researcher_model: str = "gpt-4o-mini"
     critic_model: str = "gpt-4o"
@@ -109,8 +137,13 @@ class LLMConfig(BaseSettings):
     hf_endpoint: str = "https://hf-mirror.com"
     hf_hub_download_timeout: int = Field(default=30, ge=1)
 
-    def get_model(self, role: str) -> str:
-        if self.llm_provider == "deepseek":
+    def get_model(
+        self,
+        role: str,
+        provider: str | None = None,
+    ) -> str:
+        provider = (provider or self.llm_provider).lower()
+        if provider == "deepseek":
             mapping = {
                 "planner": self.deepseek_planner,
                 "researcher": self.deepseek_researcher,
@@ -119,7 +152,77 @@ class LLMConfig(BaseSettings):
                 "embedding": self.deepseek_embedding,
             }
             return mapping.get(role, self.deepseek_researcher)
+        if provider in {"openai_compatible", "local"}:
+            prefix = (
+                "compatible"
+                if provider == "openai_compatible"
+                else "local"
+            )
+            default_model = getattr(self, f"{prefix}_model")
+            role_model = getattr(self, f"{prefix}_{role}_model", "")
+            return role_model or default_model
         return getattr(self, f"{role}_model", self.researcher_model)
+
+    def get_api_key(self, provider: str | None = None) -> str:
+        selected = (provider or self.llm_provider).lower()
+        mapping = {
+            "openai": self.openai_api_key,
+            "deepseek": self.deepseek_api_key,
+            "openai_compatible": self.compatible_api_key,
+            "local": self.local_api_key,
+        }
+        return mapping.get(selected, "")
+
+    def get_base_url(self, provider: str | None = None) -> str | None:
+        selected = (provider or self.llm_provider).lower()
+        mapping = {
+            "openai": self.openai_base_url,
+            "deepseek": self.deepseek_base_url,
+            "openai_compatible": self.compatible_base_url,
+            "local": self.local_base_url,
+        }
+        value = mapping.get(selected)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if selected == "deepseek":
+            return "https://api.deepseek.com"
+        return None
+
+    def requires_api_key(self, provider: str | None = None) -> bool:
+        selected = (provider or self.llm_provider).lower()
+        if selected in {"openai", "deepseek"}:
+            return True
+        if selected == "openai_compatible":
+            return self.compatible_api_key_required
+        if selected == "local":
+            return self.local_api_key_required
+        return True
+
+    def supports_tools(self, provider: str | None = None) -> bool:
+        selected = (provider or self.llm_provider).lower()
+        if selected == "openai_compatible":
+            return self.compatible_supports_tools
+        if selected == "local":
+            return self.local_supports_tools
+        return True
+
+    def supports_json_mode(self, provider: str | None = None) -> bool:
+        selected = (provider or self.llm_provider).lower()
+        if selected == "openai_compatible":
+            return self.compatible_supports_json_mode
+        if selected == "local":
+            return self.local_supports_json_mode
+        return True
+
+    def supports_json_schema(self, provider: str | None = None) -> bool:
+        selected = (provider or self.llm_provider).lower()
+        if selected == "openai":
+            return True
+        if selected == "openai_compatible":
+            return self.compatible_supports_json_schema
+        if selected == "local":
+            return self.local_supports_json_schema
+        return False
 
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 
@@ -266,7 +369,13 @@ class VisualRetrievalConfig(BaseSettings):
 class RAPTORConfig(BaseSettings):
     raptor_levels: int = Field(default=3, ge=1, le=5)
     raptor_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    summary_model: str = Field(default="gpt-4o-mini")
+    summary_model: str = Field(
+        default="",
+        description=(
+            "Optional provider-specific override. Empty uses the active "
+            "provider's researcher model."
+        ),
+    )
     max_nodes: int = Field(default=2000, ge=10, le=100_000)
     summary_concurrency: int = Field(default=4, ge=1, le=32)
     model_config = SettingsConfigDict(env_prefix="RAPTOR_", extra="ignore")
@@ -274,8 +383,20 @@ class RAPTORConfig(BaseSettings):
 
 class GraphRAGConfig(BaseSettings):
     graph_enabled: bool = Field(default=True)
-    entity_extraction_model: str = Field(default="gpt-4o-mini")
-    community_summary_model: str = Field(default="gpt-4o-mini")
+    entity_extraction_model: str = Field(
+        default="",
+        description=(
+            "Optional provider-specific override. Empty uses the active "
+            "provider's researcher model."
+        ),
+    )
+    community_summary_model: str = Field(
+        default="",
+        description=(
+            "Optional provider-specific override. Empty uses the entity "
+            "extraction model."
+        ),
+    )
     max_entities_per_doc: int = Field(default=20)
     min_community_size: int = Field(default=3)
     extraction_char_budget: int = Field(
@@ -377,7 +498,13 @@ class SandboxConfig(BaseSettings):
 
 class QAGenerationConfig(BaseSettings):
     output_dir: str = Field(default="data/qa")
-    model: str = Field(default="deepseek-chat")
+    model: str = Field(
+        default="",
+        description=(
+            "Optional provider-specific override. Empty uses the active "
+            "provider's researcher model."
+        ),
+    )
     batch_size: int = Field(default=15, ge=1, le=100)
     concurrency: int = Field(default=3, ge=1, le=32)
     client_max_retries: int = Field(default=5, ge=0, le=20)

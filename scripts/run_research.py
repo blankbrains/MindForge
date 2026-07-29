@@ -27,7 +27,9 @@ async def main():
     from mindforge.config import get_settings, resolve_project_path
     settings = get_settings()
     print(f"   模型提供商: {settings.llm.llm_provider}")
-    print(f"   API Key 就绪: {bool(getattr(settings.llm, f'{settings.llm.llm_provider}_api_key', ''))}")
+    from mindforge.models.base import is_llm_configured
+
+    print(f"   LLM 配置就绪: {is_llm_configured()}")
 
     # Step 2: Prepare knowledge base document
     print("\n[2/4] 准备知识库文档...")
@@ -66,21 +68,13 @@ Transformer 使用正弦位置编码来注入位置信息。
     # Step 3: Test DeepSeek API
     print("\n[3/4] 测试 LLM API...")
     try:
-        from mindforge.models.base import ChatMessage
-        if settings.llm.llm_provider == "deepseek":
-            from mindforge.models.deepseek_adapter import DeepSeekAdapter
-            llm = DeepSeekAdapter(
-                model=settings.llm.get_model("researcher"),
-                api_key=settings.llm.deepseek_api_key,
-                base_url=settings.llm.deepseek_base_url,
-            )
-        else:
-            from mindforge.models.openai_adapter import OpenAIAdapter
-            llm = OpenAIAdapter(
-                model=settings.llm.get_model("researcher"),
-                api_key=settings.llm.openai_api_key,
-                base_url=settings.llm.openai_base_url,
-            )
+        from mindforge.models.base import ChatMessage, LLMFactory
+
+        provider = settings.llm.llm_provider
+        llm = LLMFactory.create(
+            provider,
+            settings.llm.get_model("researcher", provider),
+        )
 
         result = await llm.chat([
             ChatMessage(role="system", content="你是一个AI专家，用中文简洁回答。"),

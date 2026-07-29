@@ -151,7 +151,11 @@ class ResearcherAgent(BaseAgent):
 
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
                 from mindforge.agents.base import _estimate_cost
-                cost = _estimate_cost(self._model_name, aggregated_usage)
+                cost = _estimate_cost(
+                    self._model_name,
+                    aggregated_usage,
+                    self._provider_name,
+                )
 
                 agent_result = AgentResult(
                     agent_name=self.name,
@@ -287,7 +291,11 @@ class ResearcherAgent(BaseAgent):
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         from mindforge.agents.base import _estimate_cost
-        cost = _estimate_cost(self._model_name, aggregated_usage)
+        cost = _estimate_cost(
+            self._model_name,
+            aggregated_usage,
+            self._provider_name,
+        )
 
         agent_result = AgentResult(
             agent_name=self.name,

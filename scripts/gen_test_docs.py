@@ -10,22 +10,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.stdout.reconfigure(encoding="utf-8")
 
 from mindforge.config import get_settings, resolve_project_path  # noqa: E402
-from mindforge.models.base import ChatMessage  # noqa: E402
-from mindforge.models.deepseek_adapter import DeepSeekAdapter  # noqa: E402
+from mindforge.models.base import (  # noqa: E402
+    ChatMessage,
+    LLMFactory,
+    is_llm_configured,
+)
 
 _settings = get_settings()
-_api_key = _settings.llm.deepseek_api_key
-if not _api_key:
-    print("❌ 请在项目根目录 .env 中设置 LLM_DEEPSEEK_API_KEY")
+_provider = _settings.llm.llm_provider
+if not is_llm_configured(_provider):
+    print("❌ 当前 LLM Provider 配置不完整，请检查项目根目录 .env")
     sys.exit(1)
 
 DOCS_DIR = resolve_project_path(Path(_settings.app.data_dir) / "docs")
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-llm = DeepSeekAdapter(
-    model=_settings.llm.get_model("researcher"),
-    api_key=_api_key,
-    base_url=_settings.llm.deepseek_base_url,
+llm = LLMFactory.create(
+    _provider,
+    _settings.llm.get_model("researcher", _provider),
 )
 
 

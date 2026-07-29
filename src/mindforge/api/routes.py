@@ -31,7 +31,8 @@ from mindforge.api.schemas import (
     HistoryItem, HistorySaveRequest, IndexJobResponse, IndexRequest,
     IndexResponse,
     QueryRequest, QueryResponse,
-    SettingsResponse, SettingsUpdateRequest,
+    LLMProviderConfig, LLMProviderName, SettingsResponse,
+    SettingsUpdateRequest,
 )
 from mindforge.agents.base import AgentResult
 from mindforge.agents.orchestrator import Orchestrator
@@ -502,9 +503,13 @@ async def _index_parsed_document(
 
             settings = get_settings()
             provider = settings.llm.llm_provider
+            model = (
+                settings.raptor.summary_model.strip()
+                or settings.llm.get_model("researcher", provider)
+            )
             raptor_llm = LLMFactory.create(
                 provider,
-                settings.raptor.summary_model,
+                model,
             )
         except Exception as exc:
             logger.warning("RAPTOR LLM init failed: %s", exc)
@@ -514,19 +519,24 @@ async def _index_parsed_document(
 
             settings = get_settings()
             provider = settings.llm.llm_provider
+            entity_model = (
+                settings.graphrag.entity_extraction_model.strip()
+                or settings.llm.get_model("researcher", provider)
+            )
+            summary_model = (
+                settings.graphrag.community_summary_model.strip()
+                or entity_model
+            )
             graph_entity_llm = LLMFactory.create(
                 provider,
-                settings.graphrag.entity_extraction_model,
+                entity_model,
             )
-            if (
-                settings.graphrag.community_summary_model
-                == settings.graphrag.entity_extraction_model
-            ):
+            if summary_model == entity_model:
                 graph_summary_llm = graph_entity_llm
             else:
                 graph_summary_llm = LLMFactory.create(
                     provider,
-                    settings.graphrag.community_summary_model,
+                    summary_model,
                 )
         except Exception as exc:
             logger.warning("GraphRAG LLM init failed: %s", exc)
@@ -809,8 +819,9 @@ async def query(body: QueryRequest):
             try:
                 orch = await asyncio.to_thread(get_orchestrator)
             except LLMConfigurationError as exc:
-                logger.error(
-                    "Configured Agent provider could not initialize: %s",
+                logger.warning(
+                    "Configured Agent provider could not initialize; "
+                    "using retrieval fallback: %s",
                     exc,
                 )
             except Exception:
@@ -1356,10 +1367,97 @@ def get_settings_api():
                 return "***" + settings_key[-4:]
             return ""
 
+        provider_labels = {
+            "openai": "OpenAI",
+            "deepseek": "DeepSeek",
+            "openai_compatible": "OpenAI 兼容接口",
+            "local": "本地模型",
+        }
+
+        def _provider_config(
+            provider: LLMProviderName,
+        ) -> LLMProviderConfig:
+            if provider == "openai":
+                default_model = ""
+                planner_model = s.llm.planner_model
+                researcher_model = s.llm.researcher_model
+                critic_model = s.llm.critic_model
+                synthesizer_model = s.llm.synthesizer_model
+            elif provider == "deepseek":
+                default_model = ""
+                planner_model = s.llm.deepseek_planner
+                researcher_model = s.llm.deepseek_researcher
+                critic_model = s.llm.deepseek_critic
+                synthesizer_model = s.llm.deepseek_synthesizer
+            else:
+                prefix = (
+                    "compatible"
+                    if provider == "openai_compatible"
+                    else "local"
+                )
+                default_model = getattr(s.llm, f"{prefix}_model")
+                planner_model = getattr(
+                    s.llm,
+                    f"{prefix}_planner_model",
+                )
+                researcher_model = getattr(
+                    s.llm,
+                    f"{prefix}_researcher_model",
+                )
+                critic_model = getattr(
+                    s.llm,
+                    f"{prefix}_critic_model",
+                )
+                synthesizer_model = getattr(
+                    s.llm,
+                    f"{prefix}_synthesizer_model",
+                )
+            return LLMProviderConfig(
+                provider=provider,
+                label=provider_labels[provider],
+                base_url=s.llm.get_base_url(provider) or "",
+                api_key=_masked(
+                    provider,
+                    keys,
+                    s.llm.get_api_key(provider),
+                ),
+                api_key_required=s.llm.requires_api_key(provider),
+                default_model=default_model,
+                planner_model=planner_model,
+                researcher_model=researcher_model,
+                critic_model=critic_model,
+                synthesizer_model=synthesizer_model,
+                supports_tools=s.llm.supports_tools(provider),
+                supports_json_mode=s.llm.supports_json_mode(provider),
+                supports_json_schema=s.llm.supports_json_schema(provider),
+                configured=has_llm_credentials(provider),
+            )
+
+        provider_configs = [
+            _provider_config(provider)
+            for provider in (
+                "openai",
+                "deepseek",
+                "openai_compatible",
+                "local",
+            )
+        ]
         return SettingsResponse(
             llm_provider=s.llm.llm_provider,
+            llm_configured=has_llm_credentials(s.llm.llm_provider),
+            llm_providers=provider_configs,
             deepseek_api_key=_masked("deepseek", keys, s.llm.deepseek_api_key),
             openai_api_key=_masked("openai", keys, s.llm.openai_api_key),
+            compatible_api_key=_masked(
+                "openai_compatible",
+                keys,
+                s.llm.compatible_api_key,
+            ),
+            local_api_key=_masked(
+                "local",
+                keys,
+                s.llm.local_api_key,
+            ),
             embedding_provider=s.llm.embedding_provider,
             retrieval_top_k=s.retrieval.vector_top_k,
             rerank_top_k=s.retrieval.rerank_top_k,
@@ -1491,11 +1589,22 @@ def _update_settings_locked(body: SettingsUpdateRequest):
         _env_key_map = {
             "deepseek": "LLM_DEEPSEEK_API_KEY",
             "openai": "LLM_OPENAI_API_KEY",
+            "openai_compatible": "LLM_COMPATIBLE_API_KEY",
+            "local": "LLM_LOCAL_API_KEY",
         }
-        for provider, key_val in [
-            ("deepseek", body.deepseek_api_key),
-            ("openai", body.openai_api_key),
-        ]:
+        key_updates = {
+            "deepseek": body.deepseek_api_key,
+            "openai": body.openai_api_key,
+            "openai_compatible": body.compatible_api_key,
+            "local": body.local_api_key,
+        }
+        provider_updates = list(body.llm_provider_configs or [])
+        if body.llm_provider_config is not None:
+            provider_updates.append(body.llm_provider_config)
+        for provider_update in provider_updates:
+            key_updates[provider_update.provider] = provider_update.api_key
+
+        for provider, key_val in key_updates.items():
             existing = db.query(ApiKey).filter(
                 ApiKey.provider == provider
             ).first()
@@ -1520,6 +1629,99 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                 if existing:
                     db.delete(existing)
                 env_updates[_env_key_map[provider]] = ""
+
+        for provider_update in provider_updates:
+            provider = provider_update.provider
+            base_url_keys = {
+                "openai": "LLM_OPENAI_BASE_URL",
+                "deepseek": "LLM_DEEPSEEK_BASE_URL",
+                "openai_compatible": "LLM_COMPATIBLE_BASE_URL",
+                "local": "LLM_LOCAL_BASE_URL",
+            }
+            role_key_maps = {
+                "openai": {
+                    "planner_model": "LLM_PLANNER_MODEL",
+                    "researcher_model": "LLM_RESEARCHER_MODEL",
+                    "critic_model": "LLM_CRITIC_MODEL",
+                    "synthesizer_model": "LLM_SYNTHESIZER_MODEL",
+                },
+                "deepseek": {
+                    "planner_model": "LLM_DEEPSEEK_PLANNER",
+                    "researcher_model": "LLM_DEEPSEEK_RESEARCHER",
+                    "critic_model": "LLM_DEEPSEEK_CRITIC",
+                    "synthesizer_model": "LLM_DEEPSEEK_SYNTHESIZER",
+                },
+                "openai_compatible": {
+                    "planner_model": "LLM_COMPATIBLE_PLANNER_MODEL",
+                    "researcher_model": (
+                        "LLM_COMPATIBLE_RESEARCHER_MODEL"
+                    ),
+                    "critic_model": "LLM_COMPATIBLE_CRITIC_MODEL",
+                    "synthesizer_model": (
+                        "LLM_COMPATIBLE_SYNTHESIZER_MODEL"
+                    ),
+                },
+                "local": {
+                    "planner_model": "LLM_LOCAL_PLANNER_MODEL",
+                    "researcher_model": "LLM_LOCAL_RESEARCHER_MODEL",
+                    "critic_model": "LLM_LOCAL_CRITIC_MODEL",
+                    "synthesizer_model": "LLM_LOCAL_SYNTHESIZER_MODEL",
+                },
+            }
+            default_model_keys = {
+                "openai_compatible": "LLM_COMPATIBLE_MODEL",
+                "local": "LLM_LOCAL_MODEL",
+            }
+            capability_key_maps = {
+                "openai_compatible": {
+                    "api_key_required": (
+                        "LLM_COMPATIBLE_API_KEY_REQUIRED"
+                    ),
+                    "supports_tools": (
+                        "LLM_COMPATIBLE_SUPPORTS_TOOLS"
+                    ),
+                    "supports_json_mode": (
+                        "LLM_COMPATIBLE_SUPPORTS_JSON_MODE"
+                    ),
+                    "supports_json_schema": (
+                        "LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA"
+                    ),
+                },
+                "local": {
+                    "api_key_required": "LLM_LOCAL_API_KEY_REQUIRED",
+                    "supports_tools": "LLM_LOCAL_SUPPORTS_TOOLS",
+                    "supports_json_mode": (
+                        "LLM_LOCAL_SUPPORTS_JSON_MODE"
+                    ),
+                    "supports_json_schema": (
+                        "LLM_LOCAL_SUPPORTS_JSON_SCHEMA"
+                    ),
+                },
+            }
+            if provider_update.base_url is not None:
+                env_updates[base_url_keys[provider]] = (
+                    provider_update.base_url
+                )
+            if (
+                provider_update.default_model is not None
+                and provider in default_model_keys
+            ):
+                env_updates[default_model_keys[provider]] = (
+                    provider_update.default_model
+                )
+            for field_name, env_key in role_key_maps[provider].items():
+                value = getattr(provider_update, field_name)
+                if value is not None:
+                    env_updates[env_key] = value
+            for field_name, env_key in capability_key_maps.get(
+                provider,
+                {},
+            ).items():
+                value = getattr(provider_update, field_name)
+                if value is not None:
+                    env_updates[env_key] = (
+                        "true" if value else "false"
+                    )
 
         if body.llm_provider:
             env_updates["LLM_LLM_PROVIDER"] = body.llm_provider

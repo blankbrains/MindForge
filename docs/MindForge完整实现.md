@@ -67,9 +67,11 @@ MindForge 技术栈
 │   ├── 代码执行工具（数据分析）
 │   └── 引用验证工具                          ← 编号与来源支持检查
 │
-├── 模型层                                    ← 新增
-│   ├── OpenAI 适配器
-│   └── DeepSeek 适配器（一键切换，成本 1/10）
+├── 模型层
+│   ├── BaseLLM 统一接口 + Provider 注册表
+│   ├── OpenAI / DeepSeek 兼容适配器
+│   ├── OpenAI-compatible 云端接口
+│   └── vLLM / Ollama / LM Studio 本地服务
 │
 └── 服务层
     ├── FastAPI 异步服务器
@@ -164,9 +166,10 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   │
 │   ├── models/                                  # LLM 适配器
 │   │   ├── __init__.py
-│   │   ├── base.py                              # 抽象接口 + 工厂
+│   │   ├── base.py                              # 抽象接口 + Provider 注册表
 │   │   ├── openai_adapter.py                    # OpenAI 适配器
-│   │   └── deepseek_adapter.py                  # DeepSeek 适配器
+│   │   ├── deepseek_adapter.py                  # DeepSeek 适配器
+│   │   └── openai_compatible_adapter.py         # 云端/本地兼容适配器
 │   │
 │   ├── observability/                           # 可观测性
 │   │   ├── __init__.py
@@ -197,7 +200,7 @@ FastAPI + SSE      原生异步，流式输出零配置           "生产级 API
 Redis              情节记忆持久化与 TTL                 "跨重启缓存"
 LangFuse           开源可观测性，全链路追踪            "生产环境必备"
 pytest/Vitest      回归测试锁定失败语义和交互竞态       "可重复验证"
-DeepSeek/OpenAI    统一模型适配接口                     "供应商解耦"
+统一 LLM Registry  云端与本地模型共用 Agent 接口          "供应商解耦"
 GraphRAG           微软 2024 提出的图增强检索          "前沿技术敏感度"
 Docker Compose     一键启动所有服务                   "DevOps 实践"
 ```
@@ -250,13 +253,28 @@ for _env_path in _candidates:
             pass
 
 class LLMConfig(BaseSettings):
-    """LLM 配置 — 支持 OpenAI / DeepSeek 一键切换"""
-    llm_provider: str = Field(default="openai", description="openai | deepseek")
+    """统一云端与本地 LLM Provider 配置。"""
+    llm_provider: str = Field(
+        default="openai",
+        description="openai | deepseek | openai_compatible | local",
+    )
     embedding_provider: str = Field(default="openai", description="openai | bge")
     openai_api_key: str = Field(default="")
     openai_base_url: Optional[str] = Field(default=None)
     deepseek_api_key: str = Field(default="")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
+    compatible_api_key: str = ""
+    compatible_base_url: str = ""
+    compatible_api_key_required: bool = True
+    compatible_model: str = ""
+    compatible_supports_tools: bool = True
+    compatible_supports_json_mode: bool = True
+    local_api_key: str = ""
+    local_base_url: str = "http://host.docker.internal:11434/v1"
+    local_api_key_required: bool = False
+    local_model: str = ""
+    local_supports_tools: bool = True
+    local_supports_json_mode: bool = True
     planner_model: str = "gpt-4o"
     researcher_model: str = "gpt-4o-mini"
     critic_model: str = "gpt-4o"
@@ -273,8 +291,9 @@ class LLMConfig(BaseSettings):
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_dim: int = 1024
 
-    def get_model(self, role: str) -> str:
-        if self.llm_provider == "deepseek":
+    def get_model(self, role: str, provider: str | None = None) -> str:
+        provider = (provider or self.llm_provider).lower()
+        if provider == "deepseek":
             mapping = {
                 "planner": self.deepseek_planner,
                 "researcher": self.deepseek_researcher,
@@ -283,6 +302,12 @@ class LLMConfig(BaseSettings):
                 "embedding": self.deepseek_embedding,
             }
             return mapping.get(role, self.deepseek_researcher)
+        if provider in {"openai_compatible", "local"}:
+            prefix = "compatible" if provider == "openai_compatible" else "local"
+            return (
+                getattr(self, f"{prefix}_{role}_model", "")
+                or getattr(self, f"{prefix}_model")
+            )
         return getattr(self, f"{role}_model", self.researcher_model)
 
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
@@ -412,17 +437,30 @@ def reload_settings() -> Settings:
 # .env.example
 
 # ── LLM Provider ──
-LLM_PROVIDER=openai                # openai | deepseek
+LLM_LLM_PROVIDER=deepseek
+LLM_OPENAI_API_KEY=
+LLM_OPENAI_BASE_URL=
+LLM_DEEPSEEK_API_KEY=
+LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com
 
-# ── OpenAI（默认）──
-OPENAI_API_KEY=sk-...
+# ── OpenAI-compatible 云端 API ──
+LLM_COMPATIBLE_API_KEY=
+LLM_COMPATIBLE_BASE_URL=
+LLM_COMPATIBLE_API_KEY_REQUIRED=true
+LLM_COMPATIBLE_MODEL=
+LLM_COMPATIBLE_SUPPORTS_TOOLS=true
+LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
 
-# ── DeepSeek（备选）──
-# DEEPSEEK_API_KEY=sk-...
-# DEEPSEEK_BASE_URL=https://api.deepseek.com
+# ── 本地推理服务 ──
+LLM_LOCAL_API_KEY=
+LLM_LOCAL_BASE_URL=http://host.docker.internal:11434/v1
+LLM_LOCAL_API_KEY_REQUIRED=false
+LLM_LOCAL_MODEL=
+LLM_LOCAL_SUPPORTS_TOOLS=true
+LLM_LOCAL_SUPPORTS_JSON_MODE=true
 
 # ── Embedding（默认 BGE-M3 本地 1024 维）──
-EMBEDDING_PROVIDER=openai           # openai | bge
+LLM_EMBEDDING_PROVIDER=bge          # openai | bge
 # HF_ENDPOINT=https://hf-mirror.com  # HuggingFace 国内镜像
 
 # ── 模型映射（覆盖默认）──
@@ -3846,24 +3884,42 @@ class BaseEmbedder(ABC):
 
 
 class LLMFactory:
-    """LLM 工厂 — 根据配置返回对应的 LLM 实例"""
+    """注册表驱动的云端与本地 LLM 工厂。"""
 
-    @staticmethod
-    def create(provider: str, model: str, **kwargs) -> BaseLLM:
-        if provider == "deepseek":
-            from mindforge.models.deepseek_adapter import DeepSeekAdapter
-            return DeepSeekAdapter(model=model, **kwargs)
-        elif provider == "openai":
-            from mindforge.models.openai_adapter import OpenAIAdapter
-            return OpenAIAdapter(model=model, **kwargs)
-        else:
-            raise ValueError(
-                f"不支持的 LLM provider: {provider}。"
-                f"支持的 provider: openai, deepseek"
+    _providers: dict[str, ProviderBuilder] = {}
+
+    @classmethod
+    def register_provider(
+        cls,
+        name: str,
+        builder: ProviderBuilder,
+        *,
+        replace: bool = False,
+    ) -> None:
+        ...
+
+    @classmethod
+    def create(cls, provider: str, model: str, **kwargs) -> BaseLLM:
+        cls._ensure_builtin_providers()
+        builder = cls._providers.get(provider.strip().lower())
+        if builder is None:
+            raise LLMConfigurationError(
+                f"Unknown provider. Available: {cls.available_providers()}"
             )
+        return builder(model, dict(kwargs))
 ```
 
-### 7.2 OpenAI 适配器
+### 7.2 OpenAI-compatible 通用适配器
+
+`OpenAICompatibleAdapter` 同时服务兼容云 API 和本地推理端点，统一普通 Chat、
+Streaming、Tool Calling 增量聚合、JSON 能力降级和可选 Embedding。Base URL
+只接受不含凭证、查询串和 fragment 的绝对 HTTP(S) URL。本地 Provider 可以
+关闭 API Key 要求；模型名和 Base URL 仍是就绪条件。
+
+原有 OpenAI、DeepSeek Adapter 保留兼容导入，并由 `LLMFactory` 注册为内置
+Provider。
+
+### 7.3 OpenAI 适配器
 
 ```python
 # src/mindforge/models/openai_adapter.py
@@ -3995,7 +4051,7 @@ class OpenAIAdapter(BaseLLM):
         } for tc in tool_calls]
 ```
 
-### 7.3 DeepSeek 适配器
+### 7.4 DeepSeek 适配器
 
 ```python
 # src/mindforge/models/deepseek_adapter.py
@@ -6521,7 +6577,7 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-29 验证基线：139 项 pytest 通过、19 项
+2026-07-29 验证基线：143 项 pytest 通过、20 项
 Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
 GitHub Actions 的实际运行结果为准。
 
@@ -7154,8 +7210,8 @@ MindForge — Adaptive Research Assistant System
 ├── Built adaptive hybrid retrieval using dense search, BM25, weighted RRF,
 │   HyDE, Multi-Query, optional CrossEncoder reranking, and GraphRAG.
 │
-├── Implemented OpenAI/DeepSeek model adapters while keeping the embedding space
-│   independent and preventing incompatible provider switches on existing indexes.
+├── Implemented a provider registry for OpenAI, DeepSeek, OpenAI-compatible cloud APIs,
+│   and self-hosted models, with per-role routing and capability-aware requests.
 │
 ├── Developed three-tier memory (Working/Episodic/Semantic) and Self-Refine quality loop
 │   (Critic Agent with threshold-based iterative refinement).
@@ -7177,8 +7233,8 @@ MindForge — 自适应研究助理系统
 ├── 自适应混合检索：Dense + BM25 + RRF，并按查询模式启用
 │   HyDE、Multi-Query、CrossEncoder 和 GraphRAG
 │
-├── 模型层支持 OpenAI / DeepSeek 切换，同时将 LLM 与 Embedding 解耦，
-│   防止不同向量空间污染已有索引
+├── 模型层使用 Provider Registry 统一接入 OpenAI、DeepSeek、兼容云 API
+│   与本地推理服务，支持角色模型路由和接口能力开关
 │
 ├── 三层记忆系统（工作/情节/语义）+ Critic Self-Refine 质量循环，
 │   Critic Agent 5 维度自动评分，低于阈值自动触发精炼
@@ -7208,12 +7264,11 @@ A:  RAPTOR 是从底层文档块自底向上构建层次化摘要树，适合单
     适合跨文档的关系发现。当前 RAPTOR 摘要与普通 Chunk 一起进入 Qdrant，
     GraphRAG 则在 graph 查询模式下显式调用；尚未实现按 RAPTOR 层级下钻。
 
-Q4: 为什么同时支持 OpenAI 和 DeepSeek？
-A:  为了部署灵活性和供应商解耦。我通过 LLMFactory 抽象层实现切换，
-    对上层 Agent 保持统一接口。每个 Agent 角色可以配置不同模型；
-    具体成本差异取决于供应商当期定价，项目文档不写死比例。
-    LLMFactory.create() 对未知 provider 会 raise ValueError 而非静默 fallback。
-    面试时可以补充：这意味着不绑定单一供应商，且工厂模式支持未来扩展新模型。
+Q4: MindForge 如何统一接入不同大模型？
+A:  上层 Agent 只依赖 BaseLLM；LLMFactory 用注册表选择 Provider。内置
+    OpenAI、DeepSeek、OpenAI-compatible 云端接口和 Local 本地服务。
+    每个 Provider 独立配置 Base URL、Key、默认模型、四个角色模型和能力开关。
+    未知 Provider 会返回包含可用列表的 LLMConfigurationError，不静默回退。
 
 Q5: 你的 Critic Agent 怎么防止自我宽松偏差？
 A:  Critic Agent 使用独立的 Prompt 和评估标准，评分严格基于
@@ -7315,15 +7370,12 @@ A:  因为 BGE、OpenAI 和 hash 不在同一个向量空间。静默回退虽�
 #### 🧩 模型与成本
 
 ```
-Q12: 为什么同时支持 OpenAI 和 DeepSeek？具体怎么切换？
-A:  通过 LLMFactory + 适配器模式。LLMFactory.create(provider) 根据传入的
-    provider 参数返回对应的 Adapter（OpenAIAdapter 或 DeepSeekAdapter）。
-    两者都实现了 BaseLLM 的 chat() 和 embed() 接口，Agent 层完全不感知
-    底层用的是什么模型。切换只需要改 .env 里的 LLM_LLM_PROVIDER=deepseek。
-    Config 里还有 per-role 的模型映射——所有角色默认用 deepseek-chat，
-    也可以给不同角色分配不同模型（如 Critic 用 deepseek-reasoner）。
-    LLMFactory 对未知 provider 会 raise ValueError，快速发现问题。
-    成本对比：GPT-4o $2.5/1M input vs DeepSeek $0.27/1M input，约 1/10。
+Q12: 云端兼容 API 和本地模型如何切换？
+A:  设置 `LLM_LLM_PROVIDER`，或在设置页选择 Provider。兼容云 API 填
+    `LLM_COMPATIBLE_BASE_URL/API_KEY/MODEL`；本地 vLLM/Ollama/LM Studio
+    填 `LLM_LOCAL_BASE_URL/MODEL`，无鉴权时关闭 Key 要求。Agent、RAPTOR、
+    GraphRAG 和 QA 生成都通过 LLMFactory；专用模型为空时继承 Researcher。
+    Tool Calling、JSON Mode、JSON Schema 按实际服务能力开关。
 
 Q13: 怎么控制 LLM 调用成本？
 A:  四层成本控制：① per-role 模型分配（弱 Agent 用便宜模型）
@@ -7428,7 +7480,7 @@ A:  这是历史实验留下的分支结构。当前交付只以 main 为准，m
 
 Q24: 为什么没有用 LangChain/LlamaIndex 而是自己写？
 A:  LangChain 对 Agent 流程的抽象太重，调试困难，而且版本迭代快 API 经常 Breaking。
-    我选择直接调用 OpenAI/DeepSeek SDK + 自己实现 ReAct 循环和工具调度。
+    我选择使用轻量 Provider Adapter + 自己实现 ReAct 循环和工具调度。
     这样做的优势：① 完全掌控执行流程，出了问题能定位到具体代码行
     ② 不绑定框架版本，长期可维护 ③ 面试中可以逐行解释 Agent 的执行逻辑。
     当然对于快速原型阶段 LangChain 更快，但我的目标是学习底层原理——理解了
@@ -7458,7 +7510,7 @@ A:  优势：发现跨文档的实体关系（传统 RAG 只看单文档内的 c
 问 Agent 架构    → Multi-Agent 流水线 + DAG 并行 + 角色分工
 问 工具调用      → RAG/Web/Code/Citation 四类工具 + 有界 ReAct 循环
 问 检索          → 混合检索 RRF + HyDE + Multi-Query + 自适应 6 模式
-问 模型          → LLMFactory 抽象 + OpenAI/DeepSeek 切换 + per-role 模型映射
+问 模型          → Provider Registry + 云端兼容 API/本地模型 + per-role 路由
 问 成本          → 有界工具调用 + 精确任务缓存 + Token/成本追踪
 问 质量          → Critic 5维 Self-Refine + 引用支持检查 + 回归测试
 问 部署          → FastAPI SSE + Docker Compose + PostgreSQL + Redis 6377
@@ -7714,6 +7766,7 @@ interface HistoryResponse {
 | AgentConfig.research_timeout | (无) | **180s** | 新增全流程超时保护 |
 | CacheConfig.redis_url | localhost:6379 | **localhost:6377** | Redis Docker 对外端口 |
 | LLMFactory unknown provider | 默认 fallback openai | **raise ValueError** | 显式报错 |
+| LLM Provider | OpenAI/DeepSeek 写死 | **Registry + compatible/local** | 云端与本地统一 |
 | deepseek_critic | deepseek-reasoner | **deepseek-chat** | DeepSeek 统一模型 |
 | Reranker model_name | cross-encoder/ms-marco-MiniLM-L-6-v2 | **BAAI/bge-reranker-v2-m3** | 固定 revision，可选启动预加载与失败熔断 |
 

@@ -127,7 +127,10 @@ class ParsedDocument:
 
 ```python
 class LLMConfig(BaseSettings):
-    llm_provider: str = Field(default="openai", description="openai | deepseek")
+    llm_provider: str = Field(
+        default="openai",
+        description="openai | deepseek | openai_compatible | local",
+    )
     planner_model: str = "gpt-4o"
 ```
 
@@ -3060,7 +3063,7 @@ response = query_engine.query("Python 异步编程的性能表现？")
 | 维度 | LangChain | LangGraph | LlamaIndex | MindForge |
 |------|-----------|-----------|------------|-----------|
 | 定位 | 通用 LLM 框架 | 状态机编排 | 数据索引检索 | 自适应研究助理 |
-| 模型接入 | 多模型统一接口 | 基于 LangChain | 多模型 | 自研适配器（OpenAI/DeepSeek） |
+| 模型接入 | 多模型统一接口 | 基于 LangChain | 多模型 | Provider Registry + 兼容云/本地适配器 |
 | Agent | ReAct Agent | 状态图 Agent | 简单 Agent | 4 种定制 Agent + 精炼循环 |
 | 检索 | 标准 RAG | 基于 LangChain | 多种索引 | 混合检索 + 自适应路由 + GraphRAG |
 | 状态管理 | 无 | StateGraph | 无 | Orchestrator 内部状态 |
@@ -3203,7 +3206,7 @@ Dify = AI 应用的"低代码平台"
 | **标准 RAG 应用** | 上传文档，自动分块索引，直接出 API |
 | **私有化部署** | 客户要求数据不出内网，Dify 开源可自部署 |
 | **快速出 API** | 搭好后暴露 REST API，前端/后端几行代码对接 |
-| **模型对比实验** | 同一套流程对比 GPT-4o 和 DeepSeek 的效果 |
+| **模型对比实验** | 同一套流程对比云端 API 与本地模型的效果 |
 
 ---
 
@@ -5449,8 +5452,8 @@ async def full_pipeline(query):
 
 ```
 总数据量：6000 条（6 个领域 × 每个领域 900~1500 条）
-模型：DeepSeek-chat（deepseek-chat）生成
-成本：通过 DeepSeek API 批量生成，成本极低
+模型：由当前 `LLM_LLM_PROVIDER` 与 `QA_MODEL` 决定
+成本：取决于所选云端 API；本地模型主要消耗服务器算力
 生成器：`scripts/generate_qa_dataset.py`，输出到被 Git 忽略的 `data/qa/`
 ```
 

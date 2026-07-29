@@ -22,9 +22,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from openai import AsyncOpenAI  # noqa: E402
-
 from mindforge.config import get_settings, resolve_project_path  # noqa: E402
+from mindforge.models.base import (  # noqa: E402
+    ChatMessage,
+    LLMFactory,
+    is_llm_configured,
+)
 
 # ── 配置 ──────────────────────────────────────────────────────
 _SETTINGS = get_settings()
@@ -33,9 +36,11 @@ OUTPUT_DIR = resolve_project_path(_QA_CONFIG.output_dir)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # API 配置（从环境变量读取，与 MindForge 一致）
-API_KEY = _SETTINGS.llm.deepseek_api_key
-API_BASE = _SETTINGS.llm.deepseek_base_url
-MODEL = _QA_CONFIG.model
+PROVIDER = _SETTINGS.llm.llm_provider
+MODEL = (
+    _QA_CONFIG.model.strip()
+    or _SETTINGS.llm.get_model("researcher", PROVIDER)
+)
 
 # 每批生成的 QA 数量（控制 token 消耗和稳定性）
 BATCH_SIZE = _QA_CONFIG.batch_size
@@ -224,10 +229,11 @@ class QAGenerator:
     """QA 数据集生成器，支持断点续跑。"""
 
     def __init__(self):
-        self.client = AsyncOpenAI(
-            api_key=API_KEY,
-            base_url=API_BASE,
+        self.llm = LLMFactory.create(
+            PROVIDER,
+            MODEL,
             max_retries=_QA_CONFIG.client_max_retries,
+            max_tokens=_QA_CONFIG.max_tokens,
         )
         self.semaphore = asyncio.Semaphore(CONCURRENCY)
 
@@ -271,16 +277,20 @@ class QAGenerator:
         async with self.semaphore:
             for attempt in range(_QA_CONFIG.request_attempts):
                 try:
-                    response = await self.client.chat.completions.create(
-                        model=MODEL,
+                    response = await self.llm.chat(
                         messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt},
+                            ChatMessage(
+                                role="system",
+                                content=SYSTEM_PROMPT,
+                            ),
+                            ChatMessage(
+                                role="user",
+                                content=prompt,
+                            ),
                         ],
                         temperature=_QA_CONFIG.temperature,
-                        max_tokens=_QA_CONFIG.max_tokens,
                     )
-                    content = response.choices[0].message.content or ""
+                    content = response.content or ""
                 except Exception as e:
                     if attempt < _QA_CONFIG.request_attempts - 1:
                         wait = 2 ** attempt * _QA_CONFIG.retry_base_seconds
@@ -459,8 +469,8 @@ async def main():
             parser.error("--batch-size must be at least 1")
         BATCH_SIZE = args.batch_size
 
-    if not API_KEY:
-        print("[x] 请在项目根目录 .env 中设置 LLM_DEEPSEEK_API_KEY")
+    if not is_llm_configured(PROVIDER):
+        print("[x] 当前 LLM Provider 配置不完整，请检查项目根目录 .env")
         sys.exit(1)
 
     generator = QAGenerator()

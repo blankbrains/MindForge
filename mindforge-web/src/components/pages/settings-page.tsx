@@ -1,14 +1,11 @@
 import { useState } from "react";
-import { useSettingsStore, type LLMProvider } from "@/store/settings-store";
+import { LLMProviderPanel } from "@/components/settings/llm-provider-panel";
+import { useSettingsStore } from "@/store/settings-store";
 import {
   AlertCircle,
-  CheckCircle2,
-  Eye,
-  EyeOff,
   Loader2,
   RotateCcw,
   Save,
-  Trash2,
 } from "lucide-react";
 
 type TabId = "llm" | "retrieval" | "agent";
@@ -126,124 +123,9 @@ export function SettingsPage() {
         ))}
       </div>
 
-      {tab === "llm" && <LLMTab />}
+      {tab === "llm" && <LLMProviderPanel />}
       {tab === "retrieval" && <RetrievalTab />}
       {tab === "agent" && <AgentTab />}
-    </div>
-  );
-}
-
-function LLMTab() {
-  const provider = useSettingsStore((s) => s.llmProvider);
-  const apiKey = useSettingsStore((s) => s.llmApiKey);
-  const hasLLMKey = useSettingsStore((s) => s.hasLLMKey);
-  const setProvider = useSettingsStore((s) => s.setLLMProvider);
-  const setApiKey = useSettingsStore((s) => s.setLLMApiKey);
-  const restoreKey = useSettingsStore((s) => s.restoreLLMApiKey);
-  const deleteKey = useSettingsStore((s) => s.deleteLLMApiKey);
-  const [editing, setEditing] = useState(false);
-  const [showKey, setShowKey] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
-
-  const startEdit = () => { setApiKey(""); setEditing(true); };
-  const cancelEdit = () => {
-    restoreKey();
-    setEditing(false);
-  };
-
-  const handleProviderChange = (nextProvider: LLMProvider) => {
-    setEditing(false);
-    setShowKey(false);
-    setProvider(nextProvider);
-  };
-
-  const handleDelete = async () => {
-    setDeleting(true);
-    setDeleteError("");
-    const deleted = await deleteKey();
-    setDeleting(false);
-    if (deleted) {
-      setEditing(false);
-      setShowKey(false);
-    } else {
-      setDeleteError("删除失败，服务器中的 API Key 未确认移除，请重试。");
-    }
-  };
-
-  return (
-    <div className="rounded-xl border border-border bg-surface p-6 space-y-5" role="tabpanel">
-      <h3 className="font-semibold">LLM 供应商配置</h3>
-
-      <div>
-        <label htmlFor="llm-provider" className="block text-sm font-medium text-text mb-1.5">供应商</label>
-        <select id="llm-provider" value={provider} onChange={(e) => handleProviderChange(e.target.value as LLMProvider)}
-          className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none">
-          <option value="deepseek">DeepSeek</option>
-          <option value="openai">OpenAI</option>
-        </select>
-      </div>
-
-      <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <label className="text-sm font-medium text-text">API Key</label>
-          {hasLLMKey && !editing && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/40 dark:text-green-300">
-              <CheckCircle2 className="h-3 w-3" />已配置
-            </span>
-          )}
-        </div>
-
-        {hasLLMKey && !editing ? (
-          <div className="flex items-center gap-2">
-            <div className="flex-1 rounded-lg border border-green-200 bg-green-50/50 px-3 py-2 text-sm text-text-muted dark:border-green-800 dark:bg-green-950/30">
-              {apiKey || "********"}
-            </div>
-            <button type="button" onClick={startEdit}
-              className="rounded-lg border border-border px-3 py-2 text-sm hover:bg-surface-alt transition-colors">
-              修改
-            </button>
-            <button type="button" onClick={handleDelete} disabled={deleting}
-              className="rounded-lg border border-red-200 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:hover:bg-red-950 transition-colors" title="删除 Key">
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <input id="llm-api-key"
-                type={showKey ? "text" : "password"}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-..."
-                className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 pr-10 text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none"
-              />
-              <button type="button"
-                onClick={() => setShowKey(!showKey)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-text-muted hover:text-text transition-colors"
-                title={showKey ? "隐藏 Key" : "显示 Key"}>
-                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-            {editing && (
-              <button type="button" onClick={cancelEdit}
-                className="rounded-lg border border-border px-3 py-2 text-sm text-text-muted hover:bg-surface-alt transition-colors">
-                取消
-              </button>
-            )}
-          </div>
-        )}
-        <p className="mt-1 text-xs text-text-muted">
-          {hasLLMKey && !editing
-            ? "API Key 已保存。完整 Key 不会回显，可使用修改或删除按钮进行管理。"
-            : "请输入 API Key。若留空则降级为文档检索模式。"}
-        </p>
-        {deleteError && (
-          <p className="mt-2 text-xs text-red-600" role="alert">
-            {deleteError}
-          </p>
-        )}
-      </div>
     </div>
   );
 }

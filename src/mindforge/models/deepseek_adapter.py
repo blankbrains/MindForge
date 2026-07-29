@@ -56,7 +56,12 @@ class DeepSeekAdapter(BaseLLM):
 
     def __init__(self, model: str = "deepseek-chat", api_key: Optional[str] = None,
                  base_url: str = DEEPSEEK_BASE_URL, max_retries: int = 3, **kwargs):
-        self.model = model
+        normalized_model = model.strip()
+        if not normalized_model:
+            raise LLMConfigurationError("DeepSeek model is not configured.")
+        self.model = normalized_model
+        self._model = normalized_model
+        self.provider_name = "deepseek"
         key = api_key or ""
         if not key or not key.strip():
             raise LLMConfigurationError(

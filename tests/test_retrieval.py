@@ -22,8 +22,13 @@ from mindforge.agents.orchestrator import Orchestrator
 from mindforge.agents.planner import ResearchPlan, SubTask
 from mindforge.api import routes
 from mindforge.api import server
-from mindforge.api.schemas import HistorySaveRequest, SettingsUpdateRequest
+from mindforge.api.schemas import (
+    HistorySaveRequest,
+    LLMProviderUpdate,
+    SettingsUpdateRequest,
+)
 from mindforge.ingestion.embedder import EmbeddingManager
+from mindforge.config import get_settings
 from mindforge.retrieval.bm25 import BM25Retriever
 from mindforge.retrieval.graphrag import Entity, GraphRAGEngine
 from mindforge.retrieval.hybrid import HybridRetriever
@@ -35,6 +40,26 @@ from mindforge.tools.rag_tool import RAGTool
 def test_settings_api_keys_reject_control_characters():
     with pytest.raises(ValueError, match="control characters"):
         SettingsUpdateRequest(deepseek_api_key="valid-prefix\nINJECTED=value")
+
+
+def test_provider_update_validates_base_url_and_duplicates() -> None:
+    update = LLMProviderUpdate(
+        provider="local",
+        base_url="http://127.0.0.1:8001/v1/",
+    )
+    assert update.base_url == "http://127.0.0.1:8001/v1"
+
+    with pytest.raises(ValueError, match="credentials"):
+        LLMProviderUpdate(
+            provider="local",
+            base_url="http://user:secret@127.0.0.1:8001/v1",
+        )
+
+    with pytest.raises(ValueError, match="only be updated once"):
+        SettingsUpdateRequest(
+            llm_provider_config=update,
+            llm_provider_configs=[update],
+        )
 
 
 def test_env_sync_quotes_values_and_prevents_entry_injection(
@@ -746,7 +771,10 @@ def test_code_executor_runs_whitelisted_scientific_modules(
 ) -> None:
     result = CodeExecutor().execute(code, timeout=10)
 
-    assert result.success is True, result.data.get("stderr", "")
+    assert result.success is True, (result.data or {}).get(
+        "stderr",
+        result.error or "",
+    )
     assert result.output.strip() == expected
 
 
@@ -978,7 +1006,10 @@ def test_embedding_manager_pins_configured_model_revision(
 
     assert calls[0][1]["revision"]
     assert calls[0][1]["local_files_only"] is True
-    assert calls[0][1]["device"] == "cpu"
+    assert (
+        calls[0][1]["device"]
+        == get_settings().llm.sentence_transformers_device
+    )
 
 
 def test_embedding_dimension_adapter_preserves_geometry() -> None:

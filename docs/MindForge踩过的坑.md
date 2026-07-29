@@ -794,13 +794,30 @@ keyword，研究链路永远不会进入 `QueryMode.GRAPH`。构图期间查询�
 适配器；SSE 在规划前发送 `planning`，长步骤发送 `heartbeat`。未配置 LLM Key
 时直接进入知识库检索，不通过异常触发预期回退。
 
+### 65. 模型层抽象存在，但配置链路仍把 Provider 写死为两个
+
+**现象**：Agent 已依赖 `BaseLLM`，但 `LLMFactory`、`.env`、Settings API、
+数据库 Key 管理、前端状态和辅助脚本只认识 OpenAI/DeepSeek。服务器即使部署了
+vLLM/Ollama，或者云服务提供 OpenAI-compatible API，也无法完整进入研究、
+RAPTOR、GraphRAG 和 QA 生成链路。
+
+**根因**：模型调用接口完成了解耦，Provider 的发现、配置、就绪判断和能力描述
+没有解耦；高级索引还保存了 DeepSeek 专用模型名，切换本地 Provider 后会请求
+不存在的模型。
+
+**修复**：`LLMFactory` 改为注册表，新增通用 `OpenAICompatibleAdapter` 和
+`openai_compatible/local` Provider；设置页按后端 Provider 列表渲染并原子保存
+多份草稿；Local Provider 可关闭 Key 要求；Tool/JSON 能力显式配置。RAPTOR、
+GraphRAG、QA 生成和仓库辅助脚本统一走工厂，专用模型为空时继承当前 Provider
+的 Researcher 模型；Compose 增加宿主机网关。
+
 ---
 
 ## 总结
 
 | 类别 | 坑数 | 最深的坑 |
 |------|:----:|---------|
-| LLM 调用链路 | 4 | 脱敏 Key 覆盖真实 Key |
+| LLM 调用链路 | 5 | Provider 接口已抽象但配置和高级流程仍写死 |
 | Agent 编排 | 7 | 空响应、并发预算和流式综合协议错误 |
 | 检索与索引 | 18 | 向量空间污染、事件循环错用、竞态、静默截断和高级索引不可达 |
 | SSE 流式 | 6 | 失败回退、规划前无事件和长步骤无心跳 |
@@ -809,5 +826,5 @@ keyword，研究链路永远不会进入 `QueryMode.GRAPH`。构图期间查询�
 | 性能 | 5 | 大 PDF 解析、重复 Embedding、GPU 容器直通与同步重任务阻塞事件循环 |
 | 生产化与安全 | 12 | 沙箱边界、依赖缺失、输入边界、日志误报与资源释放 |
 
-总共 **64 个坑**，每个都落地到代码或测试层面解决了。面试官问到的时候，
+总共 **65 个坑**，每个都落地到代码或测试层面解决了。面试官问到的时候，
 挑 2-3 个讲清楚，比一口气列完更有说服力。

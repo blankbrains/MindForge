@@ -324,21 +324,32 @@ Agent 可以在隔离子进程中执行 Python 代码。沙箱限制 CPU、地�
 
 不把 LLM 调用硬编码到 Agent 逻辑中，而是通过适配器模式实现供应商切换。这样：
 - Agent 代码不关心用的是哪个模型。
-- 可以随时在 OpenAI 和 DeepSeek 之间切换（或者使用备用供应商做降级）。
-- 新增供应商只需要实现 BaseAdapter，不需要修改 Agent 代码。
+- 可以在 OpenAI、DeepSeek、兼容云 API 和服务器本地模型之间切换。
+- 新增原生供应商只需注册 `ProviderBuilder`，不需要修改 Agent 代码。
 
 #### 3.6.2 统一接口
 
-所有适配器实现相同的接口：
-- `chat_completion(messages)`：非流式调用，返回完整响应。
-- `stream_chat(messages)`：流式调用，逐 Token 返回响应。
-- `tool_call(messages, tools)`：工具调用，LLM 决定调用哪个工具。
+所有适配器实现 `BaseLLM`：
+- `chat(messages, tools, response_format, stream)`：统一普通、流式、工具调用和
+  结构化输出。
+- `embed(texts)` / `embed_single(text)`：可选的统一 Embedding 接口。
+- 返回 `ChatResult` / `StreamEvent`，Agent 不接触供应商 SDK 响应对象。
 
-#### 3.6.3 OpenAI / DeepSeek 双引擎
+#### 3.6.3 注册表与 OpenAI-compatible 适配器
 
-OpenAI 适配器适配 GPT-4o / GPT-4o-mini 等模型。DeepSeek 适配器适配 deepseek-chat（快速）和 deepseek-reasoner（深度推理）模型。
+`LLMFactory` 内置 `openai`、`deepseek`、`openai_compatible`、`local` 四个
+Provider，并提供注册/注销接口。通用 `OpenAICompatibleAdapter` 统一普通 Chat、
+流式响应、Tool Calling 增量聚合、JSON Mode/Schema 能力降级和可选 Embedding。
 
-Agent 可以根据任务复杂度自动选择：简单任务（如关键词提取）用 fast 模型，复杂任务（如规划、批判性评估）用 reasoner 模型。
+OpenAI 与 DeepSeek 保留原有 Adapter 和导入路径；兼容云 Provider 可连接通义、
+Kimi、硅基流动、Gemini 等提供兼容协议的服务；Local Provider 可连接 vLLM、
+Ollama、LM Studio。四个 Agent 角色可独立覆盖模型名，未覆盖时使用 Provider
+默认模型。
+
+本地模型可不配置 API Key，但 Base URL 与模型名必须完整。工具调用、JSON Mode
+和 JSON Schema 按 Provider 显式声明；关闭后 Adapter 不会发送服务不支持的参数。
+Docker Compose 配置 `host.docker.internal:host-gateway`，应用容器可访问宿主机
+推理端点。
 
 **⚠️ 曾踩过的坑**：API Key 配置的全链路一致性——前端保存 Key 后，后端需要同步更新到环境变量、数据库、缓存三处，任一环节断链都会导致调用失败。脱敏 Key 回显后又被当作真实 Key 写回的问题也花了不少时间排查。
 
@@ -531,13 +542,14 @@ done             →  { type, result: AgentResult }
 #### 4.2.5 系统配置页面
 
 允许用户动态调整配置，无需重启服务：
-- LLM 供应商切换（OpenAI / DeepSeek）和 API Key 配置。
+- 四种 LLM Provider 切换；独立配置 Base URL、API Key、默认/角色模型与能力开关。
 - 向量召回 Top-K 与重排 Top-K。
 - Agent 最大迭代、精炼轮数、评判阈值和超时。
 
 LLM 供应商与 Embedding 后端相互独立。设置页不会随 LLM 切换自动修改
 Embedding；已有索引时后端拒绝直接切换 Embedding provider，必须先清空并重建
-知识库。
+知识库。Provider 配置状态由后端综合判断，不再把“存在 API Key”等同于“模型
+可用”；Local Provider 在关闭 Key 要求后可无 Key 运行。
 
 ### 4.3 状态管理
 
@@ -609,7 +621,7 @@ Toolkit，因此 override 显式映射 `/dev/nvidia*` 设备节点以及宿主�
 
 GitHub Actions 自动运行：
 - **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。
-- **pytest + coverage**：139 项单元与回归测试。
+- **pytest + coverage**：143 项单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -644,9 +656,9 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 139 项通过 | `python -m pytest -q` |
+| Python 测试 | 143 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
-| 前端回归测试 | 16 项通过 | `npm test` |
+| 前端回归测试 | 20 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
 | 配置完整性 | 根目录 `.env` 为唯一运行时来源 | Pydantic、Vite、Compose 和脚本共用同一套键 |
 | 文档处理 | 页级解析、资产生命周期、取消与进度可追踪 | 回归测试与私有解析基准 |

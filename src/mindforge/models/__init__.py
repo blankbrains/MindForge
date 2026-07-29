@@ -7,13 +7,23 @@ from mindforge.models.base import (
     LLMConfigurationError,
     LLMFactory,
     StreamEvent,
+    is_llm_configured,
 )
-from mindforge.models.openai_adapter import OpenAIAdapter
 from mindforge.models.deepseek_adapter import DeepSeekAdapter
+from mindforge.models.openai_adapter import OpenAIAdapter
+from mindforge.models.openai_compatible_adapter import (
+    OpenAICompatibleAdapter,
+)
 
 __all__ = [
-    "BaseLLM", "LLMConfigurationError", "LLMFactory",
-    "ChatMessage", "ChatResult", "StreamEvent",
-    "OpenAIAdapter",
+    "BaseLLM",
+    "ChatMessage",
+    "ChatResult",
     "DeepSeekAdapter",
+    "LLMConfigurationError",
+    "LLMFactory",
+    "OpenAIAdapter",
+    "OpenAICompatibleAdapter",
+    "StreamEvent",
+    "is_llm_configured",
 ]

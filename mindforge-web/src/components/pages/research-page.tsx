@@ -52,12 +52,12 @@ export function ResearchPage() {
         <p className="mt-1 text-text-muted">输入研究问题，观察 Multi-Agent 系统实时协作</p>
       </div>
 
-      {/* 仅在未配置 API Key 时显示警告 */}
+      {/* 当前 Provider 未就绪时进入知识库检索模式。 */}
       {!hasLLMKey && (
         <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
           <AlertTriangle className="h-5 w-5 shrink-0" />
-          <span>未配置 LLM API Key，将使用<strong>文档检索模式</strong>。如需 AI 分析，请先</span>
-          <Link to="/settings" search={{}} className="font-medium underline whitespace-nowrap">配置 API Key</Link>
+          <span>当前模型服务配置不完整，将使用<strong>文档检索模式</strong>。如需 AI 分析，请先</span>
+          <Link to="/settings" search={{}} className="font-medium underline whitespace-nowrap">配置模型</Link>
         </div>
       )}
 
@@ -76,7 +76,7 @@ export function ResearchPage() {
             <p>{session.error ?? "未知错误"}</p>
             <div className="flex gap-2">
               <Link to="/settings" search={{}} className="inline-flex items-center gap-1 rounded-md bg-red-100 px-3 py-1.5 text-xs font-medium hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800">
-                <KeyRound className="h-3 w-3" />更新 API Key
+                <KeyRound className="h-3 w-3" />检查模型配置
               </Link>
               <button type="button" onClick={() => session.startResearch(lastTaskRef.current)} className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-3 py-1.5 text-xs font-medium hover:bg-amber-200 dark:bg-amber-900 dark:hover:bg-amber-800">
                 <FileSearch className="h-3 w-3" />重试

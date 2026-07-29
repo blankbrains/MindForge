@@ -2,15 +2,79 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { API_BASE } from "@/lib/constants";
 
-export type LLMProvider = "openai" | "deepseek";
+export const LLM_PROVIDERS = [
+  "openai",
+  "deepseek",
+  "openai_compatible",
+  "local",
+] as const;
 
-type ProviderValues = Record<LLMProvider, string>;
-type ProviderFlags = Record<LLMProvider, boolean>;
+export type LLMProvider = (typeof LLM_PROVIDERS)[number];
+
+export interface LLMProviderConfig {
+  provider: LLMProvider;
+  label: string;
+  baseUrl: string;
+  apiKey: string;
+  apiKeyRequired: boolean;
+  defaultModel: string;
+  plannerModel: string;
+  researcherModel: string;
+  criticModel: string;
+  synthesizerModel: string;
+  supportsTools: boolean;
+  supportsJsonMode: boolean;
+  supportsJsonSchema: boolean;
+  configured: boolean;
+}
+
+type ProviderConfigs = Record<LLMProvider, LLMProviderConfig>;
+type EditableProviderConfig = Omit<
+  LLMProviderConfig,
+  "provider" | "label" | "configured"
+>;
+
+interface ProviderConfigPayload {
+  provider: LLMProvider;
+  label: string;
+  base_url: string;
+  api_key: string;
+  api_key_required: boolean;
+  default_model: string;
+  planner_model: string;
+  researcher_model: string;
+  critic_model: string;
+  synthesizer_model: string;
+  supports_tools: boolean;
+  supports_json_mode: boolean;
+  supports_json_schema: boolean;
+  configured: boolean;
+}
+
+interface ProviderUpdatePayload {
+  provider: LLMProvider;
+  base_url: string;
+  api_key: string;
+  api_key_required: boolean;
+  default_model: string;
+  planner_model: string;
+  researcher_model: string;
+  critic_model: string;
+  synthesizer_model: string;
+  supports_tools: boolean;
+  supports_json_mode: boolean;
+  supports_json_schema: boolean;
+}
 
 interface SettingsPayload {
   llm_provider?: LLMProvider;
+  llm_configured?: boolean;
+  llm_providers?: ProviderConfigPayload[];
   deepseek_api_key?: string;
   openai_api_key?: string;
+  compatible_api_key?: string;
+  local_api_key?: string;
+  llm_provider_configs?: ProviderUpdatePayload[];
   embedding_provider?: "openai" | "bge";
   retrieval_top_k?: number;
   rerank_top_k?: number;
@@ -23,11 +87,11 @@ interface SettingsPayload {
 
 export interface SettingsState {
   llmProvider: LLMProvider;
-  llmApiKey: string;
+  llmConfigured: boolean;
   hasLLMKey: boolean;
-  maskedKeys: ProviderValues;
-  apiKeyDrafts: Partial<ProviderValues>;
-  hasLLMKeys: ProviderFlags;
+  providerConfigs: ProviderConfigs;
+  savedProviderConfigs: ProviderConfigs;
+  dirtyProviders: LLMProvider[];
   retrievalTopK: number;
   rerankTopK: number;
   maxIterations: number;
@@ -40,9 +104,11 @@ export interface SettingsState {
   saveError: string | null;
 
   setLLMProvider: (provider: LLMProvider) => void;
-  setLLMApiKey: (key: string) => void;
-  clearLLMApiKey: () => void;
-  restoreLLMApiKey: () => void;
+  updateLLMProviderConfig: (
+    provider: LLMProvider,
+    update: Partial<EditableProviderConfig>,
+  ) => void;
+  restoreLLMProviderConfig: (provider: LLMProvider) => void;
   setRetrievalTopK: (value: number) => void;
   setRerankTopK: (value: number) => void;
   setMaxIterations: (value: number) => void;
@@ -53,14 +119,127 @@ export interface SettingsState {
   resetConfigDefaults: () => void;
   loadSettings: () => Promise<void>;
   saveSettings: () => Promise<boolean>;
-  deleteLLMApiKey: () => Promise<boolean>;
+  deleteLLMApiKey: (provider?: LLMProvider) => Promise<boolean>;
 }
 
-const EMPTY_KEYS: ProviderValues = { openai: "", deepseek: "" };
-const EMPTY_FLAGS: ProviderFlags = { openai: false, deepseek: false };
+const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
+  openai: {
+    provider: "openai",
+    label: "OpenAI",
+    baseUrl: "",
+    apiKey: "",
+    apiKeyRequired: true,
+    defaultModel: "",
+    plannerModel: "gpt-4o",
+    researcherModel: "gpt-4o-mini",
+    criticModel: "gpt-4o",
+    synthesizerModel: "gpt-4o",
+    supportsTools: true,
+    supportsJsonMode: true,
+    supportsJsonSchema: true,
+    configured: false,
+  },
+  deepseek: {
+    provider: "deepseek",
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    apiKey: "",
+    apiKeyRequired: true,
+    defaultModel: "",
+    plannerModel: "deepseek-chat",
+    researcherModel: "deepseek-chat",
+    criticModel: "deepseek-chat",
+    synthesizerModel: "deepseek-chat",
+    supportsTools: true,
+    supportsJsonMode: true,
+    supportsJsonSchema: false,
+    configured: false,
+  },
+  openai_compatible: {
+    provider: "openai_compatible",
+    label: "OpenAI 兼容云 API",
+    baseUrl: "",
+    apiKey: "",
+    apiKeyRequired: true,
+    defaultModel: "",
+    plannerModel: "",
+    researcherModel: "",
+    criticModel: "",
+    synthesizerModel: "",
+    supportsTools: true,
+    supportsJsonMode: true,
+    supportsJsonSchema: false,
+    configured: false,
+  },
+  local: {
+    provider: "local",
+    label: "本地模型服务",
+    baseUrl: "http://host.docker.internal:11434/v1",
+    apiKey: "",
+    apiKeyRequired: false,
+    defaultModel: "",
+    plannerModel: "",
+    researcherModel: "",
+    criticModel: "",
+    synthesizerModel: "",
+    supportsTools: true,
+    supportsJsonMode: true,
+    supportsJsonSchema: false,
+    configured: false,
+  },
+};
 
-function providerKeyName(provider: LLMProvider) {
-  return provider === "deepseek" ? "deepseek_api_key" : "openai_api_key";
+function cloneProviderConfigs(configs: ProviderConfigs): ProviderConfigs {
+  return Object.fromEntries(
+    LLM_PROVIDERS.map((provider) => [
+      provider,
+      { ...configs[provider] },
+    ]),
+  ) as ProviderConfigs;
+}
+
+function isLLMProvider(value: unknown): value is LLMProvider {
+  return LLM_PROVIDERS.includes(value as LLMProvider);
+}
+
+function providerFromPayload(
+  payload: ProviderConfigPayload,
+): LLMProviderConfig {
+  return {
+    provider: payload.provider,
+    label: payload.label,
+    baseUrl: payload.base_url,
+    apiKey: payload.api_key,
+    apiKeyRequired: payload.api_key_required,
+    defaultModel: payload.default_model,
+    plannerModel: payload.planner_model,
+    researcherModel: payload.researcher_model,
+    criticModel: payload.critic_model,
+    synthesizerModel: payload.synthesizer_model,
+    supportsTools: payload.supports_tools,
+    supportsJsonMode: payload.supports_json_mode,
+    supportsJsonSchema: payload.supports_json_schema,
+    configured: payload.configured,
+  };
+}
+
+function providerToPayload(
+  config: LLMProviderConfig,
+): ProviderUpdatePayload {
+  return {
+    provider: config.provider,
+    base_url: config.baseUrl,
+    api_key: config.apiKey,
+    api_key_required: config.apiKeyRequired,
+    default_model: config.defaultModel,
+    planner_model: config.plannerModel,
+    researcher_model: config.researcherModel,
+    critic_model: config.criticModel,
+    synthesizer_model: config.synthesizerModel,
+    supports_tools: config.supportsTools,
+    supports_json_mode: config.supportsJsonMode,
+    supports_json_schema: config.supportsJsonSchema,
+  };
 }
 
 async function responseError(response: Response, fallback: string) {
@@ -96,11 +275,11 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       llmProvider: "deepseek",
-      llmApiKey: "",
+      llmConfigured: false,
       hasLLMKey: false,
-      maskedKeys: { ...EMPTY_KEYS },
-      apiKeyDrafts: {},
-      hasLLMKeys: { ...EMPTY_FLAGS },
+      providerConfigs: cloneProviderConfigs(DEFAULT_PROVIDER_CONFIGS),
+      savedProviderConfigs: cloneProviderConfigs(DEFAULT_PROVIDER_CONFIGS),
+      dirtyProviders: [],
       retrievalTopK: 20,
       rerankTopK: 6,
       maxIterations: 3,
@@ -113,51 +292,58 @@ export const useSettingsStore = create<SettingsState>()(
       saveError: null,
 
       setLLMProvider: (provider) => {
-        const state = get();
-        const displayedKey =
-          state.apiKeyDrafts[provider] ?? state.maskedKeys[provider];
+        const configured = get().providerConfigs[provider].configured;
         set({
           llmProvider: provider,
-          llmApiKey: displayedKey,
-          hasLLMKey: state.hasLLMKeys[provider],
+          llmConfigured: configured,
+          hasLLMKey: configured,
         });
       },
 
-      setLLMApiKey: (key) =>
-        set((state) => ({
-          llmApiKey: key,
-          apiKeyDrafts: {
-            ...state.apiKeyDrafts,
-            [state.llmProvider]: key,
-          },
-        })),
-
-      clearLLMApiKey: () =>
-        set((state) => ({
-          llmApiKey: "",
-          maskedKeys: {
-            ...state.maskedKeys,
-            [state.llmProvider]: "",
-          },
-          apiKeyDrafts: {
-            ...state.apiKeyDrafts,
-            [state.llmProvider]: "",
-          },
-          hasLLMKey: false,
-          hasLLMKeys: {
-            ...state.hasLLMKeys,
-            [state.llmProvider]: false,
-          },
-        })),
-
-      restoreLLMApiKey: () =>
+      updateLLMProviderConfig: (provider, update) =>
         set((state) => {
-          const drafts = { ...state.apiKeyDrafts };
-          delete drafts[state.llmProvider];
+          const nextConfig = {
+            ...state.providerConfigs[provider],
+            ...update,
+          };
+          const providerConfigs = {
+            ...state.providerConfigs,
+            [provider]: nextConfig,
+          };
+          const isDirty =
+            JSON.stringify(providerToPayload(nextConfig)) !==
+            JSON.stringify(
+              providerToPayload(state.savedProviderConfigs[provider]),
+            );
+          const dirtyProviders = isDirty
+            ? state.dirtyProviders.includes(provider)
+              ? state.dirtyProviders
+              : [...state.dirtyProviders, provider]
+            : state.dirtyProviders.filter((item) => item !== provider);
           return {
-            apiKeyDrafts: drafts,
-            llmApiKey: state.maskedKeys[state.llmProvider],
-            hasLLMKey: state.hasLLMKeys[state.llmProvider],
+            providerConfigs,
+            dirtyProviders,
+          };
+        }),
+
+      restoreLLMProviderConfig: (provider) =>
+        set((state) => {
+          const restored = { ...state.savedProviderConfigs[provider] };
+          const selectedChanged = provider === state.llmProvider;
+          return {
+            providerConfigs: {
+              ...state.providerConfigs,
+              [provider]: restored,
+            },
+            dirtyProviders: state.dirtyProviders.filter(
+              (item) => item !== provider,
+            ),
+            llmConfigured: selectedChanged
+              ? restored.configured
+              : state.llmConfigured,
+            hasLLMKey: selectedChanged
+              ? restored.configured
+              : state.hasLLMKey,
           };
         }),
 
@@ -169,21 +355,22 @@ export const useSettingsStore = create<SettingsState>()(
       setSubtaskTimeout: (value) => set({ subtaskTimeout: value }),
       setResearchTimeout: (value) => set({ researchTimeout: value }),
       resetConfigDefaults: () =>
-        set((state) => ({
-          llmProvider: "deepseek",
-          llmApiKey:
-            state.apiKeyDrafts.deepseek
-            ?? state.maskedKeys.deepseek,
-          hasLLMKey: state.hasLLMKeys.deepseek,
-          retrievalTopK: 20,
-          rerankTopK: 6,
-          maxIterations: 3,
-          maxRefineRounds: 1,
-          criticThreshold: 7,
-          subtaskTimeout: 30,
-          researchTimeout: 180,
-          saveError: null,
-        })),
+        set((state) => {
+          const configured = state.providerConfigs.deepseek.configured;
+          return {
+            llmProvider: "deepseek",
+            llmConfigured: configured,
+            hasLLMKey: configured,
+            retrievalTopK: 20,
+            rerankTopK: 6,
+            maxIterations: 3,
+            maxRefineRounds: 1,
+            criticThreshold: 7,
+            subtaskTimeout: 30,
+            researchTimeout: 180,
+            saveError: null,
+          };
+        }),
 
       loadSettings: async () => {
         set({ loaded: false, loadError: null });
@@ -194,23 +381,41 @@ export const useSettingsStore = create<SettingsState>()(
           }
 
           const data = (await response.json()) as SettingsPayload;
-          const provider = data.llm_provider ?? "deepseek";
-          const maskedKeys: ProviderValues = {
-            deepseek: data.deepseek_api_key ?? "",
-            openai: data.openai_api_key ?? "",
-          };
-          const hasLLMKeys: ProviderFlags = {
-            deepseek: maskedKeys.deepseek.length > 0,
-            openai: maskedKeys.openai.length > 0,
-          };
+          const provider = isLLMProvider(data.llm_provider)
+            ? data.llm_provider
+            : "deepseek";
+          const providerConfigs = cloneProviderConfigs(
+            DEFAULT_PROVIDER_CONFIGS,
+          );
 
+          for (const item of data.llm_providers ?? []) {
+            if (isLLMProvider(item.provider)) {
+              providerConfigs[item.provider] = providerFromPayload(item);
+            }
+          }
+
+          if (!data.llm_providers?.length) {
+            providerConfigs.openai.apiKey = data.openai_api_key ?? "";
+            providerConfigs.deepseek.apiKey = data.deepseek_api_key ?? "";
+            providerConfigs.openai_compatible.apiKey =
+              data.compatible_api_key ?? "";
+            providerConfigs.local.apiKey = data.local_api_key ?? "";
+            for (const item of LLM_PROVIDERS) {
+              providerConfigs[item].configured =
+                providerConfigs[item].apiKey.length > 0;
+            }
+          }
+
+          const configured =
+            data.llm_configured ?? providerConfigs[provider].configured;
+          const savedProviderConfigs = cloneProviderConfigs(providerConfigs);
           set({
             llmProvider: provider,
-            llmApiKey: maskedKeys[provider],
-            hasLLMKey: hasLLMKeys[provider],
-            maskedKeys,
-            apiKeyDrafts: {},
-            hasLLMKeys,
+            llmConfigured: configured,
+            hasLLMKey: configured,
+            providerConfigs,
+            savedProviderConfigs,
+            dirtyProviders: [],
             retrievalTopK: data.retrieval_top_k ?? 20,
             rerankTopK: data.rerank_top_k ?? 6,
             maxIterations: data.max_iterations ?? 3,
@@ -242,6 +447,9 @@ export const useSettingsStore = create<SettingsState>()(
         set({ saveError: null });
         const payload: SettingsPayload = {
           llm_provider: state.llmProvider,
+          llm_provider_configs: state.dirtyProviders.map((provider) =>
+            providerToPayload(state.providerConfigs[provider]),
+          ),
           retrieval_top_k: state.retrievalTopK,
           rerank_top_k: state.rerankTopK,
           max_iterations: state.maxIterations,
@@ -250,13 +458,6 @@ export const useSettingsStore = create<SettingsState>()(
           subtask_timeout: state.subtaskTimeout,
           research_timeout: state.researchTimeout,
         };
-
-        for (const provider of ["deepseek", "openai"] as const) {
-          const draft = state.apiKeyDrafts[provider];
-          if (draft !== undefined && !draft.startsWith("***")) {
-            payload[providerKeyName(provider)] = draft;
-          }
-        }
 
         try {
           const response = await fetch(`${API_BASE}/settings`, {
@@ -281,11 +482,15 @@ export const useSettingsStore = create<SettingsState>()(
         }
       },
 
-      deleteLLMApiKey: async () => {
-        const state = get();
-        const payload: SettingsPayload = {
-          [providerKeyName(state.llmProvider)]: "",
-        };
+      deleteLLMApiKey: async (providerOverride) => {
+        const provider = providerOverride ?? get().llmProvider;
+        const payload: SettingsPayload = {};
+        if (provider === "openai") payload.openai_api_key = "";
+        if (provider === "deepseek") payload.deepseek_api_key = "";
+        if (provider === "openai_compatible") {
+          payload.compatible_api_key = "";
+        }
+        if (provider === "local") payload.local_api_key = "";
         try {
           const response = await fetch(`${API_BASE}/settings`, {
             method: "PUT",
@@ -301,11 +506,9 @@ export const useSettingsStore = create<SettingsState>()(
       },
     }),
     {
-      name: "mindforge-settings-v2",
+      name: "mindforge-settings-v3",
       partialize: (state) => ({
         llmProvider: state.llmProvider,
-        hasLLMKey: state.hasLLMKey,
-        hasLLMKeys: state.hasLLMKeys,
         retrievalTopK: state.retrievalTopK,
         rerankTopK: state.rerankTopK,
         maxIterations: state.maxIterations,
