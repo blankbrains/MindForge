@@ -117,7 +117,7 @@ export interface SettingsState {
   setSubtaskTimeout: (value: number) => void;
   setResearchTimeout: (value: number) => void;
   resetConfigDefaults: () => void;
-  loadSettings: () => Promise<void>;
+  loadSettings: () => Promise<boolean>;
   saveSettings: () => Promise<boolean>;
   deleteLLMApiKey: (provider?: LLMProvider) => Promise<boolean>;
 }
@@ -426,6 +426,7 @@ export const useSettingsStore = create<SettingsState>()(
             loaded: true,
             loadError: null,
           });
+          return true;
         } catch (error) {
           set({
             loaded: true,
@@ -434,6 +435,7 @@ export const useSettingsStore = create<SettingsState>()(
                 ? error.message
                 : "设置加载失败。",
           });
+          return false;
         }
       },
 
@@ -474,8 +476,13 @@ export const useSettingsStore = create<SettingsState>()(
             });
             return false;
           }
-          await get().loadSettings();
-          return true;
+          const reloaded = await get().loadSettings();
+          if (!reloaded) {
+            set({
+              saveError: "设置已保存，但重新加载失败，请刷新页面确认。",
+            });
+          }
+          return reloaded;
         } catch {
           set({ saveError: "设置保存失败，请检查网络连接。" });
           return false;
@@ -498,8 +505,7 @@ export const useSettingsStore = create<SettingsState>()(
             body: JSON.stringify(payload),
           });
           if (!response.ok) return false;
-          await get().loadSettings();
-          return true;
+          return await get().loadSettings();
         } catch {
           return false;
         }

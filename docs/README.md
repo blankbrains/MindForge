@@ -26,7 +26,7 @@
 - 当前 Web 应用已停用 MCP；旧源码、脚本和测试已移除，协议说明仅作历史学习参考。
 - 研究流支持 `planning`、`heartbeat` 和 `answer_chunk` 事件，默认最多精炼 1 轮；当前 LLM Provider 配置不完整时直接进入知识库检索模式。
 - RAPTOR 跳过单节点摘要并批量生成摘要向量；GraphRAG 可由 Agent 的 `auto/graph` 模式触发，使用构建快照与社区摘要复用。
-- 当前验证基线包含 174 项 pytest、25 项前端回归测试、ESLint、构建和 Compose 校验。
+- 当前验证基线包含 178 项 pytest、31 项前端回归测试、ESLint、构建和 Compose 校验。
 - 模型层通过 Provider Registry 统一接入 OpenAI、DeepSeek、兼容云 API 与本地
   推理服务；设置页可独立配置 Base URL、Key、角色模型和 Tool/JSON 能力。
 - 数据库通过 Alembic 迁移，当前迁移头为 `0006_index_features`。
@@ -34,9 +34,11 @@
   `torch.cuda.is_available()` 和实际设备。
 - PDF 默认最多 600 页；大文档使用有界并发解析、持久化索引任务和内容签名复用。
 - GPU Compose 的运行方式由目标环境决定。Reranker 模型不可用时启动熔断并使用
-  向量 + BM25 + RRF，不声称 CrossEncoder 已启用。
+  向量 + BM25 + RRF，不声称 CrossEncoder 已启用；默认只读取持久化模型缓存。
 - 知识库页面不展示历史索引任务；上传弹窗使用 XHR 显示真实字节传输进度，
   上传完成后只轮询当前索引任务。
+- 文档卡片只展示实际成功应用的 RAPTOR/GraphRAG；历史详情和研究结果使用同一
+  Markdown/代码高亮渲染链路。
 - PDF 解析使用自适应按页管线：原生文本优先，低质量页再使用 PaddleOCR；
   原生表格转 Markdown，OCR/表格/图片元素携带页码、坐标、置信度与来源方法。
   资产、解析版本和页级指标会持久化；视觉描述检索默认关闭，显式配置后才会执行。

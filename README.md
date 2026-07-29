@@ -15,7 +15,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 | 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / PostgreSQL）+ 快捷操作入口 |
 | 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
 | 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
-| 🕐 **研究历史** | 自动捕获研究结果、可展开预览、删除 / 清空管理 |
+| 🕐 **研究历史** | 自动捕获研究结果、Markdown/代码高亮预览、删除 / 清空管理 |
 | ⚙️ **系统配置** | LLM 供应商切换、检索参数、Agent 参数管理 |
 
 ### 🎯 核心能力
@@ -312,8 +312,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 3. 按需启用 RAPTOR 层次索引或 GraphRAG 图谱索引；首次验证建议先关闭两者，
    确认基础解析和检索正常后再启用。
 4. 点击“开始索引”。界面先显示文件传输进度，再显示解析、Embedding 和索引进度。
-5. 等待状态变为“已索引”，随后可查看内容或删除文档。取消任务时系统会回滚
-   未完成的向量、目录记录和解析资产。
+5. 等待状态变为“已索引”，随后可查看内容或删除文档。文档卡片只标记实际完成的
+   RAPTOR/GraphRAG 索引；取消任务时系统会回滚未完成的向量、目录记录和解析资产。
 
 #### 4. 发起研究
 
@@ -322,7 +322,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 3. LLM Provider 可用时，界面展示规划、子任务、综合和评判过程；Provider
    未就绪时自动使用知识库检索模式。问候类输入不会触发检索；命中的原始文档
    片段会明确标注为未总结内容，主流语言代码使用安全的高亮代码块展示。
-4. 完成结果会保存到“研究历史”，可查看完整报告或删除记录。
+4. 完成结果会保存到“研究历史”，历史详情与研究结果使用相同的 Markdown 和
+   代码高亮渲染，可查看完整报告或删除记录。
 
 #### 5. 日常更新、排障和停止
 
@@ -522,7 +523,7 @@ MindForge；不要直接公开应用或基础设施端口。
 阶段、进度、取消和重启恢复。知识库页面不展示历史索引任务，也不轮询任务列表；
 上传弹窗先显示字节级文件传输进度，再切换到当前文件的服务端索引进度。文档 ID
 基于解析内容的 SHA-256，索引签名覆盖
-分块、Embedding、RAPTOR 和 GraphRAG 配置；只有 PostgreSQL、Qdrant 与 BM25
+分块、Embedding、RAPTOR/GraphRAG 的有效 Provider、模型和可用状态；只有 PostgreSQL、Qdrant 与 BM25
 三方记录完整一致时才复用已有索引。
 
 RAPTOR 会跳过单节点聚类，在生成摘要前检查节点上限，并对同层摘要执行批量
@@ -533,15 +534,17 @@ SSE 事件及时反馈状态。当前 LLM Provider 配置不完整时，研究�
 “知识库检索”模式，不初始化 Multi-Agent；问候类输入直接返回模式说明，检索
 结果按真实语义/关键词证据过滤，原始代码片段以带语法高亮的 Markdown 代码块
 展示。LLM 输出的显式语言标记优先；无标记代码块才执行主流语言自动检测，
-无法可靠识别时按纯文本代码块展示。知识库文档卡片会标明基础索引、RAPTOR
-和 GraphRAG 的实际启用状态。
+无法可靠识别时按纯文本代码块展示。历史详情复用同一 Markdown 渲染链路。
+知识库文档卡片会标明基础索引、RAPTOR 和 GraphRAG 的实际启用状态，而不是
+用户提交任务时的勾选状态。
 RAPTOR、GraphRAG 和 QA 生成未设置专用模型覆盖时，会继承当前 Provider 的
 Researcher 模型。
 
 CPU 与 GPU 依赖使用独立哈希锁；GPU 环境通过 `docker-compose.gpu.yml` 启动，
 部署后应在容器内验证 `torch.cuda.is_available()` 和实际设备。Reranker 模型
 不可用时会熔断，向量 + BM25 + RRF 检索仍可继续工作，不会把未加载的
-CrossEncoder 声称为已启用。
+CrossEncoder 声称为已启用。生产环境默认只从持久化模型缓存加载 Reranker；
+需要在线下载时显式设置 `RETRIEVAL_RERANKER_LOCAL_FILES_ONLY=false`。
 
 ### 📄 4. 解析资产与视觉检索
 
@@ -580,7 +583,7 @@ Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和�
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 语法、未定义名称和致命静态错误
-- **pytest + coverage** — 143 个单元与真实 API 回归测试
+- **pytest + coverage** — 178 个单元与真实 API 回归测试
 - **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验
@@ -628,6 +631,7 @@ GitHub Actions 自动运行：
 - **暗色模式** — CSS 变量驱动，一键切换，自动跟随系统偏好
 - **SSE 流式渲染** — 后端事件逐条推送；旧会话回调不会污染新任务，超时读取运行时设置
 - **响应式布局** — 桌面侧边栏 + 移动端底部导航，Tailwind CSS 断点适配
+- **可靠设置交互** — 保存后重新读取服务端状态再报告成功；普通参数修改只重置受影响的运行时组件
 
 ### 🔧 工程化
 

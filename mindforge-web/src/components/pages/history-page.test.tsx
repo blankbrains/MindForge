@@ -1,5 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const historyState = vi.hoisted(() => {
   let resolveFirst!: () => void;
@@ -49,6 +55,11 @@ vi.mock("@/store/history-store", () => ({
 
 import { HistoryPage } from "./history-page";
 
+afterEach(() => {
+  cleanup();
+  historyState.state.entries[0].report = "first report";
+});
+
 describe("HistoryPage", () => {
   it("does not let an older detail request replace the latest selection", async () => {
     render(<HistoryPage />);
@@ -62,6 +73,22 @@ describe("HistoryPage", () => {
     await waitFor(() => {
       expect(screen.queryByText("first report")).toBeNull();
       expect(screen.getByText("second report")).not.toBeNull();
+    });
+  });
+
+  it("renders stored reports as Markdown with highlighted code blocks", async () => {
+    historyState.state.entries[0].report =
+      "## Result\n\n```python\nprint('ok')\n```";
+    const { container } = render(<HistoryPage />);
+
+    fireEvent.click(screen.getByText("first task"));
+    historyState.resolveFirst();
+
+    expect(await screen.findByRole("heading", { name: "Result" })).not.toBeNull();
+    await waitFor(() => {
+      const code = container.querySelector("pre code");
+      expect(code).not.toBeNull();
+      expect(code?.classList.contains("language-python")).toBe(true);
     });
   });
 });

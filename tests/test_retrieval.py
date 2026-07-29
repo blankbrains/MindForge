@@ -963,7 +963,11 @@ def test_reranker_pins_configured_model_revision(monkeypatch) -> None:
     assert calls == [
         (
             "example/reranker",
-            {"revision": "immutable-revision", "device": "cpu"},
+            {
+                "revision": "immutable-revision",
+                "device": "cpu",
+                "local_files_only": True,
+            },
         )
     ]
 

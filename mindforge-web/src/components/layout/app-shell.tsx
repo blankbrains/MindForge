@@ -65,7 +65,6 @@ export function AppShell() {
               key={to}
               to={to}
               search={{}}
-              reloadDocument={to === "/settings"}
               className="flex flex-col items-center gap-0.5 px-3 py-1 text-xs text-text-muted [&.active]:text-primary"
             >
               {label}

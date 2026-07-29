@@ -6599,7 +6599,7 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-29 验证基线：174 项 pytest 通过、25 项
+2026-07-29 验证基线：178 项 pytest 通过、31 项
 Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
 GitHub Actions 的实际运行结果为准。
 
@@ -7130,7 +7130,7 @@ export function Sidebar() {
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive = to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to);
-          return <Link key={to} to={to} search={{}} reloadDocument={to === "/settings"} className={cn("flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors", isActive ? "bg-primary/10 text-primary" : "text-text-muted hover:bg-surface-alt hover:text-text")}><Icon className="h-4 w-4" />{label}</Link>;
+          return <Link key={to} to={to} search={{}} className={cn("flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors", isActive ? "bg-primary/10 text-primary" : "text-text-muted hover:bg-surface-alt hover:text-text")}><Icon className="h-4 w-4" />{label}</Link>;
         })}
       </nav>
       <div className="border-t border-border px-6 py-4"><p className="text-xs text-text-muted">MindForge v1.0.0</p></div>

@@ -495,8 +495,12 @@ export function KnowledgeBasePage() {
                 : "服务器会在当前阶段结束后停止并回滚本次索引。确定要取消吗？"}
             </p>
             <div className="flex gap-3">
-              <button type="button" onClick={() => setCancelConfirmOpen(false)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">继续上传</button>
-              <button type="button" onClick={confirmCancelUpload} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 transition-colors">停止上传</button>
+              <button type="button" onClick={() => setCancelConfirmOpen(false)} className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted hover:bg-surface-alt transition-colors">
+                {upload.isPending ? "继续上传" : "继续索引"}
+              </button>
+              <button type="button" onClick={confirmCancelUpload} className="flex-1 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-600 transition-colors">
+                {upload.isPending ? "停止上传" : "取消索引"}
+              </button>
             </div>
         </Modal>
       )}

@@ -131,6 +131,11 @@ def get_reranker() -> CrossEncoderReranker | None:
                 model_revision=settings.reranker_model_revision,
                 max_candidates=settings.reranker_max_candidates,
                 device=settings.reranker_device,
+                local_files_only=getattr(
+                    settings,
+                    "reranker_local_files_only",
+                    True,
+                ),
             )
         return _reranker
 
@@ -182,10 +187,10 @@ async def index_auxiliary_documents(
     progress_callback: Any = None,
     timings: dict[str, float] | None = None,
     start_progress: float = 88.0,
-) -> None:
+) -> bool:
     """Persist BM25 and optional GraphRAG indexes for uploaded chunks."""
     if not documents:
-        return
+        return False
     stage_timings = timings if timings is not None else {}
     async with _index_lock:
         if progress_callback is not None:
@@ -244,6 +249,8 @@ async def index_auxiliary_documents(
                     len(documents),
                     dict(stage_timings),
                 )
+            return True
+    return False
 
 
 async def delete_auxiliary_document(doc_id: str) -> None:

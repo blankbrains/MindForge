@@ -170,6 +170,29 @@ describe("KnowledgeBasePage", () => {
     ).not.toBeNull();
   });
 
+  it("uses indexing-specific labels in the cancellation confirmation", async () => {
+    runningJob.enabled = false;
+    uploadState.pending = false;
+    uploadState.completeImmediately = true;
+    render(<KnowledgeBasePage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "上传文档" }));
+    fireEvent.change(screen.getByLabelText("选择文件"), {
+      target: {
+        files: [new File(["content"], "large.pdf", {
+          type: "application/pdf",
+        })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "取消本次索引" }),
+    );
+
+    expect(screen.getByRole("button", { name: "继续索引" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "取消索引" })).not.toBeNull();
+  });
+
   it("ignores a stale document preview response", async () => {
     let resolveFirst!: (response: Response) => void;
     let resolveSecond!: (response: Response) => void;

@@ -163,6 +163,10 @@ CrossEncoder 和普通向量检索（Bi-Encoder）的核心区别：
 
 之所以采用"先粗筛再精排"的两阶段设计，是因为 CrossEncoder 的计算量随候选集线性增长，不可能对全量文档逐一精排。先用 Bi-Encoder + BM25 将候选集从百万级降到 50，再用 CrossEncoder 精排到 Top-5，兼顾了效率和精度。
 
+Reranker 默认以 `RETRIEVAL_RERANKER_LOCAL_FILES_ONLY=true` 从持久化模型缓存
+加载，避免生产启动时因外网不可达进入长重试。需要首次在线下载时可显式关闭该
+开关；模型不可用时熔断并保留向量 + BM25 + RRF 基础检索。
+
 #### 3.2.6 自适应检索（adaptive.py）
 
 自适应检索策略是 MindForge 的亮点之一。它根据用户查询的**意图类型**，自动选择最优的检索策略组合。
@@ -249,7 +253,8 @@ Chunk 数建立硬边界。超限属于客户端输入问题，API 返回带实�
 异步索引、进度和取消路径。
 
 解析完成后使用解析内容 SHA-256 生成稳定文档 ID，不再把任务临时文件名或
-mtime 纳入标识。索引签名覆盖分块、Embedding、RAPTOR 和 GraphRAG 配置；
+mtime 纳入标识。索引签名覆盖分块、Embedding，以及 RAPTOR/GraphRAG 的有效
+Provider、模型和可用状态；
 相同内容只有在 PostgreSQL、Qdrant 和 BM25 三方完整性一致时才复用。
 
 #### 3.3.2 文本分块（chunker.py）
@@ -541,7 +546,8 @@ done             →  { type, result: AgentResult }
 
 文档管理界面：
 - 文档选择上传，自动触发解析和索引。
-- 文档列表（文件名、Chunk 数、索引状态，以及基础索引、RAPTOR、GraphRAG 标识）。
+- 文档列表（文件名、Chunk 数、索引状态，以及实际成功应用的基础索引、RAPTOR、
+  GraphRAG 标识）。
 - 文档删除（删除时自动清理对应的向量索引）。
 - 上传时可选择 RAPTOR 和 GraphRAG 增强索引。
 
@@ -549,7 +555,7 @@ done             →  { type, result: AgentResult }
 
 自动保存成功完成的研究任务：
 - 任务列表（问题摘要、时间、执行时间、是否成功）。
-- 可展开预览（点击查看报告摘要）。
+- 可展开预览（使用与研究结果相同的 Markdown、GFM 和代码高亮渲染）。
 - 删除 / 清空管理（历史上限由 `API_MAX_HISTORY_ENTRIES` 配置，默认 1000 条）。
 
 #### 4.2.5 系统配置页面
@@ -563,6 +569,9 @@ LLM 供应商与 Embedding 后端相互独立。设置页不会随 LLM 切换自
 Embedding；已有索引时后端拒绝直接切换 Embedding provider，必须先清空并重建
 知识库。Provider 配置状态由后端综合判断，不再把“存在 API Key”等同于“模型
 可用”；Local Provider 在关闭 Key 要求后可无 Key 运行。
+保存设置后，前端必须重新读取服务端配置成功才显示保存完成。后端按变更范围重置
+Orchestrator、Retriever 或 Embedder，不再为普通检索参数修改关闭 Qdrant 客户端
+或重置索引并发器；活动索引任务存在时拒绝切换 Embedding provider。
 
 ### 4.3 状态管理
 
@@ -658,7 +667,7 @@ README 的“服务器完整操作流程”是面向使用者的主入口。
 
 GitHub Actions 自动运行：
 - **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。
-- **pytest + coverage**：174 项单元与回归测试。
+- **pytest + coverage**：178 项单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -690,9 +699,9 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 174 项通过 | `python -m pytest -q` |
+| Python 测试 | 178 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
-| 前端回归测试 | 25 项通过 | `npm test` |
+| 前端回归测试 | 31 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
 | 配置完整性 | 根目录 `.env` 为唯一运行时来源 | Pydantic、Vite、Compose 和脚本共用同一套键 |
 | 文档处理 | 页级解析、资产生命周期、取消与进度可追踪 | 回归测试与私有解析基准 |

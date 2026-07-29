@@ -167,6 +167,16 @@ describe("settings store", () => {
     expect(payload).not.toHaveProperty("embedding_provider");
   });
 
+  it("does not report success when the saved settings cannot be reloaded", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+
+    expect(await useSettingsStore.getState().saveSettings()).toBe(false);
+    expect(useSettingsStore.getState().loadError).toContain("503");
+    expect(useSettingsStore.getState().saveError).toContain("重新加载失败");
+  });
+
   it("rejects invalid numeric settings before sending a request", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     useSettingsStore.setState({ retrievalTopK: 0 });
@@ -262,6 +272,16 @@ describe("settings store", () => {
     expect(JSON.parse(String(request.body))).toEqual({
       openai_api_key: "",
     });
+  });
+
+  it("does not report API-key deletion success when reload fails", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+
+    expect(
+      await useSettingsStore.getState().deleteLLMApiKey("openai"),
+    ).toBe(false);
   });
 
   it("resets numeric defaults without discarding provider drafts", () => {

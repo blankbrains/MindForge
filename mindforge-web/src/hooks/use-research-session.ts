@@ -105,6 +105,12 @@ export function useResearchSession() {
 
       const configuredSeconds =
         useSettingsStore.getState().researchTimeout;
+      const settingsState = useSettingsStore.getState();
+      const providerLabel =
+        settingsState.providerConfigs[settingsState.llmProvider]?.label
+        || "当前模型服务";
+      const authenticationError =
+        `API Key 无效或已过期，请在设置中更新${providerLabel}凭证。`;
       const timeoutMs =
         Number.isFinite(configuredSeconds) && configuredSeconds > 0
           ? configuredSeconds * 1000
@@ -189,7 +195,7 @@ export function useResearchSession() {
           if (err instanceof Error && "status" in err) {
             const status = (err as unknown as Record<string, unknown>).status as number;
             if (status === 401 || status === 403) {
-              useResearchStore.getState().setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
+              useResearchStore.getState().setStatus("error", authenticationError);
               return;
             }
             if (status >= 500) {
@@ -199,7 +205,7 @@ export function useResearchSession() {
           }
           const lower = msg.toLowerCase();
           if (lower.includes("401") || lower.includes("403") || lower.includes("auth")) {
-            useResearchStore.getState().setStatus("error", "API Key 无效或已过期，请在设置中更新 DeepSeek Key。");
+            useResearchStore.getState().setStatus("error", authenticationError);
           } else if (lower.includes("timeout") || lower.includes("abort")) {
             useResearchStore.getState().setStatus("error", "研究超时，请尝试简化问题或减少问题范围。");
           } else if (lower.includes("network") || lower.includes("fetch") || lower.includes("connect")) {

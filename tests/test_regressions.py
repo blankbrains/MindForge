@@ -8,6 +8,7 @@ import logging
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -464,6 +465,47 @@ async def test_reusable_document_requires_complete_vector_and_bm25_indexes(
     )
 
     assert reusable is None
+
+
+@pytest.mark.asyncio
+async def test_index_lifecycle_persists_features_that_were_actually_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statuses: list[dict] = []
+
+    async def record_status(**values):
+        statuses.append(values)
+
+    async def fake_index(**_kwargs):
+        return [SimpleNamespace(chunk_id="chunk")], False, False
+
+    @asynccontextmanager
+    async def available_slot():
+        yield
+
+    monkeypatch.setattr(routes, "set_document_status", record_status)
+    monkeypatch.setattr(routes, "_index_parsed_document", fake_index)
+    monkeypatch.setattr(routes, "index_slot", available_slot)
+    monkeypatch.setattr(
+        "mindforge.services.indexing.build_index_signature",
+        lambda **_kwargs: "signature",
+    )
+
+    chunks = await routes._index_with_lifecycle(
+        parsed=SimpleNamespace(
+            doc_id="doc",
+            content="content",
+            metadata={},
+        ),
+        source="document.txt",
+        use_raptor=True,
+        use_graphrag=True,
+    )
+
+    assert len(chunks) == 1
+    assert statuses[-1]["status"] == "indexed"
+    assert statuses[-1]["use_raptor"] is False
+    assert statuses[-1]["use_graphrag"] is False
 
 
 @pytest.mark.asyncio
@@ -1517,6 +1559,38 @@ def test_health_schema_has_no_mcp_fields() -> None:
     assert not any(key.startswith("mcp_") for key in payload)
 
 
+@pytest.mark.asyncio
+async def test_model_preloads_run_sequentially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def preload_embedder() -> None:
+        calls.append("embedder:start")
+        await asyncio.sleep(0)
+        calls.append("embedder:done")
+
+    async def preload_reranker() -> None:
+        calls.append("reranker:start")
+        await asyncio.sleep(0)
+        calls.append("reranker:done")
+
+    monkeypatch.setattr(server, "_preload_embedder", preload_embedder)
+    monkeypatch.setattr(server, "_preload_reranker", preload_reranker)
+
+    await server._preload_models(
+        preload_embedder=True,
+        preload_reranker=True,
+    )
+
+    assert calls == [
+        "embedder:start",
+        "embedder:done",
+        "reranker:start",
+        "reranker:done",
+    ]
+
+
 def test_runtime_retrieval_limits_are_wired(monkeypatch: pytest.MonkeyPatch) -> None:
     from mindforge.retrieval import service
 
@@ -1531,6 +1605,7 @@ def test_runtime_retrieval_limits_are_wired(monkeypatch: pytest.MonkeyPatch) -> 
             reranker_model="",
             reranker_model_revision=None,
             reranker_max_candidates=100,
+            reranker_local_files_only=True,
             max_request_top_k=50,
             vector_top_k=24,
             rerank_top_k=7,
@@ -1572,6 +1647,98 @@ def test_embedding_provider_change_requires_empty_index(
         )
 
     assert exc_info.value.status_code == 409
+
+
+def test_embedding_provider_change_rejects_active_index_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm=SimpleNamespace(embedding_provider="bge")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_vector_store",
+        lambda: SimpleNamespace(get_point_count=lambda: 0),
+    )
+    monkeypatch.setattr(
+        "mindforge.repositories.index_jobs.list_index_jobs",
+        lambda **_kwargs: [{"job_id": "active-job"}],
+    )
+
+    with pytest.raises(routes.HTTPException) as exc_info:
+        routes._update_settings_locked(
+            SettingsUpdateRequest(embedding_provider="openai")
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "indexing jobs" in str(exc_info.value.detail).lower()
+
+
+def test_advanced_index_signature_tracks_effective_llm_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Dumpable:
+        def model_dump(self, **_kwargs):
+            return {"version": 1}
+
+    def settings(provider: str, model: str):
+        return SimpleNamespace(
+            parser=SimpleNamespace(
+                pipeline_version=5,
+                model_dump=lambda **_kwargs: {"mode": "auto"},
+            ),
+            visual_retrieval=Dumpable(),
+            chunking=SimpleNamespace(chunk_size=512, chunk_overlap=64),
+            vector_store=SimpleNamespace(embedding_dim=1024),
+            raptor=SimpleNamespace(
+                raptor_levels=3,
+                raptor_threshold=0.7,
+                summary_model="",
+            ),
+            graphrag=SimpleNamespace(
+                entity_extraction_model="",
+                community_summary_model="",
+            ),
+            llm=SimpleNamespace(
+                llm_provider=provider,
+                embedding_provider="bge",
+                local_embedding_model="BAAI/bge-m3",
+                embedding_model="text-embedding-3-small",
+                get_model=lambda _role, _provider=None: model,
+            ),
+        )
+
+    monkeypatch.setattr(
+        indexing_service,
+        "get_settings",
+        lambda: settings("local", "qwen3"),
+    )
+    monkeypatch.setattr(
+        "mindforge.models.base.has_llm_credentials",
+        lambda _provider=None: True,
+    )
+    first = indexing_service.build_index_signature(
+        strategy="auto",
+        use_raptor=True,
+        use_graphrag=True,
+    )
+
+    monkeypatch.setattr(
+        indexing_service,
+        "get_settings",
+        lambda: settings("openai_compatible", "cloud-model"),
+    )
+    second = indexing_service.build_index_signature(
+        strategy="auto",
+        use_raptor=True,
+        use_graphrag=True,
+    )
+
+    assert first != second
 
 
 def test_settings_response_exposes_unified_provider_configs(
@@ -1709,6 +1876,7 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
         get_default_user_id=lambda db: 1,
     )
     captured: dict[str, str] = {}
+    reset_scopes: list[dict[str, bool]] = []
     environment_keys = {
         "LLM_COMPATIBLE_API_KEY",
         "LLM_COMPATIBLE_BASE_URL",
@@ -1745,7 +1913,11 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
         "mindforge.config.reload_settings",
         lambda: None,
     )
-    monkeypatch.setattr(routes, "reset_runtime_components", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "reset_runtime_components",
+        lambda **kwargs: reset_scopes.append(kwargs),
+    )
 
     result = routes._update_settings_locked(
         SettingsUpdateRequest(
@@ -1785,6 +1957,15 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
     )
     assert captured["LLM_LOCAL_MODEL"] == "qwen3"
     assert captured["LLM_LOCAL_API_KEY_REQUIRED"] == "false"
+    assert reset_scopes == [
+        {
+            "reset_orchestrator": True,
+            "reset_embedder": False,
+            "reset_vector_store": False,
+            "reset_retrieval": True,
+            "reset_indexing": False,
+        }
+    ]
 
 
 def test_runtime_component_reset_continues_after_close_failure(

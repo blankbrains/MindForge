@@ -19,11 +19,13 @@ class CrossEncoderReranker:
         model_revision: str | None = None,
         max_candidates: int = 100,
         device: str = "cpu",
+        local_files_only: bool = True,
     ):
         self.model_name = model_name
         self.model_revision = model_revision
         self.max_candidates = max(1, max_candidates)
         self.device = device
+        self.local_files_only = local_files_only
         self._model = None
         self._load_failed = False
         self._model_lock = threading.Lock()
@@ -50,6 +52,7 @@ class CrossEncoderReranker:
                             self.model_name,
                             revision=self.model_revision,
                             device=self.device,
+                            local_files_only=self.local_files_only,
                         )
                         logger.info("Loaded CrossEncoder model '%s'.", self.model_name)
                     except ImportError:

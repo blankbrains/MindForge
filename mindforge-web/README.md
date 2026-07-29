@@ -22,7 +22,10 @@ npm run dev
 ```
 
 默认地址由根目录 `.env` 中的 `VITE_DEV_HOST` 和 `VITE_DEV_PORT` 控制，`/api` 请求代理到 `VITE_API_PROXY_TARGET`。
-设置页从服务端读取运行时配置；浏览器只持久化非敏感参数和 Key 是否已配置的状态，完整 API Key 不写入 localStorage。
+设置页从服务端读取运行时配置；保存后必须重新读取成功才会显示“已保存”。浏览器只持久化非敏感参数和 Key 是否已配置的状态，完整 API Key 不写入 localStorage。
+
+研究结果和历史详情共用 Markdown、GFM 与代码高亮渲染。知识库文档卡片展示后端
+记录的实际索引能力，不把上传时勾选但被跳过的 RAPTOR/GraphRAG 显示为已启用。
 
 ## 质量检查
 

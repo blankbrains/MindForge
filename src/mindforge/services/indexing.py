@@ -43,6 +43,38 @@ def build_index_signature(
         in {"bge", "sentence-transformers", "local"}
         else settings.llm.embedding_model
     )
+    advanced_index_provider = None
+    advanced_index_ready = None
+    raptor_model = None
+    graph_entity_model = None
+    graph_community_model = None
+    if use_raptor or use_graphrag:
+        from mindforge.models.base import has_llm_credentials
+
+        advanced_index_provider = settings.llm.llm_provider
+        advanced_index_ready = has_llm_credentials(
+            advanced_index_provider
+        )
+    if use_raptor:
+        raptor_model = (
+            settings.raptor.summary_model.strip()
+            or settings.llm.get_model(
+                "researcher",
+                advanced_index_provider,
+            )
+        )
+    if use_graphrag:
+        graph_entity_model = (
+            settings.graphrag.entity_extraction_model.strip()
+            or settings.llm.get_model(
+                "researcher",
+                advanced_index_provider,
+            )
+        )
+        graph_community_model = (
+            settings.graphrag.community_summary_model.strip()
+            or graph_entity_model
+        )
     payload = {
         "pipeline_version": settings.parser.pipeline_version,
         "strategy": strategy,
@@ -64,17 +96,12 @@ def build_index_signature(
         "raptor_threshold": (
             settings.raptor.raptor_threshold if use_raptor else None
         ),
+        "advanced_index_provider": advanced_index_provider,
+        "advanced_index_ready": advanced_index_ready,
+        "raptor_model": raptor_model,
         "use_graphrag": use_graphrag,
-        "graph_entity_model": (
-            settings.graphrag.entity_extraction_model
-            if use_graphrag
-            else None
-        ),
-        "graph_community_model": (
-            settings.graphrag.community_summary_model
-            if use_graphrag
-            else None
-        ),
+        "graph_entity_model": graph_entity_model,
+        "graph_community_model": graph_community_model,
     }
     serialized = json.dumps(
         payload,

@@ -143,6 +143,18 @@ async def _preload_reranker() -> None:
         logger.error("Reranker preload failed: %s", exc)
 
 
+async def _preload_models(
+    *,
+    preload_embedder: bool,
+    preload_reranker: bool,
+) -> None:
+    """Load local NLP models sequentially to protect shared HF clients."""
+    if preload_embedder:
+        await _preload_embedder()
+    if preload_reranker:
+        await _preload_reranker()
+
+
 # ------------------------------------------------------------------
 # Lifecycle
 # ------------------------------------------------------------------
@@ -211,18 +223,21 @@ async def startup():
         except Exception:
             logger.exception("Persistent index-job workers failed to start.")
 
-    # 后台预加载 embedding 模型（BGE-M3 1.7GB，首次加载 ~170s）
-    # 避免用户上传文档时等待
-    if settings.llm.embedding_provider in ("bge", "sentence-transformers"):
-        task = asyncio.create_task(_preload_embedder())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
-
-    if (
+    preload_embedder = settings.llm.embedding_provider in (
+        "bge",
+        "sentence-transformers",
+    )
+    preload_reranker = bool(
         settings.retrieval.reranker_model
         and settings.retrieval.reranker_preload
-    ):
-        task = asyncio.create_task(_preload_reranker())
+    )
+    if preload_embedder or preload_reranker:
+        task = asyncio.create_task(
+            _preload_models(
+                preload_embedder=preload_embedder,
+                preload_reranker=preload_reranker,
+            )
+        )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 

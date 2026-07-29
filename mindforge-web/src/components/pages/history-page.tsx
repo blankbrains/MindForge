@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useHistoryStore } from "@/store/history-store";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Modal } from "@/components/shared/modal";
+import { StreamingMarkdown } from "@/components/research/streaming-markdown";
 import {
   CheckCircle2,
   ChevronDown,
@@ -241,8 +242,10 @@ export function HistoryPage() {
                   id={detailId}
                   className="border-t border-border px-5 py-4"
                 >
-                  <div className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-lg bg-surface-alt p-4 font-sans text-sm">
-                    {entry.report || "（无内容）"}
+                  <div className="max-h-96 overflow-y-auto rounded-lg bg-surface-alt p-4 text-sm">
+                    <StreamingMarkdown
+                      content={entry.report || "（无内容）"}
+                    />
                   </div>
                 </div>
               )}

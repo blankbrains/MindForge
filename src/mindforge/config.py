@@ -297,6 +297,7 @@ class RetrievalConfig(BaseSettings):
     )
     reranker_device: str = "cpu"
     reranker_preload: bool = True
+    reranker_local_files_only: bool = True
     bm25_index_dir: Optional[str] = Field(
         default=None,
         description="Persistent BM25 corpus directory.",

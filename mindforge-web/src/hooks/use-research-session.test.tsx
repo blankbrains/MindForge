@@ -110,4 +110,26 @@ describe("useResearchSession", () => {
     expect(useResearchStore.getState().planning).toBe(false);
     unmount();
   });
+
+  it("names the selected provider in authentication errors", () => {
+    useSettingsStore.setState({
+      llmProvider: "local",
+      providerConfigs: {
+        ...useSettingsStore.getState().providerConfigs,
+        local: {
+          ...useSettingsStore.getState().providerConfigs.local,
+          label: "本地模型",
+        },
+      },
+    });
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("provider error"));
+    const error = Object.assign(new Error("unauthorized"), { status: 401 });
+    act(() => sseState.connections[0].onError(error));
+
+    expect(useResearchStore.getState().error).toContain("本地模型");
+    expect(useResearchStore.getState().error).not.toContain("DeepSeek");
+    unmount();
+  });
 });

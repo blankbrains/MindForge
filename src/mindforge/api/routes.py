@@ -405,7 +405,7 @@ async def _index_parsed_document(
     progress_callback: IndexProgressCallback | None = None,
     timings: dict[str, float] | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> list[DocumentChunk]:
+) -> tuple[list[DocumentChunk], bool, bool]:
     """Run the complete, shared indexing pipeline for one parsed document."""
     stage_timings = timings if timings is not None else {}
     splitter_embedder = None
@@ -541,6 +541,7 @@ async def _index_parsed_document(
         except Exception as exc:
             logger.warning("GraphRAG LLM init failed: %s", exc)
 
+    raptor_applied = False
     if enable_raptor and raptor_llm:
         await _report_index_progress(
             progress_callback,
@@ -596,6 +597,7 @@ async def _index_parsed_document(
                 await store.upsert(
                     raptor_points[index:index + batch_size]
                 )
+            raptor_applied = bool(raptor_points)
             logger.info(
                 "RAPTOR: %d summary nodes indexed.",
                 len(raptor_points),
@@ -625,7 +627,7 @@ async def _index_parsed_document(
         }
         for chunk in chunks
     ]
-    await index_auxiliary_documents(
+    graphrag_applied = await index_auxiliary_documents(
         auxiliary_docs,
         graph_entity_llm=graph_entity_llm,
         graph_summary_llm=graph_summary_llm,
@@ -638,7 +640,7 @@ async def _index_parsed_document(
         timings=stage_timings,
         start_progress=94.0 if enable_raptor and raptor_llm else 88.0,
     )
-    return chunks
+    return chunks, raptor_applied, graphrag_applied
 
 
 async def _rollback_document_index(doc_id: str) -> None:
@@ -729,7 +731,11 @@ async def _index_with_lifecycle(
                 )
                 if cancelled is not None and cancelled():
                     raise IndexingCancelledError("Indexing was cancelled.")
-            chunks = await _index_parsed_document(
+            (
+                chunks,
+                applied_raptor,
+                applied_graphrag,
+            ) = await _index_parsed_document(
                 parsed=parsed,
                 source=source,
                 strategy=strategy,
@@ -771,8 +777,8 @@ async def _index_with_lifecycle(
         chunk_count=len(chunks),
         index_signature=index_signature,
         index_strategy=strategy,
-        use_raptor=use_raptor,
-        use_graphrag=use_graphrag,
+        use_raptor=applied_raptor,
+        use_graphrag=applied_graphrag,
         parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
     )
     return chunks
@@ -1280,53 +1286,16 @@ async def upload_document(
     use_graphrag: bool = Form(False),
 ):
     """Upload a document file for indexing into the knowledge base."""
-    # Sanitize filename — prevent path traversal
-    import re as _re
-    safe_name = file.filename or "uploaded_doc"
-    safe_name = _re.sub(r'[\\/]', '_', safe_name)  # strip path separators
-    safe_name = _re.sub(r'\.\.+', '', safe_name)     # strip double dots
-
-    suffix = Path(safe_name).suffix.lower()
-    if suffix not in DocumentParser.SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "不支持的文件格式，支持: "
-                + ", ".join(sorted(DocumentParser.SUPPORTED_EXTENSIONS))
-            ),
-        )
-
-    # Size limit: stream to disk so large uploads do not occupy equal RAM.
-    MAX_UPLOAD_BYTES = get_settings().api.max_upload_mb * 1024 * 1024
     upload_dir = resolve_project_path(get_settings().app.data_dir)
-    await asyncio.to_thread(
-        upload_dir.mkdir,
-        parents=True,
-        exist_ok=True,
+    file_path = await _persist_upload(
+        file,
+        target_dir=upload_dir,
+        unique_prefix=uuid.uuid4().hex[:8],
     )
-    unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    file_path = str(upload_dir / unique_name)
     parsed = None
     try:
-        with open(file_path, "wb") as f:
-            total_bytes = 0
-            while True:
-                block = await file.read(1024 * 1024)
-                if not block:
-                    break
-                total_bytes += len(block)
-                if total_bytes > MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            "文件过大（最大 "
-                            f"{get_settings().api.max_upload_mb}MB）"
-                        ),
-                    )
-                await asyncio.to_thread(f.write, block)
-
         parser = DocumentParser()
-        parsed = await _parse_document_file(parser, file_path)
+        parsed = await _parse_document_file(parser, str(file_path))
         source = file.filename or parsed.filename
         chunks = await _index_with_lifecycle(
             parsed=parsed,
@@ -1345,7 +1314,7 @@ async def upload_document(
     finally:
         # Always attempt cleanup of the uploaded temp file after indexing
         try:
-            _os.remove(file_path)
+            await asyncio.to_thread(file_path.unlink, missing_ok=True)
         except OSError:
             pass
 
@@ -1564,11 +1533,12 @@ def update_settings_api(body: SettingsUpdateRequest):
 def _update_settings_locked(body: SettingsUpdateRequest):
     """Save user settings (API keys encrypted in DB, synced to .env)."""
     current_settings = get_settings()
-    if (
+    embedding_provider_changed = (
         body.embedding_provider is not None
         and body.embedding_provider
         != current_settings.llm.embedding_provider
-    ):
+    )
+    if embedding_provider_changed:
         try:
             point_count = get_vector_store().get_point_count()
         except Exception as exc:
@@ -1586,6 +1556,26 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     "Embedding provider cannot be changed while indexed "
                     "documents exist. Delete and reindex the knowledge base "
                     "with the new provider."
+                ),
+            )
+        from mindforge.repositories.index_jobs import list_index_jobs
+
+        try:
+            active_jobs = list_index_jobs(active_only=True, limit=1)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Embedding provider cannot be changed while the "
+                    "index-job state is unavailable."
+                ),
+            ) from exc
+        if active_jobs:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Embedding provider cannot be changed while indexing "
+                    "jobs are active."
                 ),
             )
 
@@ -1812,17 +1802,105 @@ def _update_settings_locked(body: SettingsUpdateRequest):
         from mindforge.config import reload_settings
 
         reload_settings()
-        reset_runtime_components()
+        provider_updates_present = bool(
+            body.llm_provider_configs
+            or body.llm_provider_config is not None
+        )
+        direct_key_update = any(
+            value is not None
+            for value in (
+                body.deepseek_api_key,
+                body.openai_api_key,
+                body.compatible_api_key,
+                body.local_api_key,
+            )
+        )
+        llm_changed = (
+            provider_updates_present
+            or direct_key_update
+            or (
+                body.llm_provider is not None
+                and body.llm_provider
+                != getattr(
+                    current_settings.llm,
+                    "llm_provider",
+                    None,
+                )
+            )
+        )
+        current_retrieval = getattr(
+            current_settings,
+            "retrieval",
+            None,
+        )
+        retrieval_changed = any(
+            value is not None and value != current
+            for value, current in (
+                (
+                    body.retrieval_top_k,
+                    getattr(current_retrieval, "vector_top_k", None),
+                ),
+                (
+                    body.rerank_top_k,
+                    getattr(current_retrieval, "rerank_top_k", None),
+                ),
+            )
+        )
+        current_agent = getattr(current_settings, "agent", None)
+        agent_changed = any(
+            value is not None and value != current
+            for value, current in (
+                (
+                    body.max_iterations,
+                    getattr(current_agent, "max_iterations", None),
+                ),
+                (
+                    body.max_refine_rounds,
+                    getattr(current_agent, "max_refine_rounds", None),
+                ),
+                (
+                    body.critic_threshold,
+                    getattr(current_agent, "critic_threshold", None),
+                ),
+                (
+                    body.subtask_timeout,
+                    getattr(current_agent, "subtask_timeout", None),
+                ),
+                (
+                    body.research_timeout,
+                    getattr(current_agent, "research_timeout", None),
+                ),
+            )
+        )
+        reset_runtime_components(
+            reset_orchestrator=llm_changed or agent_changed,
+            reset_embedder=embedding_provider_changed,
+            reset_vector_store=False,
+            reset_retrieval=(
+                llm_changed
+                or embedding_provider_changed
+                or retrieval_changed
+            ),
+            reset_indexing=False,
+        )
         return {"status": "saved"}
     finally:
         db.close()
 
 
-def reset_runtime_components() -> None:
+def reset_runtime_components(
+    *,
+    reset_orchestrator: bool = True,
+    reset_embedder: bool = True,
+    reset_vector_store: bool = True,
+    reset_retrieval: bool = True,
+    reset_indexing: bool = True,
+) -> None:
     """Recreate configuration-bound singletons after settings updates."""
     global _orchestrator
-    previous_orchestrator = _orchestrator
-    _orchestrator = None
+    previous_orchestrator = _orchestrator if reset_orchestrator else None
+    if reset_orchestrator:
+        _orchestrator = None
     if previous_orchestrator is not None:
         try:
             previous_orchestrator.close()
@@ -1831,17 +1909,25 @@ def reset_runtime_components() -> None:
                 "Failed to close the previous orchestrator during reset."
             )
 
-    from mindforge.ingestion.embedder import reset_embedder
+    from mindforge.ingestion.embedder import (
+        reset_embedder as reset_embedder_component,
+    )
     from mindforge.retrieval.service import reset_retrieval_service
-    from mindforge.retrieval.vector_store import reset_vector_store
+    from mindforge.retrieval.vector_store import (
+        reset_vector_store as reset_vector_store_component,
+    )
     from mindforge.services.indexing import reset_indexing_service
 
-    for component_name, reset in (
-        ("embedder", reset_embedder),
-        ("vector store", reset_vector_store),
-        ("retrieval service", reset_retrieval_service),
-        ("indexing service", reset_indexing_service),
-    ):
+    resets = []
+    if reset_embedder:
+        resets.append(("embedder", reset_embedder_component))
+    if reset_vector_store:
+        resets.append(("vector store", reset_vector_store_component))
+    if reset_retrieval:
+        resets.append(("retrieval service", reset_retrieval_service))
+    if reset_indexing:
+        resets.append(("indexing service", reset_indexing_service))
+    for component_name, reset in resets:
         try:
             reset()
         except Exception:

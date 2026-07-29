@@ -40,6 +40,7 @@ export const useHistoryStore = create<HistoryState>()(
 
       addFromResearch: async (task, report, quality, model) => {
         let serverId: number | null = null;
+        let acceptedByServer = false;
         try {
           const res = await fetch(`${API_BASE}/history`, {
             method: "POST",
@@ -52,11 +53,24 @@ export const useHistoryStore = create<HistoryState>()(
             }),
           });
           if (res.ok) {
-            const data = await res.json() as { id?: number };
-            serverId = data.id ?? null;
+            acceptedByServer = true;
+            try {
+              const data = await res.json() as { id?: number };
+              serverId =
+                typeof data.id === "number" ? data.id : null;
+            } catch (error) {
+              console.warn(
+                "history-store: POST succeeded but response was invalid; reloading history",
+                error,
+              );
+            }
           }
         } catch (e) {
           console.warn("history-store: POST failed, using local-only entry", e);
+        }
+        if (acceptedByServer && serverId === null) {
+          await get().loadHistory();
+          return;
         }
         const entry: HistoryEntry = {
           id: serverId ?? Math.floor(Date.now() * 1000 + Math.random() * 1000),
