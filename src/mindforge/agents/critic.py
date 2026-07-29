@@ -119,6 +119,8 @@ _CRITIC_SYSTEM_PROMPT = """你是一名专业的研究评审员。你的任务�
 class CriticAgent(BaseAgent):
     """LLM-as-Judge evaluator. Scores a research draft across 5 dimensions."""
 
+    model_role = "critic"
+
     @property
     def name(self) -> str:
         return "critic"
@@ -156,13 +158,6 @@ class CriticAgent(BaseAgent):
         settings = get_settings()
         threshold = threshold if threshold is not None else settings.agent.critic_threshold
 
-        # Use the critic-specific model from config (via _llm_override 保证协程安全)
-        critic_model = settings.llm.get_model("critic")
-        from mindforge.models.base import LLMFactory
-        _llm_override = LLMFactory.create(
-            settings.llm.llm_provider, critic_model
-        )
-
         # Build the evaluation prompt
         src_text = ""
         if sources:
@@ -190,7 +185,6 @@ class CriticAgent(BaseAgent):
                 messages,
                 response_format={"type": "json_object"},
                 temperature=0.2,
-                _llm_override=_llm_override,
             )
 
             raw = result.content.strip()

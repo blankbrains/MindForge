@@ -7,7 +7,6 @@ from typing import Any, Optional
 from mindforge.agents.base import AgentResult, BaseAgent
 from mindforge.agents.critic import CriticScore
 from mindforge.models.base import ChatMessage
-from mindforge.config import get_settings
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +43,8 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 
 class SynthesizerAgent(BaseAgent):
     """Generates the final structured research report from subtask results."""
+
+    model_role = "synthesizer"
 
     @property
     def name(self) -> str:
@@ -82,15 +83,6 @@ class SynthesizerAgent(BaseAgent):
         -------
         AgentResult with ``output`` containing the final report text.
         """
-        settings = get_settings()
-
-        # Use the synthesizer-specific model from config (via _llm_override for co-routine safety)
-        synthesizer_model = settings.llm.get_model("synthesizer")
-        from mindforge.models.base import LLMFactory
-        _llm_override = LLMFactory.create(
-            settings.llm.llm_provider, synthesizer_model
-        )
-
         # --- Build the findings block ---
         findings_lines: list[str] = []
         for i, sr in enumerate(subtask_results, 1):
@@ -156,7 +148,7 @@ class SynthesizerAgent(BaseAgent):
             ]
 
             temp = temperature if temperature is not None else 0.4
-            result = await self._chat(messages, temperature=temp, _llm_override=_llm_override)
+            result = await self._chat(messages, temperature=temp)
             output = result.content or ""
             success = bool(output.strip())
             if not success:
@@ -176,7 +168,7 @@ class SynthesizerAgent(BaseAgent):
                 token_usage=result.usage or {},
                 metadata={
                     "model": getattr(
-                        _llm_override,
+                        self._llm,
                         "_model",
                         self._model_name,
                     )
@@ -195,11 +187,6 @@ class SynthesizerAgent(BaseAgent):
         temperature: Optional[float] = None,
     ):
         """Streaming version — yields content chunks (str) as they arrive from LLM."""
-        settings = get_settings()
-        synthesizer_model = settings.llm.get_model("synthesizer")
-        from mindforge.models.base import LLMFactory
-        _llm_override = LLMFactory.create(settings.llm.llm_provider, synthesizer_model)
-
         findings_lines: list[str] = []
         for i, sr in enumerate(subtask_results, 1):
             desc = sr.get("description", sr.get("task_id", f"Subtask {i}"))
@@ -250,7 +237,7 @@ class SynthesizerAgent(BaseAgent):
         ]
         temp = temperature if temperature is not None else 0.4
 
-        stream = await _llm_override.chat(
+        stream = await self._llm.chat(
             messages,
             temperature=temp,
             stream=True,

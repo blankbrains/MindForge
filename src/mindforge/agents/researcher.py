@@ -39,6 +39,8 @@ class ResearcherAgent(BaseAgent):
     yields intermediate events for UI display.
     """
 
+    model_role = "researcher"
+
     @property
     def name(self) -> str:
         return "researcher"
@@ -70,17 +72,10 @@ class ResearcherAgent(BaseAgent):
         -------
         AgentResult with the final researched answer.
         """
-        settings = get_settings()
-        researcher_model = settings.llm.get_model("researcher")
-        from mindforge.models.base import LLMFactory
-        _llm_override = LLMFactory.create(
-            settings.llm.llm_provider, researcher_model
-        )
         return await self._run_tool_loop(
             task,
             context=context,
             max_rounds=max_rounds,
-            _llm_override=_llm_override,
         )
 
     # ------------------------------------------------------------------
@@ -112,13 +107,6 @@ class ResearcherAgent(BaseAgent):
         max_rounds = max_rounds or settings.agent.max_iterations
         start_time = time.perf_counter()
 
-        # Resolve model override (no self._llm mutation → generator-safe)
-        researcher_model = settings.llm.get_model("researcher")
-        from mindforge.models.base import LLMFactory
-        _llm_override = LLMFactory.create(
-            settings.llm.llm_provider, researcher_model
-        )
-
         conv: list[ChatMessage] = [
             ChatMessage(role="system", content=self.system_prompt),
         ]
@@ -143,7 +131,6 @@ class ResearcherAgent(BaseAgent):
                     < settings.agent.max_tool_calls_total
                     else None
                 ),
-                _llm_override=_llm_override,
             )
 
             if result.usage:
@@ -181,10 +168,10 @@ class ResearcherAgent(BaseAgent):
                     },
                     metadata={
                         "model": getattr(
-                            _llm_override,
+                            self._llm,
                             "_model",
                             getattr(
-                                _llm_override,
+                                self._llm,
                                 "model",
                                 self._model_name,
                             ),
@@ -284,7 +271,6 @@ class ResearcherAgent(BaseAgent):
             final_result = await self._chat(
                 conv,
                 tools=None,
-                _llm_override=_llm_override,
             )
             final_content = final_result.content or ""
             if final_result.usage:
@@ -318,10 +304,10 @@ class ResearcherAgent(BaseAgent):
             },
             metadata={
                 "model": getattr(
-                    _llm_override,
+                    self._llm,
                     "_model",
                     getattr(
-                        _llm_override,
+                        self._llm,
                         "model",
                         self._model_name,
                     ),

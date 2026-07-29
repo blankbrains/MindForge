@@ -190,9 +190,8 @@ class AdaptiveRetriever:
         all_results: List[Dict[str, Any]] = []
         raw_results: Dict[str, Any] = {}
 
-        # 3a. Hybrid retrieval
-        try:
-            hybrid_results = await self.hybrid_retriever.retrieve(
+        async def _retrieve_hybrid() -> list[dict[str, Any]]:
+            return await self.hybrid_retriever.retrieve(
                 query=query,
                 use_hyde=config.use_hyde,
                 use_multi_query=config.use_multi_query,
@@ -200,23 +199,39 @@ class AdaptiveRetriever:
                 bm25_weight=config.bm25_weight,
                 top_k=candidate_top_k,
             )
-            all_results.extend(hybrid_results)
-            raw_results["hybrid"] = hybrid_results
-        except Exception:
-            logger.exception("Hybrid retrieval failed in adaptive pipeline.")
 
-        # 3b. GraphRAG (if enabled and available)
+        async def _retrieve_graph() -> list[dict[str, Any]]:
+            if self.graph_engine is None:
+                return []
+            return await self.graph_engine.query(
+                query=query,
+                top_k_entities=candidate_top_k,
+                top_k_communities=min(3, candidate_top_k),
+            )
+
+        retrieval_names = ["hybrid"]
+        retrieval_calls = [_retrieve_hybrid()]
         if config.use_graph and self.graph_engine is not None:
-            try:
-                graph_results = await self.graph_engine.query(
-                    query=query,
-                    top_k_entities=candidate_top_k,
-                    top_k_communities=min(3, candidate_top_k),
+            retrieval_names.append("graph")
+            retrieval_calls.append(_retrieve_graph())
+        retrieval_results = await asyncio.gather(
+            *retrieval_calls,
+            return_exceptions=True,
+        )
+        for name, results in zip(retrieval_names, retrieval_results):
+            if isinstance(results, BaseException):
+                logger.error(
+                    "%s retrieval failed in adaptive pipeline.",
+                    name,
+                    exc_info=(
+                        type(results),
+                        results,
+                        results.__traceback__,
+                    ),
                 )
-                all_results.extend(graph_results)
-                raw_results["graph"] = graph_results
-            except Exception:
-                logger.exception("GraphRAG query failed in adaptive pipeline.")
+                continue
+            all_results.extend(results)
+            raw_results[name] = results
 
         # Step 4: Rerank
         if self.reranker is not None and all_results:

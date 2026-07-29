@@ -270,6 +270,13 @@ MindForge；不要直接公开应用或基础设施端口。
 分块、Embedding、RAPTOR 和 GraphRAG 配置；只有 PostgreSQL、Qdrant 与 BM25
 三方记录完整一致时才复用已有索引。
 
+RAPTOR 会跳过单节点聚类，在生成摘要前检查节点上限，并对同层摘要执行批量
+Embedding。GraphRAG 从文档首中尾均匀取样，在私有图副本上完成构建后原子替换，
+未变化社区复用已有摘要；`graph` 模式会并行执行图检索和混合检索。研究流程使用
+可配置的请求、子任务和工具调用并发预算，并通过 `planning` 与 `heartbeat`
+SSE 事件及时反馈状态。未配置当前 LLM Provider 的 Key 时，研究页会明确进入
+“知识库检索”模式，不初始化 Multi-Agent。
+
 目标环境未使用 NVIDIA Container Toolkit，但已通过显式映射 NVIDIA 设备节点和
 宿主机驱动库完成容器 GPU 直通。生产容器运行 `torch==2.13.0+cu130`，
 `torch.cuda.is_available()` 为 `True`，BGE-M3 使用 `cuda`、batch size 32。
@@ -313,8 +320,8 @@ Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和�
 
 GitHub Actions 自动运行：
 
-- **ruff check** — Python 代码风格 + import 顺序
-- **pytest + coverage** — 129 个单元与真实 API 回归测试
+- **ruff check** — Python 语法、未定义名称和致命静态错误
+- **pytest + coverage** — 139 个单元与真实 API 回归测试
 - **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验

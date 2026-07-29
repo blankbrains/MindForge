@@ -6,10 +6,11 @@ hash-based fallback for development only.
 
 from __future__ import annotations
 import hashlib
+import logging
 import math
 import os
+import threading
 from typing import List, Optional
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -325,19 +326,24 @@ class EmbeddingManager:
 # ---------------------------------------------------------------------------
 
 _embedder: Optional[EmbeddingManager] = None
+_embedder_lock = threading.RLock()
 
 
 def get_embedder() -> EmbeddingManager:
     global _embedder
-    if _embedder is None:
-        from mindforge.config import get_settings
-        settings = get_settings()
-        _embedder = EmbeddingManager(
-            model_name=settings.llm.local_embedding_model or "BAAI/bge-m3",
-            provider=settings.llm.embedding_provider or None,
-            dim=settings.vector_store.embedding_dim,
-        )
-    return _embedder
+    with _embedder_lock:
+        if _embedder is None:
+            from mindforge.config import get_settings
+            settings = get_settings()
+            _embedder = EmbeddingManager(
+                model_name=(
+                    settings.llm.local_embedding_model
+                    or "BAAI/bge-m3"
+                ),
+                provider=settings.llm.embedding_provider or None,
+                dim=settings.vector_store.embedding_dim,
+            )
+        return _embedder
 
 
 def get_embedder_status() -> dict[str, str]:
@@ -364,7 +370,8 @@ def get_embedder_status() -> dict[str, str]:
 def reset_embedder() -> None:
     """Drop the cached embedding backend after configuration changes."""
     global _embedder
-    previous = _embedder
-    _embedder = None
+    with _embedder_lock:
+        previous = _embedder
+        _embedder = None
     if previous is not None:
         previous.close()

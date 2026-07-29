@@ -192,6 +192,8 @@ _PLANNER_SYSTEM_PROMPT = """你是一名专业的研究规划师。你的任务�
 class PlannerAgent(BaseAgent):
     """Decomposes a user task into a DAG-structured research plan."""
 
+    model_role = "planner"
+
     @property
     def name(self) -> str:
         return "planner"
@@ -207,14 +209,6 @@ class PlannerAgent(BaseAgent):
         Falls back to a single-step plan on any parse error.
         """
         settings = get_settings()
-        # Use the planner-specific model from config
-        planner_model = settings.llm.get_model("planner")
-        # 使用 _llm_override 而非直接改 self._llm，保证协程安全
-        from mindforge.models.base import LLMFactory
-        _llm_override = LLMFactory.create(
-            settings.llm.llm_provider, planner_model
-        )
-
         messages = [
             ChatMessage(role="system", content=self.system_prompt),
             ChatMessage(
@@ -231,7 +225,6 @@ class PlannerAgent(BaseAgent):
                 messages,
                 response_format={"type": "json_object"},
                 temperature=0.3,
-                _llm_override=_llm_override,
             )
 
             raw = result.content.strip()

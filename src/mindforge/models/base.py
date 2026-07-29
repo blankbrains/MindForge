@@ -63,6 +63,21 @@ def _load_api_key_from_db(provider: str) -> str:
     return ""
 
 
+def has_llm_credentials(provider: str | None = None) -> bool:
+    """Return whether the selected provider has usable configured credentials."""
+    from mindforge.config import get_settings
+
+    settings = get_settings()
+    selected = (provider or settings.llm.llm_provider).lower()
+    if selected == "deepseek":
+        configured = settings.llm.deepseek_api_key
+    elif selected == "openai":
+        configured = settings.llm.openai_api_key
+    else:
+        return False
+    return bool(configured.strip() or _load_api_key_from_db(selected))
+
+
 class LLMFactory:
     @staticmethod
     def create(provider: str, model: str, **kwargs) -> BaseLLM:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,9 @@ _retriever: AdaptiveRetriever | None = None
 _bm25: BM25Retriever | None = None
 _graph: GraphRAGEngine | None = None
 _reranker: CrossEncoderReranker | None = None
+_retrieval_llm: Any = None
 _index_lock = asyncio.Lock()
+_service_lock = threading.RLock()
 
 
 def _resolve_project_path(value: str | None, fallback: Path) -> Path:
@@ -54,11 +57,7 @@ def _graph_path() -> Path:
 
 
 async def _llm_text(prompt: str) -> str:
-    settings = get_settings()
-    llm = LLMFactory.create(
-        settings.llm.llm_provider,
-        settings.llm.get_model("researcher"),
-    )
+    llm = _get_retrieval_llm()
     result = await llm.chat(
         [ChatMessage(role="user", content=prompt)],
         temperature=0.2,
@@ -66,27 +65,57 @@ async def _llm_text(prompt: str) -> str:
     return result.content or ""
 
 
+def _get_retrieval_llm() -> Any:
+    global _retrieval_llm
+    with _service_lock:
+        if _retrieval_llm is None:
+            settings = get_settings()
+            _retrieval_llm = LLMFactory.create(
+                settings.llm.llm_provider,
+                settings.llm.get_model("researcher"),
+            )
+        return _retrieval_llm
+
+
 def get_bm25_retriever() -> BM25Retriever:
     global _bm25
-    if _bm25 is None:
-        _bm25 = BM25Retriever(index_dir=str(_bm25_path()))
-        _bm25.load()
-    return _bm25
+    with _service_lock:
+        if _bm25 is None:
+            _bm25 = BM25Retriever(index_dir=str(_bm25_path()))
+            _bm25.load()
+        return _bm25
 
 
-def get_graph_engine(*, llm: Any = None) -> GraphRAGEngine:
+def get_graph_engine(
+    *,
+    llm: Any = None,
+    entity_llm: Any = None,
+    summary_llm: Any = None,
+) -> GraphRAGEngine:
     global _graph
-    if _graph is None:
-        _graph = GraphRAGEngine(llm_fn=llm)
-        path = _graph_path()
-        if path.is_file():
-            try:
-                _graph.load(str(path))
-            except Exception:
-                logger.exception("Failed to load persistent GraphRAG index.")
-    elif llm is not None:
-        _graph.llm_fn = llm
-    return _graph
+    with _service_lock:
+        if _graph is None:
+            _graph = GraphRAGEngine(
+                llm_fn=llm,
+                entity_llm=entity_llm,
+                summary_llm=summary_llm,
+            )
+            path = _graph_path()
+            if path.is_file():
+                try:
+                    _graph.load(str(path))
+                except Exception:
+                    logger.exception(
+                        "Failed to load persistent GraphRAG index."
+                    )
+        else:
+            if llm is not None:
+                _graph.llm_fn = llm
+            if entity_llm is not None:
+                _graph.entity_llm = entity_llm
+            if summary_llm is not None:
+                _graph.summary_llm = summary_llm
+        return _graph
 
 
 def get_reranker() -> CrossEncoderReranker | None:
@@ -95,14 +124,15 @@ def get_reranker() -> CrossEncoderReranker | None:
     model_name = settings.reranker_model or None
     if model_name is None:
         return None
-    if _reranker is None:
-        _reranker = CrossEncoderReranker(
-            model_name,
-            model_revision=settings.reranker_model_revision,
-            max_candidates=settings.reranker_max_candidates,
-            device=settings.reranker_device,
-        )
-    return _reranker
+    with _service_lock:
+        if _reranker is None:
+            _reranker = CrossEncoderReranker(
+                model_name,
+                model_revision=settings.reranker_model_revision,
+                max_candidates=settings.reranker_max_candidates,
+                device=settings.reranker_device,
+            )
+        return _reranker
 
 
 async def preload_reranker() -> bool:
@@ -114,38 +144,40 @@ async def preload_reranker() -> bool:
 
 def get_retriever() -> AdaptiveRetriever:
     global _retriever
-    if _retriever is None:
-        settings = get_settings()
-        embedder = get_embedder()
+    with _service_lock:
+        if _retriever is None:
+            settings = get_settings()
+            embedder = get_embedder()
 
-        async def _async_embed(text: str) -> list[float]:
-            return await asyncio.to_thread(embedder.embed_single, text)
+            async def _async_embed(text: str) -> list[float]:
+                return await asyncio.to_thread(embedder.embed_single, text)
 
-        _retriever = AdaptiveRetriever(
-            hybrid_retriever=HybridRetriever(
-                vector_store=get_vector_store(),
-                bm25_retriever=get_bm25_retriever(),
-                embedding_fn=_async_embed,
+            _retriever = AdaptiveRetriever(
+                hybrid_retriever=HybridRetriever(
+                    vector_store=get_vector_store(),
+                    bm25_retriever=get_bm25_retriever(),
+                    embedding_fn=_async_embed,
+                    llm_fn=_llm_text,
+                ),
+                reranker=get_reranker(),
+                graph_engine=(
+                    get_graph_engine()
+                    if settings.graphrag.graph_enabled
+                    else None
+                ),
                 llm_fn=_llm_text,
-            ),
-            reranker=get_reranker(),
-            graph_engine=(
-                get_graph_engine()
-                if settings.graphrag.graph_enabled
-                else None
-            ),
-            llm_fn=_llm_text,
-            max_request_top_k=settings.retrieval.max_request_top_k,
-            retrieval_top_k=settings.retrieval.vector_top_k,
-            rerank_top_k=settings.retrieval.rerank_top_k,
-        )
-    return _retriever
+                max_request_top_k=settings.retrieval.max_request_top_k,
+                retrieval_top_k=settings.retrieval.vector_top_k,
+                rerank_top_k=settings.retrieval.rerank_top_k,
+            )
+        return _retriever
 
 
 async def index_auxiliary_documents(
     documents: list[dict[str, Any]],
     *,
-    graph_llm: Any = None,
+    graph_entity_llm: Any = None,
+    graph_summary_llm: Any = None,
     use_graphrag: bool = False,
     progress_callback: Any = None,
     timings: dict[str, float] | None = None,
@@ -196,9 +228,10 @@ async def index_auxiliary_documents(
                     dict(stage_timings),
                 )
             started = asyncio.get_running_loop().time()
-            graph = get_graph_engine(llm=graph_llm)
-            if doc_id:
-                await graph.delete_document_async(doc_id)
+            graph = get_graph_engine(
+                entity_llm=graph_entity_llm,
+                summary_llm=graph_summary_llm,
+            )
             await graph.build_graph(documents)
             await asyncio.to_thread(graph.save, str(_graph_path()))
             stage_timings["graphrag"] = (
@@ -228,8 +261,10 @@ async def delete_auxiliary_document(doc_id: str) -> None:
 
 def reset_retrieval_service() -> None:
     """Drop cached retrieval components after runtime configuration changes."""
-    global _retriever, _bm25, _graph, _reranker
-    _retriever = None
-    _bm25 = None
-    _graph = None
-    _reranker = None
+    global _retriever, _bm25, _graph, _reranker, _retrieval_llm
+    with _service_lock:
+        _retriever = None
+        _bm25 = None
+        _graph = None
+        _reranker = None
+        _retrieval_llm = None

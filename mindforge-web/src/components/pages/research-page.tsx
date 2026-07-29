@@ -61,7 +61,13 @@ export function ResearchPage() {
         </div>
       )}
 
-      <QueryInput value={task} onChange={setTask} onSubmit={handleSubmit} disabled={session.isStreaming} />
+      <QueryInput
+        value={task}
+        onChange={setTask}
+        onSubmit={handleSubmit}
+        disabled={session.isStreaming}
+        retrievalOnly={!hasLLMKey}
+      />
 
       {session.isError && (
         <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
@@ -110,6 +116,12 @@ export function ResearchPage() {
             )}
           </div>
           <div className="space-y-4">
+            {session.planning && (
+              <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在规划研究任务...
+              </div>
+            )}
             {session.synthesizing && (
               <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary">
                 <Loader2 className="h-4 w-4 animate-spin" /> 正在合成报告…

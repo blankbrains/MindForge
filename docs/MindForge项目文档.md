@@ -203,8 +203,9 @@ RAPTOR（Recursive Abstractive Processing for Tree-Organized Retrieval）是一�
 为什么 RAPTOR 对复杂问题效果好？传统平面索引的 Top-K 只能找到与查询最相似的几个局部片段，但复杂问题（如"分析微服务架构的优缺点"）需要跨多个段落甚至跨文档整合信息。RAPTOR 的摘要层从全局理解文档主题结构，可以从顶层检索到相关内容后再下钻到细节。
 
 当前仓库尚未包含可复现的 RAPTOR 专项评测集，因此不声明具体召回率提升。
-可验证的工程改进是：叶子节点复用上传阶段的批量 Embedding，摘要节点并发生成，
-并对节点数和向量维度设置边界。
+可验证的工程改进是：叶子节点复用上传阶段的批量 Embedding；单节点聚类直接
+向上透传，不产生无意义摘要；摘要调用前校验节点上限；同层摘要受控并发生成后
+一次批量 Embedding；无法继续压缩时立即停止构建。
 
 #### 3.2.8 GraphRAG 引擎（graphrag.py）
 
@@ -219,6 +220,10 @@ GraphRAG 在传统 RAG 的文本检索基础上，增加了**实体识别和关�
 查询时，不仅检索文本段落，还检索相关的实体和关系。这意味着 Agent 可以发现跨文档的间接关联——例如"A公司通过B公司间接投资了C公司"这种需要多跳推理的关系。
 
 GraphRAG 与向量检索是**互补关系**：向量检索擅长找语义相似的文本段（"找相似的"），GraphRAG 擅长发现实体间的间接关系链（"找关联的"）。
+Agent 的知识库工具默认使用 `auto`，也可显式选择 `graph`；关系查询会并行执行
+GraphRAG 和基础混合检索，再统一排序。图谱更新在私有副本上完成，查询继续读取
+旧的一致快照，完成后再短时间原子替换。大文档按字符预算从全文均匀取样，未变化
+社区按实体内容指纹复用摘要，并应用最小社区规模与实体/摘要模型配置。
 
 **⚠️ 曾踩过的坑**：GraphRAG 的 `Community` dataclass 定义了 `id`、`entities`、`summary` 三个字段，但 `save()` 方法访问了 `c.entity_ids` 和 `c.label`，`load()` 又用 `entity_ids=set(...)` 构造——字段不同步导致序列化错误。教训：数据模型变更后，所有序列化/反序列化代码必须同步更新。
 
@@ -392,9 +397,9 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 | ChunkingConfig | `CHUNK_` | Chunk 大小、重叠和语义分块 |
 | ParserConfig | `PARSER_` | OCR、表格、资产、解析版本与边界 |
 | VisualRetrievalConfig | `VISUAL_` | 默认关闭的视觉描述检索 |
-| RAPTORConfig | `RAPTOR_` | 层级、节点上限和摘要并发 |
-| GraphRAGConfig | `GRAPH_` | 图谱开关、存储、实体和社区上限 |
-| AgentConfig | `AGENT_` | 迭代、工具调用、流式块和超时 |
+| RAPTORConfig | `RAPTOR_` | 层级、摘要模型、节点上限和摘要并发 |
+| GraphRAGConfig | `GRAPH_` | 图谱开关、模型、取样预算、存储、实体和社区上限 |
+| AgentConfig | `AGENT_` | 迭代、请求/子任务/工具并发、排队、心跳和超时 |
 | CacheConfig | `CACHE_` | Redis、TTL 和 Embedding 缓存 |
 | MemoryConfig | `MEMORY_` | 记忆容量、检索参数 |
 | ObservabilityConfig | `OBSERVABILITY_` | LangFuse、本地追踪和保留策略 |
@@ -504,8 +509,8 @@ done             →  { type, result: AgentResult }
 
 核心页面，分为三个区域：
 
-1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。
-2. **执行可视化区**：使用 React Flow 实时渲染 DAG 执行图——每个节点是一个子任务，边表示依赖关系。已完成/执行中/等待中的节点用不同颜色区分。用户可以看到 Agent 的"思考进度"——哪些子任务正在并行执行、哪些等待中、结果如何。
+1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。未配置当前 LLM Provider 的 Key 时按钮显示“知识库检索”，请求不会初始化 Multi-Agent。
+2. **执行可视化区**：使用 React Flow 实时渲染 DAG 执行图——每个节点是一个子任务，边表示依赖关系。已完成/执行中/等待中的节点用不同颜色区分。规划开始前发送 `planning`，长步骤通过 `heartbeat` 保持连接和状态可见。
 3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、精炼过程记录（如果有精炼循环）。
 
 #### 4.2.3 知识库页面
@@ -603,8 +608,8 @@ Toolkit，因此 override 显式映射 `/dev/nvidia*` 设备节点以及宿主�
 ### 5.4 CI/CD
 
 GitHub Actions 自动运行：
-- **ruff check**：Python 代码风格检查（替代 flake8 + isort）。
-- **pytest + coverage**：129 项单元与回归测试。
+- **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。
+- **pytest + coverage**：139 项单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -639,7 +644,7 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 129 项通过 | `python -m pytest -q` |
+| Python 测试 | 139 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
 | 前端回归测试 | 16 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |

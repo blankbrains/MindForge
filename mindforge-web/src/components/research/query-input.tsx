@@ -6,9 +6,16 @@ interface QueryInputProps {
   onChange: (v: string) => void;
   onSubmit: (task: string) => void;
   disabled: boolean;
+  retrievalOnly?: boolean;
 }
 
-export function QueryInput({ value, onChange, onSubmit, disabled }: QueryInputProps) {
+export function QueryInput({
+  value,
+  onChange,
+  onSubmit,
+  disabled,
+  retrievalOnly = false,
+}: QueryInputProps) {
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (value.trim() && !disabled) {
@@ -50,7 +57,7 @@ export function QueryInput({ value, onChange, onSubmit, disabled }: QueryInputPr
             ) : (
               <>
                 <Send className="h-4 w-4" />
-                开始研究
+                {retrievalOnly ? "知识库检索" : "开始研究"}
               </>
             )}
           </button>

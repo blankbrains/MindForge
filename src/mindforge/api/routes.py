@@ -46,7 +46,10 @@ from mindforge.ingestion.raptor import RAPTORIndexer
 from mindforge.retrieval.vector_store import get_vector_store
 from mindforge.memory.episodic import EpisodicMemory
 from mindforge.memory.semantic import SemanticMemory
-from mindforge.models.base import LLMConfigurationError
+from mindforge.models.base import (
+    LLMConfigurationError,
+    has_llm_credentials,
+)
 from mindforge.services.health import get_health_monitor
 from mindforge.services.indexing import (
     IndexingCancelledError,
@@ -490,20 +493,45 @@ async def _index_parsed_document(
         enable_raptor = False
         enable_graphrag = False
 
-    enrichment_llm = None
-    if enable_raptor or enable_graphrag:
+    raptor_llm = None
+    graph_entity_llm = None
+    graph_summary_llm = None
+    if enable_raptor:
         try:
             from mindforge.models.base import LLMFactory
 
             settings = get_settings()
-            enrichment_llm = LLMFactory.create(
-                settings.llm.llm_provider,
-                settings.llm.get_model("researcher"),
+            provider = settings.llm.llm_provider
+            raptor_llm = LLMFactory.create(
+                provider,
+                settings.raptor.summary_model,
             )
         except Exception as exc:
-            logger.warning("Enrichment LLM init failed: %s", exc)
+            logger.warning("RAPTOR LLM init failed: %s", exc)
+    if enable_graphrag:
+        try:
+            from mindforge.models.base import LLMFactory
 
-    if enable_raptor and enrichment_llm:
+            settings = get_settings()
+            provider = settings.llm.llm_provider
+            graph_entity_llm = LLMFactory.create(
+                provider,
+                settings.graphrag.entity_extraction_model,
+            )
+            if (
+                settings.graphrag.community_summary_model
+                == settings.graphrag.entity_extraction_model
+            ):
+                graph_summary_llm = graph_entity_llm
+            else:
+                graph_summary_llm = LLMFactory.create(
+                    provider,
+                    settings.graphrag.community_summary_model,
+                )
+        except Exception as exc:
+            logger.warning("GraphRAG LLM init failed: %s", exc)
+
+    if enable_raptor and raptor_llm:
         await _report_index_progress(
             progress_callback,
             stage="raptor",
@@ -518,7 +546,7 @@ async def _index_parsed_document(
 
             raptor = RAPTORIndexer(
                 embedder=embedder,
-                llm=enrichment_llm,
+                llm=raptor_llm,
             )
             tree_nodes = await raptor.build_tree(chunks)
             raptor_points: list[PointStruct] = []
@@ -589,11 +617,16 @@ async def _index_parsed_document(
     ]
     await index_auxiliary_documents(
         auxiliary_docs,
-        graph_llm=enrichment_llm,
-        use_graphrag=bool(enable_graphrag and enrichment_llm),
+        graph_entity_llm=graph_entity_llm,
+        graph_summary_llm=graph_summary_llm,
+        use_graphrag=bool(
+            enable_graphrag
+            and graph_entity_llm
+            and graph_summary_llm
+        ),
         progress_callback=progress_callback,
         timings=stage_timings,
-        start_progress=94.0 if enable_raptor and enrichment_llm else 88.0,
+        start_progress=94.0 if enable_raptor and raptor_llm else 88.0,
     )
     return chunks
 
@@ -768,53 +801,65 @@ def _serialize_datetime_utc(value: datetime | None) -> str | None:
 async def query(body: QueryRequest):
     """Submit a research task. Falls back to retrieval-only if LLM is unavailable."""
     start = time.time()
+    llm_available = await asyncio.to_thread(has_llm_credentials)
 
     if body.stream:
-        try:
-            orch = await asyncio.to_thread(get_orchestrator)
-        except LLMConfigurationError as exc:
-            logger.warning(
-                "Agent initialization unavailable for SSE; "
-                "using retrieval fallback: %s",
-                exc,
+        orch = None
+        if llm_available:
+            try:
+                orch = await asyncio.to_thread(get_orchestrator)
+            except LLMConfigurationError as exc:
+                logger.error(
+                    "Configured Agent provider could not initialize: %s",
+                    exc,
+                )
+            except Exception:
+                logger.exception(
+                    "Agent initialization failed for SSE; "
+                    "using retrieval fallback."
+                )
+        else:
+            logger.info(
+                "No LLM credentials configured; using retrieval-only SSE."
             )
-            orch = None
-        except Exception:
-            logger.exception(
-                "Agent initialization failed for SSE; using retrieval fallback."
-            )
-            orch = None
         return StreamingResponse(
             _stream_response(orch, body.task),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # Try full Agent pipeline first, fall back to retrieval-only on failure
-    try:
-        orch = await asyncio.to_thread(get_orchestrator)
-        result = await orch.run(body.task)
-        if not result.success:
-            raise RuntimeError(
-                result.output or "Agent pipeline returned an unsuccessful result."
+    # Try full Agent pipeline first when the configured provider is available.
+    if llm_available:
+        try:
+            orch = await asyncio.to_thread(get_orchestrator)
+            result = await orch.run(body.task)
+            if not result.success:
+                raise RuntimeError(
+                    result.output
+                    or "Agent pipeline returned an unsuccessful result."
+                )
+            latency = (time.time() - start) * 1000
+            return QueryResponse(
+                task_id=uuid.uuid4().hex[:12],
+                report=result.output,
+                sources=list(result.data.get("sources", [])),
+                quality_score=float(result.metadata.get("quality", 0)),
+                latency_ms=round(latency, 2),
+                cost_usd=round(float(result.metadata.get("cost", 0)), 6),
+                iterations=int(result.metadata.get("subtask_count", 0)),
             )
-        latency = (time.time() - start) * 1000
-        return QueryResponse(
-            task_id=uuid.uuid4().hex[:12],
-            report=result.output,
-            sources=list(result.data.get("sources", [])),
-            quality_score=float(result.metadata.get("quality", 0)),
-            latency_ms=round(latency, 2),
-            cost_usd=round(float(result.metadata.get("cost", 0)), 6),
-            iterations=int(result.metadata.get("subtask_count", 0)),
-        )
-    except LLMConfigurationError as exc:
-        logger.warning(
-            "Agent pipeline unavailable; using retrieval fallback: %s",
-            exc,
-        )
-    except Exception:
-        logger.exception("Agent pipeline failed, falling back to retrieval-only.")
+        except LLMConfigurationError as exc:
+            logger.warning(
+                "Configured Agent provider became unavailable; "
+                "using retrieval fallback: %s",
+                exc,
+            )
+        except Exception:
+            logger.exception(
+                "Agent pipeline failed, falling back to retrieval-only."
+            )
+    else:
+        logger.info("No LLM credentials configured; using retrieval-only.")
 
     # Fallback: search knowledge base directly (no LLM needed)
     try:
@@ -829,26 +874,21 @@ async def query(body: QueryRequest):
                 result.error or "Retrieval fallback failed."
             )
         latency = (time.time() - start) * 1000
-        fallback_quality = float(result.data.get("quality", 0.0)) if result.data else 0.0
         return QueryResponse(
             task_id=uuid.uuid4().hex[:12],
             report=result.output,
-            sources=list(
-                result.data.get("sources", [])
-                if result.data
-                else []
-            ),
-            quality_score=fallback_quality,
+            sources=list((result.data or {}).get("sources", [])),
+            quality_score=float((result.data or {}).get("quality", 0.0)),
             latency_ms=round(latency, 2),
             cost_usd=0.0,
             iterations=0,
         )
-    except Exception:
-        logger.exception("Fallback retrieval also failed.")
+    except Exception as exc:
+        logger.exception("Retrieval-only query failed.")
         raise HTTPException(
             status_code=503,
-            detail="Research service temporarily unavailable",
-        )
+            detail="Knowledge base retrieval is temporarily unavailable.",
+        ) from exc
 
 
 @router.post("/index", response_model=IndexResponse)
@@ -1798,38 +1838,53 @@ async def _stream_response(
     task: str,
 ) -> AsyncGenerator[bytes, None]:
     """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
-    try:
-        if orch is None:
-            raise RuntimeError("Agent pipeline is unavailable.")
-        async for event in orch.stream_run(task):
-            if event.get("type") == "done":
-                result = event.get("result")
-                success = (
-                    result.success
-                    if isinstance(result, AgentResult)
-                    else (
-                        result.get("success")
-                        if isinstance(result, dict)
-                        else None
-                    )
-                )
-                if success is False:
-                    output = (
-                        result.output
+    use_retrieval_fallback = orch is None
+    if orch is not None:
+        try:
+            async for event in orch.stream_run(task):
+                if event.get("type") == "done":
+                    result = event.get("result")
+                    success = (
+                        result.success
                         if isinstance(result, AgentResult)
-                        else str(result.get("output", ""))
+                        else (
+                            result.get("success")
+                            if isinstance(result, dict)
+                            else None
+                        )
                     )
-                    raise RuntimeError(
-                        output
-                        or "Agent pipeline returned an unsuccessful result."
+                    if success is False:
+                        output = (
+                            result.output
+                            if isinstance(result, AgentResult)
+                            else str(result.get("output", ""))
+                        )
+                        raise RuntimeError(
+                            output
+                            or "Agent pipeline returned an unsuccessful result."
+                        )
+                try:
+                    payload = json.dumps(
+                        _serialize_event(event),
+                        ensure_ascii=False,
                     )
-            try:
-                payload = json.dumps(_serialize_event(event), ensure_ascii=False)
-            except TypeError:
-                payload = json.dumps({"event": "info", "content": str(event)[:200]}, ensure_ascii=False)
-            yield f"data: {payload}\n\n".encode("utf-8")
-    except Exception as exc:
-        logger.warning("Agent SSE stream failed: %s — falling back to retrieval-only", exc)
+                except TypeError:
+                    payload = json.dumps(
+                        {
+                            "event": "info",
+                            "content": str(event)[:200],
+                        },
+                        ensure_ascii=False,
+                    )
+                yield f"data: {payload}\n\n".encode()
+        except Exception as exc:
+            logger.warning(
+                "Agent SSE stream failed: %s; using retrieval fallback.",
+                exc,
+            )
+            use_retrieval_fallback = True
+
+    if use_retrieval_fallback:
         from mindforge.tools.rag_tool import RAGTool
         try:
             rag = RAGTool()
@@ -1875,7 +1930,7 @@ async def _stream_response(
                 }
             yield (
                 f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
-            ).encode("utf-8")
+            ).encode()
         except Exception:
             logger.exception("Retrieval fallback failed during SSE streaming.")
             fallback = {
@@ -1884,5 +1939,5 @@ async def _stream_response(
             }
             yield (
                 f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
-            ).encode("utf-8")
+            ).encode()
     yield b"data: [DONE]\n\n"

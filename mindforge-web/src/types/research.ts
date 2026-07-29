@@ -40,6 +40,8 @@ export interface CriticScore {
 }
 
 export type SSEEvent =
+  | { type: "planning"; status: "start" | "done" }
+  | { type: "heartbeat"; timestamp: number }
   | { type: "plan_ready"; plan: ResearchPlan }
   | { type: "subtask_start"; task_id: string; description: string } // description 与 SubTask 冗余，由 SSE 协议定义决定
   | { type: "subtask_result"; task_id: string; result: AgentResult }

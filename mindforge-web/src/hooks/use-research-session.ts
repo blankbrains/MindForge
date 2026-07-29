@@ -45,6 +45,7 @@ export function useResearchSession() {
       error: state.error,
       plan: state.plan,
       subtasks: state.subtasks,
+      planning: state.planning,
       synthesizing: state.synthesizing,
       criticScore: state.criticScore,
       refineRound: state.refineRound,
@@ -97,7 +98,7 @@ export function useResearchSession() {
       // 使用 getState 确保拿到最新 setState action，避免闭包陈旧引用
       useResearchStore.setState({
         status: "streaming", error: null, plan: null, subtasks: {},
-        synthesizing: false, criticScore: null, refineRound: 0,
+        planning: false, synthesizing: false, criticScore: null, refineRound: 0,
         finalResult: null, streamingAnswer: "",
       });
       useResearchStore.getState().setTask(task);

@@ -88,6 +88,8 @@ class BaseAgent(ABC):
     with retry, and standard result formatting.
     """
 
+    model_role = "researcher"
+
     def __init__(
         self,
         llm: Optional[BaseLLM] = None,
@@ -96,6 +98,8 @@ class BaseAgent(ABC):
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.9,
+        tool_semaphore: asyncio.Semaphore | None = None,
+        tool_queue_timeout: float | None = None,
     ) -> None:
         settings = get_settings()
 
@@ -104,7 +108,7 @@ class BaseAgent(ABC):
             self._llm = llm
         else:
             _provider = provider or settings.llm.llm_provider
-            _model = model or settings.llm.get_model("researcher")
+            _model = model or settings.llm.get_model(self.model_role)
             self._llm = LLMFactory.create(_provider, _model)
 
         self._tools: list[BaseTool] = tools or []
@@ -113,6 +117,12 @@ class BaseAgent(ABC):
         self._settings = settings
         self._model_name: str = getattr(self._llm, "_model", model or "unknown")
         self._tracer: Any = None
+        self._tool_semaphore = tool_semaphore
+        self._tool_queue_timeout = (
+            tool_queue_timeout
+            if tool_queue_timeout is not None
+            else settings.agent.queue_timeout
+        )
 
     # -- Properties ---------------------------------------------------------
 
@@ -270,7 +280,28 @@ class BaseAgent(ABC):
             }
 
         started = time.perf_counter()
+        acquired_tool_slot = False
         try:
+            if self._tool_semaphore is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._tool_semaphore.acquire(),
+                        timeout=self._tool_queue_timeout,
+                    )
+                    acquired_tool_slot = True
+                except asyncio.TimeoutError:
+                    return {
+                        "tool_call_id": tc_id,
+                        "output": (
+                            "Tool execution queue is full. Please retry "
+                            "after current research tasks finish."
+                        ),
+                        "success": False,
+                        "error": "Tool execution queue timeout",
+                        "execution_time_ms": (
+                            time.perf_counter() - started
+                        ) * 1000,
+                    }
             tracer = self._get_tracer()
             if tracer is None:
                 result = await tool.execute_async(**args)
@@ -300,6 +331,9 @@ class BaseAgent(ABC):
                     time.perf_counter() - started
                 ) * 1000,
             }
+        finally:
+            if acquired_tool_slot and self._tool_semaphore is not None:
+                self._tool_semaphore.release()
 
         output = result.output or (result.error or "")
         if len(output) > 10_000:

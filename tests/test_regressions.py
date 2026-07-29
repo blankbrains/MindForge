@@ -680,6 +680,260 @@ async def test_graphrag_query_cpu_work_runs_off_event_loop(
     assert observed_thread != event_loop_thread
 
 
+def test_graphrag_samples_across_entire_document() -> None:
+    text = "A" * 4_000 + "MIDDLE" + "B" * 4_000 + "TAIL"
+
+    sampled = GraphRAGEngine._sample_document_text([text], 3_000)
+
+    assert len(sampled) <= 3_000
+    assert sampled.startswith("A")
+    assert "MIDDLE" in sampled
+    assert sampled.endswith("TAIL")
+
+
+@pytest.mark.asyncio
+async def test_graphrag_reuses_unchanged_community_summary() -> None:
+    summary_calls = 0
+
+    class FakeLLM:
+        async def chat(self, messages, **kwargs):
+            nonlocal summary_calls
+            del kwargs
+            prompt = messages[0].content
+            if prompt.startswith("Extract entities"):
+                entity_id = "alpha" if "alpha document" in prompt else "beta"
+                return SimpleNamespace(
+                    content=(
+                        '[{"type":"entity","id":"'
+                        f'{entity_id}","name":"{entity_id}",'
+                        '"entity_type":"concept","description":"stable"}]'
+                    )
+                )
+            summary_calls += 1
+            return SimpleNamespace(content="stable summary")
+
+    engine = GraphRAGEngine(llm_fn=FakeLLM())
+    engine.min_community_size = 1
+
+    await engine.build_graph(
+        [{"doc_id": "doc-alpha", "content": "alpha document"}]
+    )
+    await engine.build_graph(
+        [{"doc_id": "doc-beta", "content": "beta document"}]
+    )
+
+    assert summary_calls == 2
+    assert len(engine.communities) == 2
+    assert all(
+        community.summary == "stable summary"
+        for community in engine.communities
+    )
+
+
+@pytest.mark.asyncio
+async def test_graphrag_query_remains_available_during_build() -> None:
+    extraction_started = asyncio.Event()
+    release_extraction = asyncio.Event()
+
+    class SlowLLM:
+        async def chat(self, messages, **kwargs):
+            del kwargs
+            prompt = messages[0].content
+            if prompt.startswith("Extract entities"):
+                extraction_started.set()
+                await release_extraction.wait()
+                return SimpleNamespace(content="[]")
+            return SimpleNamespace(content="")
+
+    engine = GraphRAGEngine(llm_fn=SlowLLM())
+    engine.entities["existing"] = Entity(
+        id="existing",
+        name="Existing",
+        description="available during build",
+    )
+    await engine.query("Existing")
+
+    build_task = asyncio.create_task(
+        engine.build_graph(
+            [{"doc_id": "new-doc", "content": "new document"}]
+        )
+    )
+    await extraction_started.wait()
+    results = await asyncio.wait_for(
+        engine.query("Existing"),
+        timeout=0.5,
+    )
+    release_extraction.set()
+    await build_task
+
+    assert results
+    assert results[0]["entity_id"] == "existing"
+
+
+@pytest.mark.asyncio
+async def test_graph_mode_runs_hybrid_and_graph_retrieval_concurrently() -> None:
+    hybrid_started = asyncio.Event()
+    graph_started = asyncio.Event()
+
+    class Hybrid:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            hybrid_started.set()
+            await graph_started.wait()
+            return [{"id": "hybrid", "score": 0.8}]
+
+    class Graph:
+        async def query(self, **kwargs):
+            del kwargs
+            graph_started.set()
+            await hybrid_started.wait()
+            return [{"id": "graph", "score": 0.9}]
+
+    retriever = AdaptiveRetriever(
+        hybrid_retriever=Hybrid(),
+        graph_engine=Graph(),
+        reranker=None,
+    )
+
+    result = await asyncio.wait_for(
+        retriever.retrieve("relationships", mode=QueryMode.GRAPH),
+        timeout=0.5,
+    )
+
+    assert set(result["raw_results"]) == {"hybrid", "graph"}
+    assert [item["id"] for item in result["results"]] == [
+        "graph",
+        "hybrid",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rag_tool_auto_and_graph_modes_reach_adaptive_retriever() -> None:
+    observed_modes: list[QueryMode | None] = []
+
+    class Retriever:
+        async def retrieve(self, **kwargs):
+            observed_modes.append(kwargs["mode"])
+            return {"results": []}
+
+    tool = RAGTool(retriever=Retriever())
+    await tool.execute_async("automatic query", mode="auto", threshold=0.1)
+    await tool.execute_async("graph query", mode="graph", threshold=0.1)
+
+    assert observed_modes == [None, QueryMode.GRAPH]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_research_queue_is_bounded() -> None:
+    orchestrator = object.__new__(routes.Orchestrator)
+    orchestrator._research_semaphore = asyncio.Semaphore(1)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(queue_timeout=0.01)
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_run(task: str) -> AgentResult:
+        started.set()
+        await release.wait()
+        return AgentResult(
+            agent_name="orchestrator",
+            success=True,
+            output=task,
+        )
+
+    orchestrator._run_unlimited = slow_run
+    first = asyncio.create_task(orchestrator.run("first"))
+    await started.wait()
+    second = await orchestrator.run("second")
+    release.set()
+    first_result = await first
+
+    assert first_result.success is True
+    assert second.success is False
+    assert second.data["error"] == "research_queue_timeout"
+
+
+@pytest.mark.asyncio
+async def test_streaming_orchestrator_emits_planning_and_heartbeat() -> None:
+    class SlowPlanner:
+        async def run(self, task: str):
+            await asyncio.sleep(0.04)
+            from mindforge.agents.planner import ResearchPlan, SubTask
+
+            return ResearchPlan(
+                plan_id="slow-plan",
+                original_task=task,
+                subtasks=[SubTask(task_id="one", description=task)],
+            )
+
+    class Researcher:
+        async def run(self, task: str, *, context=None):
+            del context
+            return AgentResult(
+                agent_name="researcher",
+                success=True,
+                output=task,
+            )
+
+    from mindforge.agents.orchestrator import Orchestrator
+
+    orchestrator = Orchestrator(
+        planner=SlowPlanner(),
+        researcher=Researcher(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_timeout=1,
+            subtask_timeout=1,
+            queue_timeout=1,
+            sse_heartbeat_seconds=0.01,
+            max_refine_rounds=0,
+            stream_chunk_size=512,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+    )
+
+    events = [
+        event async for event in orchestrator.stream_run("heartbeat test")
+    ]
+    event_types = [event["type"] for event in events]
+
+    assert event_types[0] == "planning"
+    assert "heartbeat" in event_types
+    assert event_types.index("heartbeat") < event_types.index("plan_ready")
+
+
+@pytest.mark.asyncio
+async def test_missing_llm_credentials_skip_orchestrator_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(routes, "has_llm_credentials", lambda: False)
+    monkeypatch.setattr(
+        routes,
+        "get_orchestrator",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("orchestrator must not initialize without a key")
+        ),
+    )
+
+    async def retrieval_only(self, **kwargs) -> ToolResult:
+        return ToolResult(
+            success=True,
+            output="retrieval only",
+            data={"quality": 1.0, "sources": []},
+        )
+
+    monkeypatch.setattr(RAGTool, "execute_async", retrieval_only)
+
+    response = await routes.query(QueryRequest(task="test task"))
+
+    assert response.report == "retrieval only"
+    assert response.iterations == 0
+
+
 @pytest.mark.asyncio
 async def test_failed_agent_result_uses_retrieval_fallback(
     monkeypatch: pytest.MonkeyPatch,
@@ -882,11 +1136,11 @@ async def test_raptor_reuses_precomputed_leaf_embeddings(
 ) -> None:
     class CountingEmbedder:
         def __init__(self) -> None:
-            self.calls: list[str] = []
+            self.calls: list[list[str]] = []
 
-        def embed_single(self, text: str) -> list[float]:
-            self.calls.append(text)
-            return [1.0, 0.0]
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(list(texts))
+            return [[1.0, 0.0] for _ in texts]
 
     embedder = CountingEmbedder()
     chunks = [
@@ -900,12 +1154,14 @@ async def test_raptor_reuses_precomputed_leaf_embeddings(
     ]
     indexer = RAPTORIndexer(embedder=embedder, llm=None)
     monkeypatch.setattr(indexer, "num_levels", 2)
-    monkeypatch.setattr(indexer, "threshold", 2.0)
+    monkeypatch.setattr(indexer, "threshold", -1.0)
 
     nodes = await indexer.build_tree(chunks)
 
     summary_nodes = [node for node in nodes if node.level > 0]
-    assert len(embedder.calls) == len(summary_nodes)
+    assert embedder.calls == [
+        [node.content for node in summary_nodes]
+    ]
     assert all(node.embedding is not None for node in summary_nodes)
 
 
@@ -954,6 +1210,64 @@ async def test_raptor_summary_ids_include_source_chunk_identity() -> None:
 
     assert first_summary_ids
     assert first_summary_ids.isdisjoint(second_summary_ids)
+
+
+@pytest.mark.asyncio
+async def test_raptor_does_not_summarize_singleton_clusters() -> None:
+    summary_calls = 0
+
+    async def summarize(prompt: str) -> str:
+        nonlocal summary_calls
+        summary_calls += 1
+        return prompt
+
+    chunks = [
+        DocumentChunk(
+            chunk_id=f"chunk-{index}",
+            doc_id="doc",
+            content=f"content {index}",
+            embedding=[1.0, float(index)],
+        )
+        for index in range(6)
+    ]
+    indexer = RAPTORIndexer(llm=summarize)
+    indexer.num_levels = 3
+    indexer.threshold = 2.0
+
+    nodes = await indexer.build_tree(chunks)
+
+    assert summary_calls == 0
+    assert nodes == [
+        node for node in nodes if node.level == 0
+    ]
+
+
+@pytest.mark.asyncio
+async def test_raptor_checks_node_limit_before_summary_calls() -> None:
+    summary_calls = 0
+
+    async def summarize(prompt: str) -> str:
+        nonlocal summary_calls
+        summary_calls += 1
+        return prompt
+
+    chunks = [
+        DocumentChunk(
+            chunk_id=f"chunk-{index}",
+            doc_id="doc",
+            content=f"content {index}",
+            embedding=[1.0, 0.0],
+        )
+        for index in range(6)
+    ]
+    indexer = RAPTORIndexer(llm=summarize)
+    indexer.num_levels = 2
+    indexer.max_nodes = 6
+
+    with pytest.raises(ValueError, match="node limit"):
+        await indexer.build_tree(chunks)
+
+    assert summary_calls == 0
 
 
 def test_index_points_reject_vector_count_mismatch() -> None:

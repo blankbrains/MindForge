@@ -1,7 +1,9 @@
 from __future__ import annotations
 import asyncio
+import copy
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Set, Tuple
+import hashlib
 import logging
 import math
 import threading
@@ -72,14 +74,21 @@ class GraphRAGEngine:
     def __init__(
         self,
         llm_fn=None,
+        *,
+        entity_llm=None,
+        summary_llm=None,
     ):
         from mindforge.config import get_settings
 
         config = get_settings().graphrag
         self.llm_fn = llm_fn
+        self.entity_llm = entity_llm or llm_fn
+        self.summary_llm = summary_llm or llm_fn
         self.max_entities_per_doc = config.max_entities_per_doc
         self.max_total_entities = config.max_total_entities
         self.max_communities = config.max_communities
+        self.min_community_size = config.min_community_size
+        self.extraction_char_budget = config.extraction_char_budget
         self.summary_concurrency = config.summary_concurrency
 
         # Graph state
@@ -218,9 +227,59 @@ class GraphRAGEngine:
         """Extract entities and relations from documents via LLM, build the
         graph, discover communities, and generate community summaries."""
         async with self._operation_lock:
-            await self._build_graph(documents)
+            staging = self._clone_for_build()
+            summary_cache = staging._community_summary_cache()
+            replaced_doc_ids = {
+                str(document.get("doc_id") or document.get("id", "unknown"))
+                for document in documents
+            }
+            for doc_id in replaced_doc_ids:
+                staging.delete_document(doc_id)
+            await staging._build_graph(
+                documents,
+                summary_cache=summary_cache,
+            )
+            with self._state_lock:
+                self.entities = staging.entities
+                self.relations = staging.relations
+                self.communities = staging.communities
+                self._adjacency = staging._adjacency
 
-    async def _build_graph(self, documents: List[Dict[str, Any]]) -> None:
+    def _clone_for_build(self) -> GraphRAGEngine:
+        """Create an isolated graph copy for long-running LLM enrichment."""
+        staging = GraphRAGEngine(
+            llm_fn=self.llm_fn,
+            entity_llm=self.entity_llm,
+            summary_llm=self.summary_llm,
+        )
+        staging.max_entities_per_doc = self.max_entities_per_doc
+        staging.max_total_entities = self.max_total_entities
+        staging.max_communities = self.max_communities
+        staging.min_community_size = self.min_community_size
+        staging.extraction_char_budget = self.extraction_char_budget
+        staging.summary_concurrency = self.summary_concurrency
+        with self._state_lock:
+            (
+                staging.entities,
+                staging.relations,
+                staging.communities,
+                staging._adjacency,
+            ) = copy.deepcopy(
+                (
+                    self.entities,
+                    self.relations,
+                    self.communities,
+                    self._adjacency,
+                )
+            )
+        return staging
+
+    async def _build_graph(
+        self,
+        documents: List[Dict[str, Any]],
+        *,
+        summary_cache: dict[str, str] | None = None,
+    ) -> None:
         if not documents:
             logger.warning("No documents provided; graph will be empty.")
             return
@@ -233,16 +292,23 @@ class GraphRAGEngine:
             doc_id = str(doc.get("doc_id") or doc.get("id", "unknown"))
             if not text:
                 continue
-            grouped.setdefault(doc_id, []).append(text[:1000])
+            grouped.setdefault(doc_id, []).append(str(text))
         if not grouped:
             return
+        cached_summaries = (
+            summary_cache
+            if summary_cache is not None
+            else self._community_summary_cache()
+        )
         for doc_id, texts in grouped.items():
-            combined = "\n\n---\n\n".join(texts)
-            if len(combined) > 8000:
-                combined = combined[:8000] + "\n\n[...truncated]"
+            combined = self._sample_document_text(
+                texts,
+                self.extraction_char_budget,
+            )
             await self._extract_entities_and_relations(combined, doc_id)
 
         await asyncio.to_thread(self._rebuild_graph_structure)
+        self._restore_community_summaries(cached_summaries)
         await self._summarize_communities()
 
         logger.info(
@@ -251,6 +317,59 @@ class GraphRAGEngine:
             len(self.relations),
             len(self.communities),
         )
+
+    @staticmethod
+    def _sample_document_text(
+        texts: list[str],
+        char_budget: int,
+    ) -> str:
+        """Sample evenly across a document while respecting a prompt budget."""
+        combined = "\n\n---\n\n".join(texts)
+        if len(combined) <= char_budget:
+            return combined
+        segment_count = min(8, max(3, char_budget // 1_000))
+        separator = "\n\n[...]\n\n"
+        usable_budget = char_budget - len(separator) * (segment_count - 1)
+        segment_size = max(1, usable_budget // segment_count)
+        max_start = max(0, len(combined) - segment_size)
+        starts = [
+            round(index * max_start / (segment_count - 1))
+            for index in range(segment_count)
+        ]
+        return separator.join(
+            combined[start:start + segment_size]
+            for start in starts
+        )[:char_budget]
+
+    @staticmethod
+    def _community_fingerprint(community: Community) -> str:
+        payload = "\n".join(
+            "\t".join(
+                (entity.id, entity.name, entity.type, entity.description)
+            )
+            for entity in sorted(
+                community.entities,
+                key=lambda item: item.id,
+            )
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _community_summary_cache(self) -> dict[str, str]:
+        return {
+            self._community_fingerprint(community): community.summary
+            for community in self.communities
+            if community.summary
+        }
+
+    def _restore_community_summaries(
+        self,
+        summary_cache: dict[str, str],
+    ) -> None:
+        for community in self.communities:
+            community.summary = summary_cache.get(
+                self._community_fingerprint(community),
+                "",
+            )
 
     def save(self, path: str) -> None:
         """Persist the graph to a JSON file."""
@@ -316,7 +435,7 @@ class GraphRAGEngine:
         self, text: str, doc_id: str
     ) -> None:
         """Use the LLM to extract entities and relations from a document."""
-        if self.llm_fn is None:
+        if self.entity_llm is None:
             logger.warning("No LLM function; skipping entity extraction.")
             return
 
@@ -329,11 +448,14 @@ class GraphRAGEngine:
             '"target": "<entity_id>", "relation_type": "<type>", '
             '"weight": <float>}\n\n'
             "Only output the JSON array, no extra text.\n\n"
-            f"Text: {text[:3000]}"
+            f"Text: {text}"
         )
 
         try:
-            result = await self._call_llm(prompt)
+            result = await self._call_llm(
+                prompt,
+                llm=self.entity_llm,
+            )
             extracted = self._parse_extraction(result)
         except Exception:
             logger.exception("Entity extraction failed for document '%s'.", doc_id)
@@ -446,19 +568,20 @@ class GraphRAGEngine:
                             self._refresh_relation_weight(existing)
                             break
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, *, llm=None) -> str:
         """Call either a BaseLLM-style adapter or an async callable."""
-        if self.llm_fn is None:
+        selected_llm = llm or self.llm_fn
+        if selected_llm is None:
             return ""
-        if hasattr(self.llm_fn, "chat"):
+        if hasattr(selected_llm, "chat"):
             from mindforge.models.base import ChatMessage
 
-            result = await self.llm_fn.chat(
+            result = await selected_llm.chat(
                 [ChatMessage(role="user", content=prompt)],
                 temperature=0.2,
             )
             return str(getattr(result, "content", result))
-        result = await self.llm_fn(prompt)
+        result = await selected_llm(prompt)
         return str(getattr(result, "content", result))
 
     def delete_document(self, doc_id: str) -> None:
@@ -599,6 +722,8 @@ class GraphRAGEngine:
             community_entities = [
                 self.entities[eid] for eid in component if eid in self.entities
             ]
+            if len(community_entities) < self.min_community_size:
+                continue
             community = Community(
                 id=f"community_{community_id}",
                 entities=community_entities,
@@ -610,8 +735,15 @@ class GraphRAGEngine:
 
     async def _summarize_communities(self) -> None:
         """Generate a summary for each discovered community via the LLM."""
-        if self.llm_fn is None:
-            for comm in self.communities:
+        pending = [
+            community
+            for community in self.communities
+            if not community.summary
+        ]
+        if not pending:
+            return
+        if self.summary_llm is None:
+            for comm in pending:
                 names = [e.name for e in comm.entities if e.name]
                 comm.summary = "Entities: " + ", ".join(names[:10])
             return
@@ -630,12 +762,15 @@ class GraphRAGEngine:
             )
             try:
                 async with semaphore:
-                    summary = await self._call_llm(prompt)
+                    summary = await self._call_llm(
+                        prompt,
+                        llm=self.summary_llm,
+                    )
                 comm.summary = summary.strip()
             except Exception:
                 comm.summary = "Summary unavailable."
 
-        await asyncio.gather(*[_summarize_one(c) for c in self.communities])
+        await asyncio.gather(*[_summarize_one(c) for c in pending])
 
     # ------------------------------------------------------------------
     # Query
@@ -671,13 +806,12 @@ class GraphRAGEngine:
             raise ValueError(
                 "top_k_communities is outside the configured range."
             )
-        async with self._operation_lock:
-            return await asyncio.to_thread(
-                self._query_sync,
-                query.strip(),
-                top_k_entities,
-                top_k_communities,
-            )
+        return await asyncio.to_thread(
+            self._query_sync,
+            query.strip(),
+            top_k_entities,
+            top_k_communities,
+        )
 
     def _query_sync(
         self,
@@ -705,7 +839,11 @@ class GraphRAGEngine:
         # 中文查询使用 jieba 分词，避免整段中文当作单个 term
         try:
             import jieba
-            query_terms = set(jieba.cut_for_search(query))
+            query_terms = {
+                term.lower()
+                for term in jieba.cut_for_search(query)
+                if term.strip()
+            }
         except Exception:
             query_terms = set(query.lower().split())
 
@@ -760,8 +898,6 @@ class GraphRAGEngine:
         # Rank 2: matched communities（仅含≥2实体的社区，且分数基于所含实体平均归一化分）
         for comm in self.communities:
             if comm.id not in relevant_community_ids:
-                continue
-            if len(comm.entities) < 2:
                 continue
             comm_norm = sum(
                 entity_norm.get(e.id, 0) for e in comm.entities

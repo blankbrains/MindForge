@@ -278,6 +278,11 @@ class GraphRAGConfig(BaseSettings):
     community_summary_model: str = Field(default="gpt-4o-mini")
     max_entities_per_doc: int = Field(default=20)
     min_community_size: int = Field(default=3)
+    extraction_char_budget: int = Field(
+        default=12_000,
+        ge=1_000,
+        le=100_000,
+    )
     graph_embedding_dim: int = Field(default=1536)
     graph_store_path: Optional[str] = Field(
         default=None,
@@ -306,6 +311,11 @@ class AgentConfig(BaseSettings):
     max_subtasks: int = Field(default=5, ge=1, le=20)
     max_tool_calls_per_round: int = Field(default=4, ge=1, le=20)
     max_tool_calls_total: int = Field(default=12, ge=1, le=100)
+    max_concurrent_research: int = Field(default=2, ge=1, le=32)
+    max_concurrent_subtasks: int = Field(default=4, ge=1, le=64)
+    max_concurrent_tool_calls: int = Field(default=8, ge=1, le=128)
+    queue_timeout: int = Field(default=30, ge=1, le=600)
+    sse_heartbeat_seconds: int = Field(default=10, ge=1, le=60)
     stream_chunk_size: int = Field(default=512, ge=64, le=8192)
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 

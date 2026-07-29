@@ -75,6 +75,15 @@ class Orchestrator:
         tracer: Any = None,
     ) -> None:
         self._settings = get_settings()
+        self._research_semaphore = asyncio.Semaphore(
+            self._settings.agent.max_concurrent_research
+        )
+        self._subtask_semaphore = asyncio.Semaphore(
+            self._settings.agent.max_concurrent_subtasks
+        )
+        self._tool_semaphore = asyncio.Semaphore(
+            self._settings.agent.max_concurrent_tool_calls
+        )
 
         self._planner = planner or PlannerAgent()
 
@@ -86,7 +95,14 @@ class Orchestrator:
             CitationVerifier(),
         ]
 
-        self._researcher = researcher or ResearcherAgent(tools=_researcher_tools)
+        self._researcher = researcher or ResearcherAgent(
+            tools=_researcher_tools,
+            tool_semaphore=self._tool_semaphore,
+            tool_queue_timeout=self._settings.agent.queue_timeout,
+        )
+        if researcher is not None and isinstance(researcher, ResearcherAgent):
+            researcher._tool_semaphore = self._tool_semaphore
+            researcher._tool_queue_timeout = self._settings.agent.queue_timeout
         self._critic = critic or CriticAgent()
         self._synthesizer = synthesizer or SynthesizerAgent()
 
@@ -109,6 +125,33 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def run(self, task: str) -> AgentResult:
+        """Execute one research request within the process-wide budget."""
+        queue_timeout = getattr(
+            self._settings.agent,
+            "queue_timeout",
+            30,
+        )
+        try:
+            await asyncio.wait_for(
+                self._research_semaphore.acquire(),
+                timeout=queue_timeout,
+            )
+        except asyncio.TimeoutError:
+            return AgentResult(
+                agent_name="orchestrator",
+                success=False,
+                output=(
+                    "研究任务排队超时，当前服务器正在处理其他研究请求，"
+                    "请稍后重试。"
+                ),
+                data={"error": "research_queue_timeout"},
+            )
+        try:
+            return await self._run_unlimited(task)
+        finally:
+            self._research_semaphore.release()
+
+    async def _run_unlimited(self, task: str) -> AgentResult:
         """Execute the full research pipeline for *task*.
 
         Returns an AgentResult with the final report in ``output`` and
@@ -522,20 +565,61 @@ class Orchestrator:
 
     async def stream_run(self, task: str) -> AsyncIterator[dict[str, Any]]:
         """Stream the research pipeline under the configured overall timeout."""
+        queue_timeout = getattr(
+            self._settings.agent,
+            "queue_timeout",
+            30,
+        )
+        heartbeat_seconds = getattr(
+            self._settings.agent,
+            "sse_heartbeat_seconds",
+            10,
+        )
+        try:
+            await asyncio.wait_for(
+                self._research_semaphore.acquire(),
+                timeout=queue_timeout,
+            )
+        except asyncio.TimeoutError:
+            yield {
+                "type": "error",
+                "content": (
+                    "研究任务排队超时，当前服务器正在处理其他研究请求，"
+                    "请稍后重试。"
+                ),
+            }
+            return
+
         iterator = self._stream_pipeline(task).__aiter__()
         deadline = time.monotonic() + self._settings.agent.research_timeout
+        pending_event: asyncio.Task | None = None
         try:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                try:
-                    event = await asyncio.wait_for(
-                        iterator.__anext__(),
-                        timeout=remaining,
+                if pending_event is None:
+                    pending_event = asyncio.create_task(
+                        iterator.__anext__()
                     )
+                done, _ = await asyncio.wait(
+                    {pending_event},
+                    timeout=min(
+                        remaining,
+                        heartbeat_seconds,
+                    ),
+                )
+                if not done:
+                    yield {
+                        "type": "heartbeat",
+                        "timestamp": time.time(),
+                    }
+                    continue
+                try:
+                    event = pending_event.result()
                 except StopAsyncIteration:
                     return
+                pending_event = None
                 yield event
         except asyncio.TimeoutError:
             yield {
@@ -546,7 +630,14 @@ class Orchestrator:
                 ),
             }
         finally:
+            if pending_event is not None and not pending_event.done():
+                pending_event.cancel()
+                await asyncio.gather(
+                    pending_event,
+                    return_exceptions=True,
+                )
             await iterator.aclose()
+            self._research_semaphore.release()
 
     async def _stream_pipeline(
         self,
@@ -566,6 +657,8 @@ class Orchestrator:
         start_time = time.perf_counter()
         total_usage: dict[str, int] = {}
         total_cost = {"usd": 0.0}
+
+        yield {"type": "planning", "status": "start"}
 
         # --- Step 0: Memory check ---
         if self._episodic_memory is not None:
@@ -593,6 +686,7 @@ class Orchestrator:
         # --- Step 1: Plan ---
         plan: ResearchPlan = await self._planner.run(task)
         self._accumulate_usage(total_usage, plan.planner_usage, total_cost)
+        yield {"type": "planning", "status": "done"}
         yield {"type": "plan_ready", "plan": plan}
 
         # --- Step 2: Execute DAG ---
@@ -905,6 +999,30 @@ class Orchestrator:
         The timeout is read from ``settings.agent.subtask_timeout`` (default 45 s).
         """
         timeout = self._settings.agent.subtask_timeout
+        queue_timeout = getattr(
+            self._settings.agent,
+            "queue_timeout",
+            30,
+        )
+
+        try:
+            await asyncio.wait_for(
+                self._subtask_semaphore.acquire(),
+                timeout=queue_timeout,
+            )
+        except asyncio.TimeoutError:
+            return AgentResult(
+                agent_name="researcher",
+                success=False,
+                output=(
+                    f"Subtask '{subtask.task_id}' could not start because "
+                    "the research worker queue is full."
+                ),
+                data={
+                    "task_id": subtask.task_id,
+                    "error": "subtask_queue_timeout",
+                },
+            )
 
         try:
             context = self._build_dependency_context(subtask, plan)
@@ -937,6 +1055,8 @@ class Orchestrator:
                     "error_type": type(exc).__name__,
                 },
             )
+        finally:
+            self._subtask_semaphore.release()
 
     @staticmethod
     def _format_pipeline_failure(

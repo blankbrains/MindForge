@@ -16,7 +16,7 @@ except ImportError:
 class RAGTool(BaseTool):
     """Tool that queries the knowledge base using AdaptiveRetriever.
 
-    Supports multiple retrieval modes (semantic, hybrid, keyword) and
+    Supports adaptive, graph, semantic, hybrid, and keyword retrieval and
     configurable top-k result counts.
     """
 
@@ -35,9 +35,15 @@ class RAGTool(BaseTool):
             },
             "mode": {
                 "type": "string",
-                "enum": ["semantic", "hybrid", "keyword"],
+                "enum": [
+                    "auto",
+                    "graph",
+                    "semantic",
+                    "hybrid",
+                    "keyword",
+                ],
                 "description": "Retrieval mode to use.",
-                "default": "hybrid",
+                "default": "auto",
             },
             "top_k": {
                 "type": "integer",
@@ -81,7 +87,7 @@ class RAGTool(BaseTool):
         self._retriever = get_retriever()
         return self._retriever
 
-    def execute(self, query: str, mode: str = "hybrid", top_k: int | None = None, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
+    def execute(self, query: str, mode: str = "auto", top_k: int | None = None, threshold: float = 0.0, **kwargs: Any) -> ToolResult:
         """Synchronous wrapper — uses thread pool when event loop is running."""
         import asyncio
         try:
@@ -102,7 +108,7 @@ class RAGTool(BaseTool):
     async def execute_async(
         self,
         query: str,
-        mode: str = "hybrid",
+        mode: str = "auto",
         top_k: int | None = None,
         threshold: float = 0.0,
         **kwargs: Any,
@@ -119,7 +125,13 @@ class RAGTool(BaseTool):
                 success=False,
                 error="搜索内容不能超过 20000 个字符。",
             )
-        if mode not in {"semantic", "hybrid", "keyword"}:
+        if mode not in {
+            "auto",
+            "graph",
+            "semantic",
+            "hybrid",
+            "keyword",
+        }:
             return ToolResult(success=False, error="不支持的检索模式。")
         if top_k is None:
             top_k = settings.retrieval.rerank_top_k
@@ -149,11 +161,12 @@ class RAGTool(BaseTool):
         retriever = await asyncio.to_thread(self._get_retriever)
 
         mode_map = {
+            "graph": QueryMode.GRAPH,
             "semantic": QueryMode.CONCEPTUAL,
             "hybrid": QueryMode.FACTUAL,
             "keyword": QueryMode.PROCEDURAL,
         }
-        qmode = mode_map.get(mode, QueryMode.FACTUAL)
+        qmode = mode_map.get(mode)
 
         try:
             result_dict = await retriever.retrieve(query=query, mode=qmode, top_k=top_k)

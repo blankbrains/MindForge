@@ -1,11 +1,13 @@
 """RAPTOR 层次化索引 — 自底向上构建摘要树"""
 from __future__ import annotations
+
 import asyncio
-from typing import List, Optional
-from dataclasses import dataclass, field
 import hashlib
 import logging
+from dataclasses import dataclass, field
+
 import numpy as np
+
 from mindforge.config import get_settings
 from mindforge.ingestion.chunker import DocumentChunk
 
@@ -18,8 +20,8 @@ class RAPTORNode:
     content: str
     summary: str = ""
     level: int = 0
-    children: List["RAPTORNode"] = field(default_factory=list)
-    embedding: Optional[List[float]] = None
+    children: list[RAPTORNode] = field(default_factory=list)
+    embedding: list[float] | None = None
 
 
 class RAPTORIndexer:
@@ -29,10 +31,14 @@ class RAPTORIndexer:
         self.threshold = cfg.raptor_threshold
         self.max_nodes = cfg.max_nodes
         self.summary_concurrency = cfg.summary_concurrency
+        self.summary_model = cfg.summary_model
         self.embedder = embedder
         self.llm = llm  # 应为 BaseLLM 实例或兼容的 async callable
 
-    async def build_tree(self, chunks: List[DocumentChunk]) -> List[RAPTORNode]:
+    async def build_tree(
+        self,
+        chunks: list[DocumentChunk],
+    ) -> list[RAPTORNode]:
         if not chunks:
             return []
         if len(chunks) > self.max_nodes:
@@ -56,6 +62,7 @@ class RAPTORIndexer:
             for node, vector in zip(missing_leaves, vectors):
                 node.embedding = vector
         all_nodes = [leaves]
+        total_nodes = len(leaves)
         current_level = leaves
         for level in range(1, self.num_levels):
             if len(current_level) <= 3:
@@ -64,11 +71,45 @@ class RAPTORIndexer:
                 self._cluster_nodes,
                 current_level,
             )
+            summary_clusters = [
+                cluster for cluster in clusters if len(cluster) > 1
+            ]
+            carried_nodes = [
+                cluster[0] for cluster in clusters if len(cluster) == 1
+            ]
+            prospective_level_size = (
+                len(carried_nodes) + len(summary_clusters)
+            )
+            if (
+                not summary_clusters
+                or prospective_level_size >= len(current_level)
+            ):
+                logger.info(
+                    "RAPTOR stopped at level %d because clustering did not "
+                    "reduce %d nodes.",
+                    level,
+                    len(current_level),
+                )
+                break
+            if total_nodes + len(summary_clusters) > self.max_nodes:
+                raise ValueError(
+                    "RAPTOR tree exceeds the configured node limit."
+                )
+
             semaphore = asyncio.Semaphore(self.summary_concurrency)
-            # 同层所有 cluster 并行 LLM 摘要（独立无依赖）
-            async def _summarize_one(i: int, cluster: list) -> RAPTORNode:
-                async with semaphore:
-                    summary = await self._summarize_cluster(cluster, level)
+
+            async def _summarize_one(
+                i: int,
+                cluster: list[RAPTORNode],
+                *,
+                current_level_number: int = level,
+                summary_semaphore: asyncio.Semaphore = semaphore,
+            ) -> RAPTORNode:
+                async with summary_semaphore:
+                    summary = await self._summarize_cluster(
+                        cluster,
+                        current_level_number,
+                    )
                 child_fingerprint = hashlib.md5(
                     "|".join(
                         child.node_id for child in cluster
@@ -76,35 +117,49 @@ class RAPTORIndexer:
                 ).hexdigest()[:8]
                 node = RAPTORNode(
                     node_id=(
-                        f"raptor_l{level}_c{i}_{child_fingerprint}_"
+                        f"raptor_l{current_level_number}_c{i}_"
+                        f"{child_fingerprint}_"
                         f"{hashlib.md5(summary.encode()).hexdigest()[:8]}"
                     ),
-                    content=summary, summary=summary, level=level, children=cluster,
+                    content=summary,
+                    summary=summary,
+                    level=current_level_number,
+                    children=cluster,
                 )
-                if self.embedder:
-                    node.embedding = await asyncio.to_thread(
-                        self.embedder.embed_single,
-                        summary,
-                    )
                 return node
 
-            batch = await asyncio.gather(*[
-                _summarize_one(i, cluster) for i, cluster in enumerate(clusters)
-            ])
-            next_level = list(batch)
-            if sum(len(nodes) for nodes in all_nodes) + len(next_level) > self.max_nodes:
-                raise ValueError(
-                    "RAPTOR tree exceeds the configured node limit."
+            summary_nodes = list(
+                await asyncio.gather(
+                    *[
+                        _summarize_one(i, cluster)
+                        for i, cluster in enumerate(summary_clusters)
+                    ]
                 )
-            if not next_level:
-                break
-            all_nodes.append(next_level)
-            current_level = next_level
+            )
+            if self.embedder and summary_nodes:
+                vectors = await asyncio.to_thread(
+                    self.embedder.embed,
+                    [node.content for node in summary_nodes],
+                )
+                if len(vectors) != len(summary_nodes):
+                    raise ValueError(
+                        "RAPTOR summary embedding count does not match "
+                        "summary count."
+                    )
+                for node, vector in zip(summary_nodes, vectors):
+                    node.embedding = vector
+
+            all_nodes.append(summary_nodes)
+            total_nodes += len(summary_nodes)
+            current_level = carried_nodes + summary_nodes
         nodes = [n for level in all_nodes for n in level]
         logger.info(f"RAPTOR 树: {len(nodes)} 节点, {len(all_nodes)} 层")
         return nodes
 
-    def _cluster_nodes(self, nodes: List[RAPTORNode]) -> List[List[RAPTORNode]]:
+    def _cluster_nodes(
+        self,
+        nodes: list[RAPTORNode],
+    ) -> list[list[RAPTORNode]]:
         if len(nodes) <= 3:
             return [nodes]
         embeddings = []
@@ -124,6 +179,8 @@ class RAPTORIndexer:
             if i in used:
                 continue
             if i not in node_to_emb:
+                clusters.append([nodes[i]])
+                used.add(i)
                 continue
             cluster = [nodes[i]]
             used.add(i)
@@ -141,7 +198,11 @@ class RAPTORIndexer:
             clusters.append(cluster)
         return clusters
 
-    async def _summarize_cluster(self, cluster: List[RAPTORNode], level: int) -> str:
+    async def _summarize_cluster(
+        self,
+        cluster: list[RAPTORNode],
+        level: int,
+    ) -> str:
         if self.llm is None:
             return "\n".join(n.content[:200] for n in cluster[:5])
         texts = "\n\n".join(f"[{i+1}] {n.content[:500]}" for i, n in enumerate(cluster[:10]))

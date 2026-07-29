@@ -76,4 +76,38 @@ describe("useResearchSession", () => {
 
     unmount();
   });
+
+  it("tracks planning and ignores heartbeat state changes", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("planning test"));
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "planning",
+        status: "start",
+      });
+    });
+
+    expect(useResearchStore.getState().planning).toBe(true);
+
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "heartbeat",
+        timestamp: Date.now(),
+      });
+    });
+
+    expect(useResearchStore.getState().planning).toBe(true);
+    expect(useResearchStore.getState().status).toBe("streaming");
+
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "planning",
+        status: "done",
+      });
+    });
+
+    expect(useResearchStore.getState().planning).toBe(false);
+    unmount();
+  });
 });

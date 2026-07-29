@@ -1,6 +1,6 @@
 # MindForge 文档索引
 
-本目录文档已于 2026-07-28 按当前 `main` 分支代码和自动化测试结果同步。运行参数以项目根目录 `.env.example` 为完整键清单，实际值以未提交的 `.env` 为准；源代码和自动化测试始终是行为事实的最终依据。
+本目录文档已于 2026-07-29 按当前 `main` 分支代码和自动化测试结果同步。运行参数以项目根目录 `.env.example` 为完整键清单，实际值以未提交的 `.env` 为准；源代码和自动化测试始终是行为事实的最终依据。
 
 | 文档 | 用途 |
 |------|------|
@@ -21,8 +21,9 @@
 - `DATABASE_URL` 为后端启动必填项；应用不提供内置数据库连接串回退。
 - API 前缀为 `/api/v1`，当前包含 22 个 REST/SSE 路由方法。
 - 当前 Web 应用已停用 MCP；旧源码、脚本和测试已移除，协议说明仅作历史学习参考。
-- 研究流支持 `answer_chunk` 增量事件，默认最多精炼 1 轮。
-- 当前验证基线包含 Ruff 致命错误检查、129 项 pytest、16 项前端回归测试、ESLint、构建和 Compose 校验。
+- 研究流支持 `planning`、`heartbeat` 和 `answer_chunk` 事件，默认最多精炼 1 轮；未配置 LLM Key 时直接进入知识库检索模式。
+- RAPTOR 跳过单节点摘要并批量生成摘要向量；GraphRAG 可由 Agent 的 `auto/graph` 模式触发，使用构建快照与社区摘要复用。
+- 当前验证基线包含 139 项 pytest、19 项前端回归测试、ESLint、构建和 Compose 校验。
 - 数据库通过 Alembic 迁移，当前迁移头为 `0005_document_assets`。
 - CPU 与 GPU 使用互斥依赖锁；服务器当前运行 `torch==2.13.0+cu130`，
   `torch.cuda.is_available()` 为 `True`，设备为 NVIDIA GPU。

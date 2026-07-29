@@ -47,6 +47,7 @@ interface ResearchState {
   task: string;
   plan: ResearchPlan | null;
   subtasks: SubTaskState;
+  planning: boolean;
   synthesizing: boolean;
   criticScore: CriticScore | null;
   refineRound: number;
@@ -65,6 +66,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
   task: "",
   plan: null,
   subtasks: {},
+  planning: false,
   synthesizing: false,
   criticScore: null,
   refineRound: 0,
@@ -80,6 +82,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       task: "",
       plan: null,
       subtasks: {},
+      planning: false,
       synthesizing: false,
       criticScore: null,
       refineRound: 0,
@@ -91,11 +94,19 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
 
   handleEvent: (event) => {
     switch (event.type) {
+      case "planning":
+        set({ planning: event.status === "start" });
+        break;
+
+      case "heartbeat":
+        break;
+
       case "plan_ready":
         // 幂等防护：重复 plan_ready 不覆盖已有进度
         if (get().plan) break;
         set({
           plan: event.plan,
+          planning: false,
           subtasks: Object.fromEntries(
             event.plan.subtasks.map((s) => [s.task_id, s]),
           ),
@@ -158,6 +169,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
             ? null
             : event.result.output || "研究任务执行失败",
           synthesizing: false,
+          planning: false,
           refineRound: 0,
         });
         break;
@@ -166,6 +178,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         set({
           status: "error",
           error: event.content || "研究任务执行失败",
+          planning: false,
           synthesizing: false,
         });
         break;
