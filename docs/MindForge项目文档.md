@@ -535,7 +535,7 @@ done             →  { type, result: AgentResult }
 
 1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。当前 LLM Provider 配置不完整时按钮显示“知识库检索”，请求不会初始化 Multi-Agent；问候类输入直接返回模式说明，不触发无关文档召回。
 2. **执行可视化区**：使用 React Flow 实时渲染 DAG 执行图——每个节点是一个子任务，边表示依赖关系。已完成/执行中/等待中的节点用不同颜色区分。规划开始前发送 `planning`，长步骤通过 `heartbeat` 保持连接和状态可见。
-3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、精炼过程记录（如果有精炼循环）。无 LLM 时明确展示未经总结的原始命中片段，代码和 HTML 以安全的高亮代码块渲染。
+3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、精炼过程记录（如果有精炼循环）。无 LLM 时明确展示未经总结的原始命中片段。显式语言标记优先，无标记代码块自动检测主流语言，无法可靠识别时按纯文本代码块渲染。
 
 #### 4.2.3 知识库页面
 
@@ -658,7 +658,7 @@ README 的“服务器完整操作流程”是面向使用者的主入口。
 
 GitHub Actions 自动运行：
 - **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。
-- **pytest + coverage**：148 项单元与回归测试。
+- **pytest + coverage**：174 项单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -690,9 +690,9 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 148 项通过 | `python -m pytest -q` |
+| Python 测试 | 174 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
-| 前端回归测试 | 22 项通过 | `npm test` |
+| 前端回归测试 | 25 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
 | 配置完整性 | 根目录 `.env` 为唯一运行时来源 | Pydantic、Vite、Compose 和脚本共用同一套键 |
 | 文档处理 | 页级解析、资产生命周期、取消与进度可追踪 | 回归测试与私有解析基准 |

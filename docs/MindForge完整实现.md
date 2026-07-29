@@ -6599,7 +6599,7 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-29 验证基线：148 项 pytest 通过、22 项
+2026-07-29 验证基线：174 项 pytest 通过、25 项
 Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
 GitHub Actions 的实际运行结果为准。
 
@@ -7796,7 +7796,7 @@ interface HistoryResponse {
 |------|--------|--------|
 | RRF 融合 | 原始分数直接混合 | 按检索路径权重执行纯 RRF，避免 BM25/向量分数尺度污染 |
 | 分数过滤 | 固定阈值 | 使用真实语义/精排分数或正向关键词证据，RRF 排名分不再冒充相关度 |
-| 输出格式 | 原始元数据（Knowledge Base Results...） | 明确标注未经总结的原始片段，代码与 HTML 使用安全的语法高亮代码块 |
+| 输出格式 | 原始元数据（Knowledge Base Results...） | 显式语言标记优先，无标记代码自动检测主流语言，未知代码按纯文本安全展示 |
 | 无结果提示 | "No results found" | "⚠️ 当前资料库中暂无高度相关的内容" + 建议 |
 
 ### Agent 稳健性

@@ -26,7 +26,7 @@
 - 当前 Web 应用已停用 MCP；旧源码、脚本和测试已移除，协议说明仅作历史学习参考。
 - 研究流支持 `planning`、`heartbeat` 和 `answer_chunk` 事件，默认最多精炼 1 轮；当前 LLM Provider 配置不完整时直接进入知识库检索模式。
 - RAPTOR 跳过单节点摘要并批量生成摘要向量；GraphRAG 可由 Agent 的 `auto/graph` 模式触发，使用构建快照与社区摘要复用。
-- 当前验证基线包含 148 项 pytest、22 项前端回归测试、ESLint、构建和 Compose 校验。
+- 当前验证基线包含 174 项 pytest、25 项前端回归测试、ESLint、构建和 Compose 校验。
 - 模型层通过 Provider Registry 统一接入 OpenAI、DeepSeek、兼容云 API 与本地
   推理服务；设置页可独立配置 Base URL、Key、角色模型和 Tool/JSON 能力。
 - 数据库通过 Alembic 迁移，当前迁移头为 `0006_index_features`。

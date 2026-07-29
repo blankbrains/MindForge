@@ -2,6 +2,7 @@ import { memo, useCallback, useSyncExternalStore } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { markdownHighlightOptions } from "@/lib/markdown-highlight";
 import { useResearchStore } from "@/store/research-store";
 
 const configuredInterval = Number.parseInt(
@@ -61,7 +62,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
     <div className="prose prose-sm max-w-none dark:prose-invert">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={[[rehypeHighlight, markdownHighlightOptions]]}
         components={{
           img: ({ alt }) => (
             <span className="text-sm text-text-muted">

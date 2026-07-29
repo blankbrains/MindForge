@@ -1097,6 +1097,85 @@ def test_rag_tool_formats_code_evidence_as_fenced_markdown() -> None:
     assert "未经总结或改写" in output
 
 
+@pytest.mark.parametrize(
+    ("snippet", "language"),
+    [
+        ("from pathlib import Path\ndef load_file(path):\n    return Path(path).read_text()", "python"),
+        ("<main>\n  <button type=\"button\">Run</button>\n</main>", "html"),
+        ("const greet = (name) => console.log(`Hello ${name}`);", "javascript"),
+        ("interface User { id: number }\nconst user: User = { id: 1 };", "typescript"),
+        (
+            "import java.util.List;\n"
+            "public class Main {\n"
+            "  public static void main(String[] args) {}\n"
+            "}",
+            "java",
+        ),
+        ("using System;\nConsole.WriteLine(\"hello\");", "csharp"),
+        ("#include <iostream>\nint main() { std::cout << \"hi\"; }", "cpp"),
+        ("#include <stdio.h>\nint main(void) { printf(\"hi\"); }", "c"),
+        ("package main\nfunc main() { fmt.Println(\"hi\") }", "go"),
+        ("fn main() {\n    println!(\"hi\");\n}", "rust"),
+        ("fun main() {\n    println(\"hi\")\n}", "kotlin"),
+        ("import Foundation\nprint(\"hello\")", "swift"),
+        ("<?php\n$name = \"MindForge\";\necho $name;", "php"),
+        ("require \"json\"\ndef load_data\n  puts \"ready\"\nend", "ruby"),
+        ("SELECT id, name\nFROM users\nWHERE active = true;", "sql"),
+        ("query Research($id: ID!) {\n  document(id: $id) { title }\n}", "graphql"),
+        ('{"provider": "local", "enabled": true}', "json"),
+        ("services:\n  api:\n    image: mindforge", "yaml"),
+        ("[server]\nhost = \"127.0.0.1\"\nport = 8000", "toml"),
+        (".panel {\n  display: flex;\n}", "css"),
+        ("FROM python:3.11-slim\nRUN pip install mindforge", "dockerfile"),
+        ("Get-ChildItem | Where-Object { $_.Length -gt 0 }", "powershell"),
+        ("#!/usr/bin/env bash\nset -euo pipefail\npython -m mindforge", "bash"),
+    ],
+)
+def test_rag_tool_detects_mainstream_code_languages(
+    snippet: str,
+    language: str,
+) -> None:
+    assert RAGTool._detect_code_language(snippet) == language
+
+
+def test_rag_tool_preserves_explicit_fenced_language() -> None:
+    snippet = "```java\npublic class Main {}\n```"
+
+    output = RAGTool()._format_results(
+        [{"text": snippet, "document_source": "example.md"}],
+        "示例",
+    )
+
+    assert output.count("```java") == 1
+    assert "````java" not in output
+
+
+def test_rag_tool_uses_text_fence_for_unknown_code() -> None:
+    snippet = "BEGIN_WIDGET {\n  APPLY widget;\n}"
+
+    output = RAGTool()._format_results(
+        [{"text": snippet, "document_source": "unknown.txt"}],
+        "示例",
+    )
+
+    assert "```text" in output
+
+
+def test_rag_tool_keeps_normal_prose_out_of_code_fences() -> None:
+    output = RAGTool()._format_results(
+        [
+            {
+                "text": "这是普通说明文字。\n它不应被识别为任何编程语言。",
+                "document_source": "notes.txt",
+            }
+        ],
+        "示例",
+    )
+
+    assert "```" not in output
+    assert "> 这是普通说明文字。" in output
+
+
 def test_embedding_manager_pins_configured_model_revision(
     monkeypatch,
 ) -> None:

@@ -2,6 +2,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { AgentResult } from "@/types/research";
+import { markdownHighlightOptions } from "@/lib/markdown-highlight";
 import { formatDuration, formatCost } from "@/lib/utils";
 
 interface Props {
@@ -57,7 +58,7 @@ export function ReportViewer({ result }: Props) {
         <div className="prose prose-neutral dark:prose-invert max-w-none leading-relaxed [&_p]:my-4 [&_h2]:mt-8 [&_h2]:mb-4 [&_h3]:mt-6 [&_h3]:mb-2">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}
+            rehypePlugins={[[rehypeHighlight, markdownHighlightOptions]]}
             components={{
               img: ({ alt }) => (
                 <span className="text-sm text-text-muted">

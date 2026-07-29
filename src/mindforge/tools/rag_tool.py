@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import time
 from typing import Any, Optional
@@ -380,8 +381,9 @@ class RAGTool(BaseTool):
                         "",
                     ]
                 )
-                language = self._detect_code_language(text)
-                if language is not None:
+                if self._is_explicit_fenced_code(text):
+                    lines.append(text)
+                elif (language := self._detect_code_language(text)) is not None:
                     lines.append(self._fenced_code(text, language))
                 else:
                     escaped = html.escape(text, quote=False)
@@ -441,31 +443,226 @@ class RAGTool(BaseTool):
             or cls._relevance_score(result) >= min_score
         )
 
-    @staticmethod
-    def _detect_code_language(text: str) -> str | None:
-        if re.search(
-            r"</?(?:html|body|div|label|input|script|style|form)\b",
+    @classmethod
+    def _detect_code_language(cls, text: str) -> str | None:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return "json"
+        docker_instructions = re.findall(
+            (
+                r"(?m)^\s*(?:FROM|RUN|CMD|ENTRYPOINT|COPY|ADD|WORKDIR|"
+                r"EXPOSE|ENV|ARG|USER|VOLUME|HEALTHCHECK)\s+"
+            ),
             text,
-            flags=re.IGNORECASE,
+        )
+        if len(docker_instructions) >= 2 or re.search(
+            (
+                r"(?m)^\s*FROM\s+(?:--platform=\S+\s+)?"
+                r"[\w./-]+(?::[\w.-]+|@sha256:[a-fA-F0-9]+)"
+                r"(?:\s+AS\s+\w+)?\s*$"
+            ),
+            text,
         ):
-            return "html"
+            return "dockerfile"
         if re.search(
             (
-                r"(^|\n)\s*(?:from\s+\w[\w.]*\s+import|import\s+\w|"
-                r"def\s+\w+\s*\(|class\s+\w+|if\s+__name__\s*==|"
+                r"(?im)(?:^\s*#requires\b|\$env:|\b(?:Get|Set|New|Remove|"
+                r"Write|Where|ForEach)-[A-Z][A-Za-z]+\b|^\s*param\s*\()"
+            ),
+            text,
+        ):
+            return "powershell"
+        if re.search(r"(?i)<\?php\b", text):
+            return "php"
+        if re.search(
+            (
+                r"(?i)<!doctype\s+html\b|</?(?:html|head|body|main|section|"
+                r"article|div|span|label|input|button|script|style|form)\b"
+            ),
+            text,
+        ):
+            return "html"
+        if re.search(r"(?i)<\?xml\b", text) or re.search(
+            r"(?s)^\s*<[A-Za-z_][\w:.-]*(?:\s[^>]*)?>.*</[A-Za-z_][\w:.-]*>\s*$",
+            text,
+        ):
+            return "xml"
+        if re.search(r"(?m)^\s*\$(?:[\w-]+)\s*:", text) or re.search(
+            r"(?m)^\s*@(?:mixin|include|extend|function)\b",
+            text,
+        ):
+            return "scss"
+        if re.search(
+            (
+                r"(?is)(?:^|\n)\s*(?:[.#][\w-]+|[a-z][\w-]*|"
+                r"@(?:media|supports|keyframes)\b[^{]*)\s*\{[^{}]*"
+                r"(?:color|background|display|margin|padding|font|border|"
+                r"width|height|position|grid|flex|content|transform|"
+                r"animation)\s*:[^{};]+;"
+            ),
+            text,
+        ):
+            return "css"
+        if re.search(
+            (
+                r"(?m)^\s*(?:interface|type|enum|namespace)\s+[A-Za-z_$]\w*|"
+                r"^\s*import\s+type\b|"
+                r"\b(?:const|let|function)\s+[A-Za-z_$]\w*\s*"
+                r"(?:\([^)]*\))?\s*:\s*(?:string|number|boolean|unknown|never)\b"
+            ),
+            text,
+        ):
+            return "typescript"
+        if re.search(
+            (
+                r"(?m)^\s*(?:from\s+\w[\w.]*\s+import\s+[\w*, ()]+|"
+                r"def\s+\w+\s*\(|class\s+\w+(?:\([^)]*\))?\s*:|"
+                r"if\s+__name__\s*==|"
                 r"[A-Z_][A-Z0-9_]*\s*=\s*[\[{])"
             ),
             text,
         ):
             return "python"
         if re.search(
-            r"(^|\n)\s*(?:const|let|var|function)\s+\w+|=>|onKeyDown=\{",
+            (
+                r"(?m)^\s*(?:const|let|var|function|export\s+(?:default\s+)?)\b|"
+                r"=>|\bconsole\.(?:log|error|warn)\s*\("
+            ),
             text,
         ):
             return "javascript"
-        if re.search(r"(^|\n)\s*(?:curl|docker|npm|python)\s+", text):
+        if re.search(
+            r"(?m)^\s*(?:using\s+System(?:\.[\w.]+)?;|namespace\s+[\w.]+\s*[;{])",
+            text,
+        ) or "Console.WriteLine(" in text:
+            return "csharp"
+        if re.search(r"(?m)^\s*import\s+java\.[\w.*]+;", text) or re.search(
+            r"\bpublic\s+static\s+void\s+main\s*\(\s*String(?:\[\]|\.\.\.)",
+            text,
+        ) or "System.out.println(" in text:
+            return "java"
+        if re.search(r"(?m)^\s*#include\s*[<\"][^>\"]+[>\"]", text) and re.search(
+            r"\b(?:std::|cout\s*<<|cin\s*>>|namespace\s+std|template\s*<)",
+            text,
+        ):
+            return "cpp"
+        if re.search(r"(?m)^\s*#include\s*[<\"][^>\"]+[>\"]", text) and re.search(
+            r"\b(?:printf|scanf|malloc|calloc|free|typedef\s+struct)\s*\(?",
+            text,
+        ):
+            return "c"
+        if re.search(r"(?m)^\s*package\s+\w+\s*$", text) and re.search(
+            r"(?m)^\s*func\s+(?:\([^)]*\)\s*)?\w+\s*\(",
+            text,
+        ):
+            return "go"
+        if re.search(r"(?m)^\s*(?:use\s+std::|fn\s+main\s*\()", text) or re.search(
+            r"\b(?:println|format|vec)!\s*\(",
+            text,
+        ):
+            return "rust"
+        if re.search(
+            r"(?m)^\s*(?:fun\s+main\s*\(|data\s+class\s+\w+|sealed\s+class\s+\w+)",
+            text,
+        ):
+            return "kotlin"
+        if re.search(
+            r"(?m)^\s*import\s+(?:Foundation|SwiftUI|UIKit)\s*$",
+            text,
+        ) or re.search(r"(?m)^\s*@main\s+(?:struct|class)\s+\w+", text):
+            return "swift"
+        if re.search(
+            (
+                r"(?is)\bSELECT\b.+\bFROM\b|\bINSERT\s+INTO\b|"
+                r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b|"
+                r"\bUPDATE\b.+\bSET\b|\bALTER\s+TABLE\b"
+            ),
+            text,
+        ):
+            return "sql"
+        if re.search(
+            r"(?m)^\s*(?:query|mutation|subscription)\s+\w+.*\{",
+            text,
+        ) or re.search(r"(?m)^\s*(?:type|input|enum)\s+\w+\s*\{", text):
+            return "graphql"
+        if re.search(r"(?m)^\s*\[[\w.-]+\]\s*$", text) and re.search(
+            r"(?m)^\s*[\w.-]+\s*=\s*(?:[\"'\d[{]|true\b|false\b)",
+            text,
+        ):
+            return "toml"
+        yaml_keys = re.findall(r"(?m)^\s*(?:-\s+)?[\w.-]+\s*:\s*(?:.*)$", text)
+        if len(yaml_keys) >= 2 and (
+            re.search(r"(?m)^\s+-\s+", text)
+            or re.search(r"(?m)^\s{2,}[\w.-]+\s*:", text)
+            or text.lstrip().startswith("---")
+        ):
+            return "yaml"
+        if re.search(r"(?m)^\s*#!/(?:usr/bin/env\s+)?(?:ba|z|k)?sh\b", text) or re.search(
+            (
+                r"(?m)^\s*(?:set\s+-[a-zA-Z]+|export\s+\w+=|"
+                r"(?:curl|docker|npm|pnpm|yarn|python|pip|git)\s+\S+)"
+            ),
+            text,
+        ):
             return "bash"
-        return None
+        if re.search(r"(?m)^\s*(?:require\s+['\"]|puts\s+|class\s+\w+\s*<)", text):
+            return "ruby"
+        if re.search(r"(?m)^\s*(?:local\s+)?function\s+\w+\s*\(", text) and re.search(
+            r"(?m)^\s*end\s*$",
+            text,
+        ):
+            return "lua"
+        if re.search(r"(?m)^\s*\w[\w.]*\s*<-\s*", text) and re.search(
+            r"\b(?:library|function|data\.frame|ggplot)\s*\(",
+            text,
+        ):
+            return "r"
+        if re.search(r"(?m)^[A-Za-z0-9_.-]+:\s*[^\n]*\n\t+\S", text):
+            return "makefile"
+        return "text" if cls._looks_like_code(text) else None
+
+    @staticmethod
+    def _is_explicit_fenced_code(text: str) -> bool:
+        match = re.fullmatch(
+            (
+                r"\s*(?P<fence>`{3,}|~{3,})[ \t]*"
+                r"[A-Za-z0-9_+#.-]+[^\n]*\n"
+                r".*\n(?P=fence)[ \t]*\s*"
+            ),
+            text,
+            flags=re.DOTALL,
+        )
+        return match is not None
+
+    @staticmethod
+    def _looks_like_code(text: str) -> bool:
+        lines = [line for line in text.splitlines() if line.strip()]
+        if len(lines) < 2:
+            return False
+        code_lines = sum(
+            1
+            for line in lines
+            if re.search(
+                (
+                    r"^\s*(?:if|else|for|while|switch|case|return|class|"
+                    r"interface|function|fn|func|def|import|from|include|"
+                    r"public|private|protected|const|let|var)\b|"
+                    r"[A-Za-z_$]\w*\s*(?:=|:=|=>)\s*\S|"
+                    r"[{}();]\s*$"
+                ),
+                line,
+            )
+        )
+        return code_lines >= 2 or (
+            code_lines >= 1
+            and sum(text.count(symbol) for symbol in ("{", "}", ";")) >= 3
+        )
 
     @staticmethod
     def _fenced_code(text: str, language: str) -> str:

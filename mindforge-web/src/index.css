@@ -92,6 +92,35 @@ body {
   color: #953800;
 }
 
+.hljs-tag,
+.hljs-name,
+.hljs-attr,
+.hljs-property,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: #116329;
+}
+
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: #0550ae;
+}
+
+.hljs-operator,
+.hljs-punctuation {
+  color: #57606a;
+}
+
+.hljs-addition {
+  color: #116329;
+  background: #dafbe1;
+}
+
+.hljs-deletion {
+  color: #82071e;
+  background: #ffebe9;
+}
+
 .dark .prose pre {
   border-color: #30363d;
   background: #0d1117;
@@ -138,4 +167,33 @@ body {
 .dark .hljs-symbol,
 .dark .hljs-bullet {
   color: #ffa657;
+}
+
+.dark .hljs-tag,
+.dark .hljs-name,
+.dark .hljs-attr,
+.dark .hljs-property,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id {
+  color: #7ee787;
+}
+
+.dark .hljs-meta,
+.dark .hljs-meta .hljs-keyword {
+  color: #79c0ff;
+}
+
+.dark .hljs-operator,
+.dark .hljs-punctuation {
+  color: #8b949e;
+}
+
+.dark .hljs-addition {
+  color: #aff5b4;
+  background: #033a16;
+}
+
+.dark .hljs-deletion {
+  color: #ffdcd7;
+  background: #67060c;
 }
