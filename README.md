@@ -257,6 +257,255 @@ LLM Provider 支持 `openai`、`deepseek`、`openai_compatible` 和 `local`。
 保存 Base URL、API Key、默认模型、四个 Agent 角色模型和工具/JSON 能力开关。
 本地服务可关闭“需要 API Key”，但仍必须配置可访问的 Base URL 与模型名。
 
+### 服务器完整操作流程
+
+#### 1. 首次部署
+
+```bash
+git clone <repo-url> MindForge
+cd MindForge
+cp .env.example .env
+```
+
+编辑 `.env`，至少完成以下配置：
+
+- 设置强随机 `POSTGRES_PASSWORD`，并让 `DATABASE_URL` 使用相同账号、密码和库名。
+- 选择 `LLM_LLM_PROVIDER`，填写对应 Provider 的 Base URL、API Key 和模型。
+- CPU 部署保持 `PYTHON_REQUIREMENTS_FILE=requirements-cpu.lock`；GPU 部署使用
+  `requirements-gpu.lock` 并核对 `docker-compose.gpu.yml` 所需设备和驱动路径。
+- 通过反向代理访问时保持 `DOCKER_API_BIND_ADDRESS=127.0.0.1`；仅在受控测试网络
+  直接访问时改为 `0.0.0.0`。
+
+配置检查和启动：
+
+```bash
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+curl --fail http://127.0.0.1:8000/api/v1/ready
+```
+
+GPU 部署使用：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+  up -d --build
+```
+
+浏览器访问 `http://<服务器地址>:<API_PORT>`。若外部无法连接，依次检查
+`DOCKER_API_BIND_ADDRESS`、服务器防火墙和反向代理；PostgreSQL、Redis、Qdrant
+端口不应对外开放。
+
+#### 2. 配置模型
+
+1. 打开“系统配置”。
+2. 在“LLM 供应商”中选择 Provider，填写连接参数和模型 ID。
+3. 按模型真实能力设置 Tool Calling、JSON Mode 和 JSON Schema。
+4. 保存后确认状态为“可用”，再执行一次简单研究请求。
+
+完整字段和本地模型命令见下方
+[LLM 配置操作流程](#llm-配置操作流程)。
+
+#### 3. 上传并建立知识库
+
+1. 打开“知识库”，点击“上传文档”。
+2. 选择 PDF、DOCX、Markdown、TXT 或 HTML 文件。
+3. 按需启用 RAPTOR 层次索引或 GraphRAG 图谱索引；首次验证建议先关闭两者，
+   确认基础解析和检索正常后再启用。
+4. 点击“开始索引”。界面先显示文件传输进度，再显示解析、Embedding 和索引进度。
+5. 等待状态变为“已索引”，随后可查看内容或删除文档。取消任务时系统会回滚
+   未完成的向量、目录记录和解析资产。
+
+#### 4. 发起研究
+
+1. 打开“研究工作台”，输入问题。
+2. 按 `Enter` 提交，`Shift+Enter` 换行。
+3. LLM Provider 可用时，界面展示规划、子任务、综合和评判过程；Provider
+   未就绪时自动使用知识库检索模式。
+4. 完成结果会保存到“研究历史”，可查看完整报告或删除记录。
+
+#### 5. 日常更新、排障和停止
+
+```bash
+# 拉取更新后重新校验并构建
+git pull --ff-only
+docker compose config --quiet
+docker compose up -d --build
+
+# 查看应用日志
+docker compose logs -f --tail=200 mindforge
+
+# 停止服务但保留容器和数据
+docker compose stop
+
+# 删除容器和网络但保留命名数据卷
+docker compose down
+```
+
+不要使用 `docker compose down -v`，除非已经备份且明确需要删除数据库、向量库、
+缓存和应用数据卷。
+
+### LLM 配置操作流程
+
+#### 方式一：通过设置页配置
+
+1. 启动 MindForge 后访问：
+
+   ```text
+   http://<服务器地址>:<API_PORT>/settings
+   ```
+
+2. 进入“LLM 供应商”，选择 Provider：
+
+   | 选项 | 适用情况 |
+   |------|----------|
+   | OpenAI | 直接使用 OpenAI API |
+   | DeepSeek | 直接使用 DeepSeek API |
+   | OpenAI 兼容接口 | 使用提供 OpenAI-compatible API 的云服务 |
+   | 本地模型 | 连接服务器上的 vLLM、Ollama 或 LM Studio |
+
+3. 填写连接参数：
+
+   - **OpenAI**：填写 API Key；默认 Base URL 可留空；确认四个角色模型可用。
+   - **DeepSeek**：填写 API Key；Base URL 默认
+     `https://api.deepseek.com`；角色模型通常填写 `deepseek-chat`。
+   - **兼容云 API**：填写供应商的 `/v1` Base URL、API Key 和准确模型 ID。
+   - **本地模型**：填写容器可访问的 Base URL 和模型 ID；无鉴权时关闭
+     “需要 API Key”。
+
+4. 配置模型路由：
+
+   - `Planner`：任务拆解，需要稳定结构化输出。
+   - `Researcher`：检索和工具调用，需要 Tool Calling。
+   - `Critic`：质量评分，需要稳定 JSON 输出。
+   - `Synthesizer`：报告生成，建议使用长上下文模型。
+   - 兼容云 API 和本地模型只填写“默认模型”也可以，角色模型留空时自动继承。
+
+5. 配置接口能力：
+
+   - 模型不支持 Tool Calling 时关闭“工具调用”。
+   - 不支持 `json_object` 时关闭“JSON Mode”。
+   - 不支持 `json_schema` 时关闭“JSON Schema”。
+   - 不确定时先全部关闭，确认普通 Chat 成功后再逐项启用。
+
+6. 点击“保存配置”。右上角显示“可用”后，进入研究页提交一个简单问题。
+   如果仍显示“未就绪”，检查 Base URL、模型 ID，以及当前 Key 要求是否满足。
+
+7. 通过 API 验证：
+
+   ```bash
+   curl -s http://127.0.0.1:8000/api/v1/settings
+   curl --fail http://127.0.0.1:8000/api/v1/ready
+   ```
+
+   `llm_configured=true` 表示当前 Provider 已满足运行条件；API Key 只返回脱敏值。
+
+#### 方式二：通过 `.env` 配置
+
+OpenAI：
+
+```dotenv
+LLM_LLM_PROVIDER=openai
+LLM_OPENAI_API_KEY=<your-key>
+LLM_OPENAI_BASE_URL=
+LLM_PLANNER_MODEL=gpt-4o
+LLM_RESEARCHER_MODEL=gpt-4o-mini
+LLM_CRITIC_MODEL=gpt-4o
+LLM_SYNTHESIZER_MODEL=gpt-4o
+```
+
+DeepSeek：
+
+```dotenv
+LLM_LLM_PROVIDER=deepseek
+LLM_DEEPSEEK_API_KEY=<your-key>
+LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com
+LLM_DEEPSEEK_PLANNER=deepseek-chat
+LLM_DEEPSEEK_RESEARCHER=deepseek-chat
+LLM_DEEPSEEK_CRITIC=deepseek-chat
+LLM_DEEPSEEK_SYNTHESIZER=deepseek-chat
+```
+
+OpenAI 兼容云 API：
+
+```dotenv
+LLM_LLM_PROVIDER=openai_compatible
+LLM_COMPATIBLE_API_KEY=<your-key>
+LLM_COMPATIBLE_BASE_URL=https://<provider-host>/v1
+LLM_COMPATIBLE_API_KEY_REQUIRED=true
+LLM_COMPATIBLE_MODEL=<model-id>
+LLM_COMPATIBLE_SUPPORTS_TOOLS=true
+LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
+LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA=false
+```
+
+服务器本地模型：
+
+```dotenv
+LLM_LLM_PROVIDER=local
+LLM_LOCAL_API_KEY=
+LLM_LOCAL_BASE_URL=http://host.docker.internal:11434/v1
+LLM_LOCAL_API_KEY_REQUIRED=false
+LLM_LOCAL_MODEL=qwen3:8b
+LLM_LOCAL_SUPPORTS_TOOLS=true
+LLM_LOCAL_SUPPORTS_JSON_MODE=true
+LLM_LOCAL_SUPPORTS_JSON_SCHEMA=false
+```
+
+修改 `.env` 后执行：
+
+```bash
+docker compose config --quiet
+docker compose up -d --build mindforge
+curl --fail http://127.0.0.1:8000/api/v1/ready
+```
+
+#### 本地模型示例
+
+Ollama：
+
+```bash
+ollama pull qwen3:8b
+OLLAMA_HOST=0.0.0.0:11434 ollama serve
+curl http://127.0.0.1:11434/v1/models
+```
+
+设置页填写：
+
+```text
+Base URL: http://host.docker.internal:11434/v1
+默认模型: qwen3:8b
+需要 API Key: 关闭
+```
+
+vLLM 建议避开 MindForge 的 8000 端口：
+
+```bash
+vllm serve <模型仓库或本地路径> --host 0.0.0.0 --port 8001
+curl http://127.0.0.1:8001/v1/models
+```
+
+设置页填写：
+
+```text
+Base URL: http://host.docker.internal:8001/v1
+默认模型: <接口返回的模型 ID>
+```
+
+检查应用容器能否访问宿主机模型服务：
+
+```bash
+docker compose exec mindforge getent hosts host.docker.internal
+docker compose exec mindforge \
+  curl -s http://host.docker.internal:11434/v1/models
+```
+
+模型 ID 必须以 `/v1/models` 的实际返回值为准。本地服务需监听 `0.0.0.0`；
+容器内 `127.0.0.1` 指向 MindForge 容器自身，不是服务器宿主机。
+
+完整操作、故障排查和安全要求见
+[LLM Provider 配置与运维](docs/llm-provider-operations.md)。
+
 ### 🚢 3. 生产部署（单端口）
 
 ```bash
@@ -341,6 +590,7 @@ GitHub Actions 自动运行：
 - [真实问题与修复记录](docs/MindForge踩过的坑.md)
 - [面试题目与项目讲解](docs/MindForge面试题目.md)
 - [文档解析运维说明](docs/document-parsing-operations.md)
+- [LLM Provider 配置与运维](docs/llm-provider-operations.md)
 - [解析管线实施方案](计划方案/解析管线完整性与多模态检索实施方案.md)
 - [前端方案与实施复盘](计划方案/MindForge前端方案.md)
 
@@ -392,17 +642,6 @@ GitHub Actions 自动运行：
 ## 📄 许可证
 
 本项目基于 [MIT 协议](LICENSE) 开源，可自由使用、修改和分发。
-
-## 📚 项目文档
-
-- [文档索引](docs/README.md)
-- [项目架构与模块说明](docs/MindForge项目文档.md)
-- [开发踩坑记录](docs/MindForge踩过的坑.md)
-- [完整实现说明](docs/MindForge完整实现.md)
-- [项目面试题目](docs/MindForge面试题目.md)
-- [文档解析运维说明](docs/document-parsing-operations.md)
-- [解析管线实施方案](计划方案/解析管线完整性与多模态检索实施方案.md)
-- [前端实施与演进方案](计划方案/MindForge前端方案.md)
 
 ---
 

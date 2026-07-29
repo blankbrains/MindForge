@@ -351,6 +351,20 @@ Ollama、LM Studio。四个 Agent 角色可独立覆盖模型名，未覆盖时�
 Docker Compose 配置 `host.docker.internal:host-gateway`，应用容器可访问宿主机
 推理端点。
 
+#### 3.6.4 配置与验证流程
+
+1. 打开 `/settings`，选择 OpenAI、DeepSeek、OpenAI 兼容接口或本地模型。
+2. 配置 Base URL、API Key、默认模型及四个 Agent 角色模型。
+3. 按模型和推理服务真实能力设置 Tool Calling、JSON Mode、JSON Schema。
+4. 保存后确认 Provider 状态为“可用”，并检查 `/api/v1/settings` 中
+   `llm_configured=true`。
+5. 本地模型从应用容器通过 `host.docker.internal` 访问服务器宿主机；服务必须
+   监听可被 Docker 网桥访问的地址。
+6. RAPTOR、GraphRAG 和 QA 专用模型留空时继承当前 Researcher 模型。
+
+完整命令、Ollama/vLLM 示例和故障排查见
+[LLM Provider 配置与运维](llm-provider-operations.md)。
+
 **⚠️ 曾踩过的坑**：API Key 配置的全链路一致性——前端保存 Key 后，后端需要同步更新到环境变量、数据库、缓存三处，任一环节断链都会导致调用失败。脱敏 Key 回显后又被当作真实 Key 写回的问题也花了不少时间排查。
 
 ---
@@ -520,7 +534,7 @@ done             →  { type, result: AgentResult }
 
 核心页面，分为三个区域：
 
-1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。未配置当前 LLM Provider 的 Key 时按钮显示“知识库检索”，请求不会初始化 Multi-Agent。
+1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。当前 LLM Provider 配置不完整时按钮显示“知识库检索”，请求不会初始化 Multi-Agent。
 2. **执行可视化区**：使用 React Flow 实时渲染 DAG 执行图——每个节点是一个子任务，边表示依赖关系。已完成/执行中/等待中的节点用不同颜色区分。规划开始前发送 `planning`，长步骤通过 `heartbeat` 保持连接和状态可见。
 3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、精炼过程记录（如果有精炼循环）。
 
@@ -617,7 +631,32 @@ Toolkit，因此 override 显式映射 `/dev/nvidia*` 设备节点以及宿主�
 `libcuda.so`、`libnvidia-ml.so`；部署前必须根据驱动版本在服务器 `.env`
 中配置真实库路径。
 
-### 5.4 CI/CD
+### 5.4 标准操作流程
+
+首次部署先复制 `.env.example`，按服务器实际环境配置数据库、LLM、端口、绑定
+地址及 CPU/GPU 锁文件，然后执行：
+
+```bash
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+curl --fail http://127.0.0.1:8000/api/v1/ready
+```
+
+服务就绪后的界面操作顺序为：
+
+1. 在“系统配置”中保存 LLM Provider，确认状态为“可用”。
+2. 在“知识库”上传文档，按需启用 RAPTOR/GraphRAG，等待当前任务完成。
+3. 在“研究工作台”提交问题；LLM 不可用时只执行知识库检索。
+4. 在“研究历史”查看或清理报告。
+
+更新代码后使用 `git pull --ff-only`、`docker compose config --quiet` 和
+`docker compose up -d --build` 完成重建；使用
+`docker compose logs -f --tail=200 mindforge` 排查应用日志。普通停止使用
+`docker compose stop` 或 `docker compose down`，不得在未备份时增加 `-v`。
+README 的“服务器完整操作流程”是面向使用者的主入口。
+
+### 5.5 CI/CD
 
 GitHub Actions 自动运行：
 - **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。

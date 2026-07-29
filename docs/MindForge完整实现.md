@@ -3919,6 +3919,9 @@ Streaming、Tool Calling 增量聚合、JSON 能力降级和可选 Embedding。B
 原有 OpenAI、DeepSeek Adapter 保留兼容导入，并由 `LLMFactory` 注册为内置
 Provider。
 
+实际配置步骤、Ollama/vLLM 启动示例、能力开关与连通性检查见
+[LLM Provider 配置与运维](llm-provider-operations.md)。
+
 ### 7.3 OpenAI 适配器
 
 ```python
@@ -6563,7 +6566,31 @@ bash start.sh
 bash start.sh --dev
 ```
 
-### 13.5 CI/CD
+### 13.5 服务器操作流程
+
+```bash
+# 首次部署
+cp .env.example .env
+docker compose config --quiet
+docker compose up -d --build
+curl --fail http://127.0.0.1:8000/api/v1/ready
+
+# 更新
+git pull --ff-only
+docker compose config --quiet
+docker compose up -d --build
+
+# 排障与停止
+docker compose logs -f --tail=200 mindforge
+docker compose stop
+```
+
+应用就绪后，先在设置页完成 Provider 配置，再上传文档建立知识库，最后进入研究
+工作台提交问题。上传界面先显示字节传输进度，再显示服务端索引进度；完成的研究
+结果进入历史记录。详细步骤以根目录 README 的“服务器完整操作流程”为准，
+LLM 专题配置见 [LLM Provider 配置与运维](llm-provider-operations.md)。
+
+### 13.6 CI/CD
 
 GitHub Actions 使用固定提交 SHA 的 Actions，启动 Qdrant、Redis、PostgreSQL Service Container，并执行：
 
@@ -6581,7 +6608,7 @@ cp .env.example .env && docker compose config --quiet
 Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
 GitHub Actions 的实际运行结果为准。
 
-### 13.6 长文档处理
+### 13.7 长文档处理
 
 大 PDF 使用有界并发的页级解析，并以持久化索引任务报告文件传输、解析、分块、
 Embedding 和写入进度。重复上传只在内容 ID、索引签名和 PostgreSQL、Qdrant、
