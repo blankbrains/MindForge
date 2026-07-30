@@ -623,9 +623,9 @@ async def test_synthesizer_stream_awaits_llm_stream(
         lambda *args, **kwargs: llm,
     )
 
-    chunks = [
-        chunk
-        async for chunk in SynthesizerAgent(llm=llm).synthesize_stream(
+    events = [
+        event
+        async for event in SynthesizerAgent(llm=llm).synthesize_stream(
             task="test",
             subtask_results=[
                 {
@@ -637,7 +637,13 @@ async def test_synthesizer_stream_awaits_llm_stream(
         )
     ]
 
-    assert chunks == ["part one", " part two"]
+    assert [event.content for event in events if event.type == "chunk"] == [
+        "part one",
+        " part two",
+    ]
+    assert events[-1].type == "done"
+    assert events[-1].result is not None
+    assert events[-1].result.output == "part one part two"
 
 
 def test_web_search_validates_runtime_arguments() -> None:

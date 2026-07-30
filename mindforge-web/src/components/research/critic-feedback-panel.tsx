@@ -38,8 +38,13 @@ export function CriticFeedbackPanel({ score }: Props) {
         </span>
       </div>
 
-      <div className="h-48">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-48 min-w-0">
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          minHeight={192}
+        >
           <RadarChart data={data}>
             <PolarGrid stroke="#e9ecef" />
             <PolarAngleAxis

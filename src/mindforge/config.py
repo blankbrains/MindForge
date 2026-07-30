@@ -89,6 +89,14 @@ class LLMConfig(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1")
     deepseek_api_key: str = Field(default="")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
+    model_pricing: dict[str, dict[str, float]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-model USD prices per one million tokens. Keys may be "
+            "'provider:model' or plain model names. Values support input, "
+            "cached_input, and output rates."
+        ),
+    )
     compatible_api_key: str = Field(default="")
     compatible_base_url: str = Field(default="")
     compatible_api_key_required: bool = Field(default=True)
@@ -100,6 +108,7 @@ class LLMConfig(BaseSettings):
     compatible_supports_tools: bool = Field(default=True)
     compatible_supports_json_mode: bool = Field(default=True)
     compatible_supports_json_schema: bool = Field(default=False)
+    compatible_supports_stream_usage: bool = Field(default=False)
     local_api_key: str = Field(default="")
     local_base_url: str = Field(
         default="http://host.docker.internal:11434/v1"
@@ -113,6 +122,7 @@ class LLMConfig(BaseSettings):
     local_supports_tools: bool = Field(default=True)
     local_supports_json_mode: bool = Field(default=True)
     local_supports_json_schema: bool = Field(default=False)
+    local_supports_stream_usage: bool = Field(default=False)
     planner_model: str = "gpt-4o"
     researcher_model: str = "gpt-4o-mini"
     critic_model: str = "gpt-4o"
@@ -225,6 +235,34 @@ class LLMConfig(BaseSettings):
         if selected == "local":
             return self.local_supports_json_schema
         return False
+
+    def supports_stream_usage(self, provider: str | None = None) -> bool:
+        selected = (provider or self.llm_provider).lower()
+        if selected in {"openai", "deepseek"}:
+            return True
+        if selected == "openai_compatible":
+            return self.compatible_supports_stream_usage
+        if selected == "local":
+            return self.local_supports_stream_usage
+        return False
+
+    def get_model_pricing(
+        self,
+        model: str,
+        provider: str | None = None,
+    ) -> dict[str, float] | None:
+        selected = (provider or self.llm_provider).strip().lower()
+        normalized_model = model.strip().lower()
+        if not normalized_model:
+            return None
+        normalized_pricing = {
+            key.strip().lower(): value
+            for key, value in self.model_pricing.items()
+        }
+        return (
+            normalized_pricing.get(f"{selected}:{normalized_model}")
+            or normalized_pricing.get(normalized_model)
+        )
 
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 

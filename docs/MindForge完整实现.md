@@ -1,6 +1,10 @@
 # MindForge — 自适应研究助理系统（完整实现）
 
 > **文档同步说明（2026-07-30）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
+> **当前研究结果行为：** 普通与流式 LLM usage 统一归一化，模型价格通过
+> `LLM_MODEL_PRICING` 配置并仅展示估算费用；未知价格或缺失 usage 不再显示为
+> `$0`。研究页、流式面板和历史页共用 Markdown/GFM 渲染，表格具备边框和窄屏
+> 滚动；成功任务清空输入，失败任务保留问题。
 > **项目定位：** 一个面向文本研究任务的自适应研究助理。不是简单的"问答机器人"，而是能**主动分解问题、迭代检索、综合推理、生成结构化研究报告**的 Agent 系统。
 >
 > **面试定位：** 2026 年 Agent 开发实习面试项目。集成 **Agentic RAG + Multi-Agent 协作 + 自适应记忆 + 流式可观测性**。MCP 章节仅保留历史学习说明，旧源码、脚本和测试已从当前 `main` 工作树移除。
@@ -439,6 +443,7 @@ LLM_OPENAI_API_KEY=
 LLM_OPENAI_BASE_URL=https://api.openai.com/v1
 LLM_DEEPSEEK_API_KEY=
 LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com
+LLM_MODEL_PRICING={"provider:model-id":{"input":0.0,"cached_input":0.0,"output":0.0}}
 
 # ── 模型列表发现 ──
 API_MODEL_DISCOVERY_TIMEOUT_SECONDS=15
@@ -452,6 +457,7 @@ LLM_COMPATIBLE_API_KEY_REQUIRED=true
 LLM_COMPATIBLE_MODEL=
 LLM_COMPATIBLE_SUPPORTS_TOOLS=true
 LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
+LLM_COMPATIBLE_SUPPORTS_STREAM_USAGE=false
 
 # ── 本地推理服务 ──
 LLM_LOCAL_API_KEY=
@@ -460,6 +466,7 @@ LLM_LOCAL_API_KEY_REQUIRED=false
 LLM_LOCAL_MODEL=
 LLM_LOCAL_SUPPORTS_TOOLS=true
 LLM_LOCAL_SUPPORTS_JSON_MODE=true
+LLM_LOCAL_SUPPORTS_STREAM_USAGE=false
 
 # ── Embedding（默认 BGE-M3 本地 1024 维）──
 LLM_EMBEDDING_PROVIDER=bge          # openai | bge
@@ -4288,7 +4295,8 @@ class AgentResult:
     metadata: dict = field(default_factory=dict)
     token_usage: dict = field(default_factory=dict)
     latency_ms: float = 0.0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
+    cost_status: str = "usage_unavailable"
 
 
 class BaseAgent(ABC):
@@ -6144,7 +6152,8 @@ class QueryResponse(BaseModel):
     sources: list = Field(default_factory=list)
     quality_score: float = 0.0
     latency_ms: float = 0.0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
+    cost_status: str = "usage_unavailable"
     iterations: int = 0
 
 
@@ -6799,7 +6808,9 @@ export interface AgentResult {
   output: string;
   data?: Record<string, unknown>;
   token_usage?: Record<string, number>;
-  cost_usd?: number;
+  cost_usd?: number | null;
+  cost_status?: "estimated" | "partial" | "pricing_unconfigured"
+    | "usage_unavailable" | "not_applicable";
   latency_ms?: number;
   metadata?: Record<string, unknown>;
 }

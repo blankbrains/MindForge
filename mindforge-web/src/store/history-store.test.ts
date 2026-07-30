@@ -42,4 +42,43 @@ describe("history store", () => {
 
     expect(useHistoryStore.getState().entries).toEqual([serverEntry]);
   });
+
+  it("persists token usage and billing status with research history", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: 8 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await useHistoryStore.getState().addFromResearch(
+      "research",
+      "report",
+      8,
+      "model",
+      {
+        tokenUsage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          total_tokens: 15,
+        },
+        costUsd: 0.001,
+        costStatus: "estimated",
+      },
+    );
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(String(request.body)) as {
+      token_usage: Record<string, unknown>;
+    };
+    expect(body.token_usage).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      billing: {
+        estimated_cost_usd: 0.001,
+        status: "estimated",
+      },
+    });
+  });
 });

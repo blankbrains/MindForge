@@ -33,6 +33,46 @@ class StreamEvent:
     type: str
     content: str = ""
     tool_calls: Optional[List[dict]] = None
+    usage: dict[str, int] = field(default_factory=dict)
+    model: str = ""
+
+
+def normalize_token_usage(usage: Any) -> dict[str, int]:
+    """Convert provider usage objects into a stable flat numeric mapping."""
+    if usage is None:
+        return {}
+    if hasattr(usage, "model_dump"):
+        raw = usage.model_dump(exclude_none=True)
+    elif isinstance(usage, dict):
+        raw = usage
+    else:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized: dict[str, int] = {}
+
+    def collect(value: Any, prefix: str = "") -> None:
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            name = f"{prefix}_{key}" if prefix else str(key)
+            if isinstance(item, bool):
+                continue
+            if isinstance(item, (int, float)):
+                normalized[name] = int(item)
+            elif isinstance(item, dict):
+                collect(item, name)
+
+    collect(raw)
+
+    cached_tokens = normalized.get(
+        "prompt_tokens_details_cached_tokens",
+        normalized.get("input_tokens_details_cached_tokens", 0),
+    )
+    if cached_tokens and "prompt_cache_hit_tokens" not in normalized:
+        normalized["prompt_cache_hit_tokens"] = cached_tokens
+    return normalized
 
 
 class BaseLLM(ABC):
@@ -255,6 +295,10 @@ class LLMFactory:
             "supports_json_schema",
             settings.llm.compatible_supports_json_schema,
         )
+        supports_stream_usage = kwargs.pop(
+            "supports_stream_usage",
+            settings.llm.compatible_supports_stream_usage,
+        )
         return OpenAICompatibleAdapter(
             model=model,
             api_key=api_key,
@@ -264,6 +308,7 @@ class LLMFactory:
             supports_tools=supports_tools,
             supports_json_mode=supports_json_mode,
             supports_json_schema=supports_json_schema,
+            supports_stream_usage=supports_stream_usage,
             **kwargs,
         )
 
@@ -297,6 +342,10 @@ class LLMFactory:
             "supports_json_schema",
             settings.llm.local_supports_json_schema,
         )
+        supports_stream_usage = kwargs.pop(
+            "supports_stream_usage",
+            settings.llm.local_supports_stream_usage,
+        )
         return OpenAICompatibleAdapter(
             model=model,
             api_key=api_key,
@@ -306,5 +355,6 @@ class LLMFactory:
             supports_tools=supports_tools,
             supports_json_mode=supports_json_mode,
             supports_json_schema=supports_json_schema,
+            supports_stream_usage=supports_stream_usage,
             **kwargs,
         )

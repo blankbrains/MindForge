@@ -16,6 +16,7 @@ from mindforge.models.base import (
     ChatResult,
     LLMConfigurationError,
     StreamEvent,
+    normalize_token_usage,
 )
 
 
@@ -115,19 +116,25 @@ class DeepSeekAdapter(BaseLLM):
         return ChatResult(
             content=msg.content or "",
             tool_calls=tool_calls,
-            usage={
-                "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
-                "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
-                "total_tokens": resp.usage.total_tokens if resp.usage else 0,
-            } if resp.usage else {},
+            usage=normalize_token_usage(resp.usage),
             model=self.model,
         )
 
     async def _stream_chat(self, body: dict) -> AsyncIterator[StreamEvent]:
-        stream = await self.client.chat.completions.create(**body, stream=True)
+        stream = await self.client.chat.completions.create(
+            **body,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
         # 流式 tool_calls 按 index 增量聚合，流结束后一次性发出完整 tool_calls
         tool_acc: dict[int, dict] = {}
+        usage: dict[str, int] = {}
         async for chunk in stream:
+            chunk_usage = normalize_token_usage(
+                getattr(chunk, "usage", None)
+            )
+            if chunk_usage:
+                usage = chunk_usage
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -152,7 +159,11 @@ class DeepSeekAdapter(BaseLLM):
                 type="tool_call",
                 tool_calls=[tool_acc[k] for k in sorted(tool_acc)],
             )
-        yield StreamEvent(type="done")
+        yield StreamEvent(
+            type="done",
+            usage=usage,
+            model=self.model,
+        )
 
     # ------------------------------------------------------------------
     # embed  — 使用本地 BGE-m3

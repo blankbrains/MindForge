@@ -14,6 +14,7 @@ from mindforge.models.base import (
     ChatResult,
     LLMConfigurationError,
     StreamEvent,
+    normalize_token_usage,
 )
 
 
@@ -31,6 +32,7 @@ class OpenAICompatibleAdapter(BaseLLM):
         supports_tools: bool = True,
         supports_json_mode: bool = True,
         supports_json_schema: bool = False,
+        supports_stream_usage: bool = False,
         embed_model: str | None = None,
         max_retries: int = 3,
         default_headers: dict[str, str] | None = None,
@@ -64,6 +66,7 @@ class OpenAICompatibleAdapter(BaseLLM):
         self.supports_tools = supports_tools
         self.supports_json_mode = supports_json_mode
         self.supports_json_schema = supports_json_schema
+        self.supports_stream_usage = supports_stream_usage
         self.client = openai.AsyncOpenAI(
             api_key=normalized_key or "not-required",
             base_url=normalized_url,
@@ -130,15 +133,7 @@ class OpenAICompatibleAdapter(BaseLLM):
         return ChatResult(
             content=message.content or "",
             tool_calls=tool_calls,
-            usage=(
-                {
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
-                }
-                if usage
-                else {}
-            ),
+            usage=normalize_token_usage(usage),
             model=self.model,
         )
 
@@ -146,12 +141,21 @@ class OpenAICompatibleAdapter(BaseLLM):
         self,
         body: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
+        stream_kwargs: dict[str, Any] = {"stream": True}
+        if self.supports_stream_usage:
+            stream_kwargs["stream_options"] = {"include_usage": True}
         stream = await self.client.chat.completions.create(
             **body,
-            stream=True,
+            **stream_kwargs,
         )
         tool_accumulator: dict[int, dict[str, Any]] = {}
+        usage: dict[str, int] = {}
         async for chunk in stream:
+            chunk_usage = normalize_token_usage(
+                getattr(chunk, "usage", None)
+            )
+            if chunk_usage:
+                usage = chunk_usage
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -185,7 +189,11 @@ class OpenAICompatibleAdapter(BaseLLM):
                     for index in sorted(tool_accumulator)
                 ],
             )
-        yield StreamEvent(type="done")
+        yield StreamEvent(
+            type="done",
+            usage=usage,
+            model=self.model,
+        )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if self.embed_model is None:

@@ -7,8 +7,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from mindforge.agents.base import BaseAgent
-from mindforge.models.base import ChatMessage
+from mindforge.agents.base import BaseAgent, _estimate_cost_details
+from mindforge.models.base import ChatMessage, ChatResult
 from mindforge.config import get_settings
 
 
@@ -31,6 +31,8 @@ class CriticScore:
     suggestions: list[str] = field(default_factory=list)
     should_refine: bool = False
     token_usage: dict[str, int] = field(default_factory=dict)
+    cost_usd: float | None = None
+    cost_status: str = "usage_unavailable"
 
     @classmethod
     def from_dict(cls, data: dict, *, threshold: float | None = None) -> CriticScore:
@@ -180,6 +182,7 @@ class CriticAgent(BaseAgent):
             ChatMessage(role="user", content=user_prompt),
         ]
 
+        result: ChatResult | None = None
         try:
             result = await self._chat(
                 messages,
@@ -191,6 +194,13 @@ class CriticAgent(BaseAgent):
             score_dict = json.loads(raw)
             score = CriticScore.from_dict(score_dict)
             score.token_usage = result.usage or {}
+            cost_estimate = _estimate_cost_details(
+                result.model or self._model_name,
+                score.token_usage,
+                self._provider_name,
+            )
+            score.cost_usd = cost_estimate.amount_usd
+            score.cost_status = cost_estimate.status
 
             # Apply threshold
             if threshold is not None:
@@ -199,6 +209,17 @@ class CriticAgent(BaseAgent):
             return score
 
         except Exception as exc:
+            usage = result.usage if result is not None else {}
+            model_used = (
+                result.model
+                if result is not None and result.model
+                else self._model_name
+            )
+            cost_estimate = _estimate_cost_details(
+                model_used,
+                usage,
+                self._provider_name,
+            )
             # 评估失败时返回中性分数，should_refine=False
             # 避免 critic 自身故障触发无意义的精炼循环
             return CriticScore(
@@ -211,6 +232,9 @@ class CriticAgent(BaseAgent):
                 issues=[f"Critic evaluation failed: {exc}"],
                 suggestions=["Manual review recommended."],
                 should_refine=False,
+                token_usage=usage,
+                cost_usd=cost_estimate.amount_usd,
+                cost_status=cost_estimate.status,
             )
 def _bounded_score(value: Any) -> float:
     try:

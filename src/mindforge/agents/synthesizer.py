@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional
 
-from mindforge.agents.base import AgentResult, BaseAgent
+from mindforge.agents.base import (
+    AgentResult,
+    BaseAgent,
+    _estimate_cost_details,
+)
 from mindforge.agents.critic import CriticScore
 from mindforge.models.base import ChatMessage
 
@@ -31,7 +36,11 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 - 去除冗余内容——如果多个子任务涉及同一领域，只需呈现一次。
 - 如果有评审反馈，明确回应每个问题或建议。
 - 力求全面覆盖同时保持可读性。
-- 使用 Markdown 格式进行结构化（标题、列表、强调）。
+- 使用标准 Markdown 结构化内容：标题之间、段落之间、列表前后保留空行。
+- 每段聚焦一个主题，避免把多个观点挤在一个超长段落中。
+- 对比项、参数、统计数据等天然具有行列关系的内容使用 GFM 表格；
+  普通叙述不要强行表格化。
+- 代码必须使用带语言标识的 fenced code block，正文只使用必要的强调。
 
 **关键要求 — 当子任务发现稀疏或为空时**：
 - 不要生成"未找到信息"的简短报告。
@@ -39,6 +48,13 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 - 明确标注知识来源："基于通用知识" vs "基于检索文档"。
 - 报告应全面、详尽，结构化分析。长度根据问题复杂度自然决定，不设死板下限。
 - Critic 仍会评估和精炼你的输出，请确保内容充实。"""
+
+
+@dataclass(frozen=True)
+class SynthesisStreamEvent:
+    type: str
+    content: str = ""
+    result: AgentResult | None = None
 
 
 class SynthesizerAgent(BaseAgent):
@@ -153,6 +169,17 @@ class SynthesizerAgent(BaseAgent):
             success = bool(output.strip())
             if not success:
                 output = ""
+            usage = result.usage or {}
+            model_used = result.model or getattr(
+                self._llm,
+                "_model",
+                self._model_name,
+            )
+            cost_estimate = _estimate_cost_details(
+                model_used,
+                usage,
+                self._provider_name,
+            )
 
             return AgentResult(
                 agent_name=self.name,
@@ -165,14 +192,12 @@ class SynthesizerAgent(BaseAgent):
                         None if success else "empty_llm_response"
                     ),
                 },
-                token_usage=result.usage or {},
+                token_usage=usage,
                 metadata={
-                    "model": getattr(
-                        self._llm,
-                        "_model",
-                        self._model_name,
-                    )
+                    "model": model_used,
                 },
+                cost_usd=cost_estimate.amount_usd,
+                cost_status=cost_estimate.status,
             )
         except Exception:
             raise
@@ -186,7 +211,7 @@ class SynthesizerAgent(BaseAgent):
         *,
         temperature: Optional[float] = None,
     ):
-        """Streaming version — yields content chunks (str) as they arrive from LLM."""
+        """Yield report chunks followed by one usage-bearing result event."""
         findings_lines: list[str] = []
         for i, sr in enumerate(subtask_results, 1):
             desc = sr.get("description", sr.get("task_id", f"Subtask {i}"))
@@ -242,6 +267,43 @@ class SynthesizerAgent(BaseAgent):
             temperature=temp,
             stream=True,
         )
+        output_parts: list[str] = []
+        usage: dict[str, int] = {}
+        model_used = getattr(self._llm, "_model", self._model_name)
         async for event in stream:
             if event.type == "chunk" and event.content:
-                yield event.content
+                output_parts.append(event.content)
+                yield SynthesisStreamEvent(
+                    type="chunk",
+                    content=event.content,
+                )
+            elif event.type == "done":
+                usage = event.usage or {}
+                model_used = event.model or model_used
+
+        output = "".join(output_parts)
+        success = bool(output.strip())
+        cost_estimate = _estimate_cost_details(
+            model_used,
+            usage,
+            self._provider_name,
+        )
+        yield SynthesisStreamEvent(
+            type="done",
+            result=AgentResult(
+                agent_name=self.name,
+                success=success,
+                output=output if success else "",
+                data={
+                    "subtask_count": len(subtask_results),
+                    "source_count": len(all_sources) if all_sources else 0,
+                    "failure_reason": (
+                        None if success else "empty_llm_response"
+                    ),
+                },
+                metadata={"model": model_used},
+                token_usage=usage,
+                cost_usd=cost_estimate.amount_usd,
+                cost_status=cost_estimate.status,
+            ),
+        )

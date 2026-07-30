@@ -92,4 +92,20 @@ describe("StreamingAnswerPanel", () => {
     expect(code?.classList.contains("language-powershell")).toBe(true);
     expect(code?.querySelector(".hljs-built_in")).not.toBeNull();
   });
+
+  it("wraps GFM tables for bordered responsive rendering", () => {
+    const { container } = render(
+      <StreamingMarkdown
+        content={
+          "| 模型 | 费用 |\n| --- | ---: |\n| DeepSeek | $0.01 |"
+        }
+      />,
+    );
+
+    const wrapper = container.querySelector(".markdown-table-scroll");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.querySelector("table")).not.toBeNull();
+    expect(wrapper?.querySelectorAll("th")).toHaveLength(2);
+    expect(wrapper?.querySelectorAll("td")).toHaveLength(2);
+  });
 });

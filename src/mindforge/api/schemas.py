@@ -42,7 +42,8 @@ class QueryResponse(BaseModel):
     sources: list[dict[str, Any]] = Field(default_factory=list)
     quality_score: float | None = None
     latency_ms: float = 0.0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
+    cost_status: str = "usage_unavailable"
     iterations: int = 0
 
 
@@ -360,6 +361,7 @@ class HistoryItem(BaseModel):
     report: str | None = None
     quality_score: float | None = None
     model_used: str | None = None
+    token_usage: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
 
 

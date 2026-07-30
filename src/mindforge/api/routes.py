@@ -833,6 +833,16 @@ def _serialize_datetime_utc(value: datetime | None) -> str | None:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _parse_history_token_usage(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query(body: QueryRequest):
     """Submit a research task. Falls back to retrieval-only if LLM is unavailable."""
@@ -876,13 +886,24 @@ async def query(body: QueryRequest):
                     or "Agent pipeline returned an unsuccessful result."
                 )
             latency = (time.time() - start) * 1000
+            cost_value = result.metadata.get("cost")
             return QueryResponse(
                 task_id=uuid.uuid4().hex[:12],
                 report=result.output,
                 sources=list(result.data.get("sources", [])),
                 quality_score=float(result.metadata.get("quality", 0)),
                 latency_ms=round(latency, 2),
-                cost_usd=round(float(result.metadata.get("cost", 0)), 6),
+                cost_usd=(
+                    round(float(cost_value), 10)
+                    if isinstance(cost_value, (int, float))
+                    else None
+                ),
+                cost_status=str(
+                    result.metadata.get(
+                        "cost_status",
+                        result.cost_status,
+                    )
+                ),
                 iterations=int(result.metadata.get("subtask_count", 0)),
             )
         except LLMConfigurationError as exc:
@@ -918,6 +939,7 @@ async def query(body: QueryRequest):
             quality_score=float((result.data or {}).get("quality", 0.0)),
             latency_ms=round(latency, 2),
             cost_usd=0.0,
+            cost_status="not_applicable",
             iterations=0,
         )
     except Exception as exc:
@@ -2069,6 +2091,9 @@ def list_history(
                     report=e.report[:500] if e.report else None,
                     quality_score=e.quality_score,
                     model_used=e.model_used,
+                    token_usage=_parse_history_token_usage(
+                        getattr(e, "token_usage", None)
+                    ),
                     created_at=_serialize_datetime_utc(e.created_at),
                 ).model_dump()
                 for e in entries
@@ -2111,6 +2136,9 @@ def get_history_entry(history_id: int):
             report=entry.report,
             quality_score=entry.quality_score,
             model_used=entry.model_used,
+            token_usage=_parse_history_token_usage(
+                getattr(entry, "token_usage", None)
+            ),
             created_at=_serialize_datetime_utc(entry.created_at),
         )
     finally:

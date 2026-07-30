@@ -47,39 +47,77 @@ class AgentResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     token_usage: dict[str, int] = field(default_factory=dict)
     latency_ms: float = 0.0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
+    cost_status: str = "usage_unavailable"
 
     def __str__(self) -> str:
         return self.output
 
 
-# Per-model cost per 1K tokens (input / output in USD)
-_MODEL_COST_PER_1K: dict[str, tuple[float, float]] = {
-    "gpt-4o":              (0.00250, 0.01000),
-    "gpt-4o-mini":         (0.00015, 0.00060),
-    "gpt-4o-2024-08-06":   (0.00250, 0.01000),
-    "gpt-4o-mini-2024-07-18": (0.00015, 0.00060),
-    "deepseek-chat":       (0.00027, 0.00110),
-    "deepseek-reasoner":   (0.00055, 0.00219),
-    "claude-3-5-sonnet-20241022": (0.00300, 0.01500),
-    "claude-3-5-haiku-20241022":  (0.00080, 0.00400),
-}
+@dataclass(frozen=True)
+class CostEstimate:
+    amount_usd: float | None
+    status: str
+
+
+def _estimate_cost_details(
+    model: str,
+    usage: dict,
+    provider: str | None = None,
+) -> CostEstimate:
+    """Estimate API cost without treating missing information as free usage."""
+    normalized_provider = (provider or "").strip().lower()
+    if normalized_provider == "local":
+        return CostEstimate(None, "not_applicable")
+
+    prompt_tokens = int(
+        usage.get("prompt_tokens", 0)
+        or usage.get("input_tokens", 0)
+        or 0
+    )
+    completion_tokens = int(
+        usage.get("completion_tokens", 0)
+        or usage.get("output_tokens", 0)
+        or 0
+    )
+    if prompt_tokens <= 0 and completion_tokens <= 0:
+        return CostEstimate(None, "usage_unavailable")
+
+    pricing = get_settings().llm.get_model_pricing(
+        model,
+        normalized_provider,
+    )
+    if not pricing:
+        return CostEstimate(None, "pricing_unconfigured")
+
+    input_rate = pricing.get("input")
+    output_rate = pricing.get("output")
+    if input_rate is None or output_rate is None:
+        return CostEstimate(None, "pricing_unconfigured")
+
+    cached_tokens = int(
+        usage.get("prompt_cache_hit_tokens", 0)
+        or usage.get("cached_input_tokens", 0)
+        or 0
+    )
+    cached_tokens = max(0, min(cached_tokens, prompt_tokens))
+    uncached_tokens = max(0, prompt_tokens - cached_tokens)
+    cached_rate = pricing.get("cached_input", input_rate)
+    amount = (
+        (uncached_tokens / 1_000_000) * input_rate
+        + (cached_tokens / 1_000_000) * cached_rate
+        + (completion_tokens / 1_000_000) * output_rate
+    )
+    return CostEstimate(round(amount, 10), "estimated")
 
 
 def _estimate_cost(
     model: str,
     usage: dict,
     provider: str | None = None,
-) -> float:
-    """Estimate USD cost from token usage and model name."""
-    if not usage or provider == "local":
-        return 0.0
-    rates = _MODEL_COST_PER_1K.get(model)
-    if rates is None:
-        return 0.0
-    prompt_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-    return (prompt_tokens / 1000) * rates[0] + (completion_tokens / 1000) * rates[1]
+) -> float | None:
+    """Backward-compatible amount-only cost estimator."""
+    return _estimate_cost_details(model, usage, provider).amount_usd
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +595,7 @@ class BaseAgent(ABC):
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
-        cost = _estimate_cost(
+        cost_estimate = _estimate_cost_details(
             model_used,
             aggregated_usage,
             self._provider_name,
@@ -586,5 +624,6 @@ class BaseAgent(ABC):
             },
             token_usage=aggregated_usage,
             latency_ms=elapsed_ms,
-            cost_usd=cost,
+            cost_usd=cost_estimate.amount_usd,
+            cost_status=cost_estimate.status,
         )

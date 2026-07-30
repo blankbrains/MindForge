@@ -10,7 +10,14 @@ export interface HistoryEntry {
   report: string | null;
   quality_score: number | null;
   model_used: string | null;
+  token_usage?: Record<string, unknown>;
   created_at: string | null;
+}
+
+interface ResearchUsageSummary {
+  tokenUsage?: Record<string, number>;
+  costUsd?: number | null;
+  costStatus?: string;
 }
 
 export interface HistoryState {
@@ -18,7 +25,13 @@ export interface HistoryState {
   loaded: boolean;
 
   addEntry: (entry: HistoryEntry) => void;
-  addFromResearch: (task: string, report: string, quality?: number, model?: string) => Promise<void>;
+  addFromResearch: (
+    task: string,
+    report: string,
+    quality?: number,
+    model?: string,
+    usage?: ResearchUsageSummary,
+  ) => Promise<void>;
   loadHistory: () => Promise<void>;
   loadEntry: (id: number) => Promise<void>;
   removeEntry: (id: number) => Promise<void>;
@@ -38,7 +51,20 @@ export const useHistoryStore = create<HistoryState>()(
             .slice(0, 100),
         })),
 
-      addFromResearch: async (task, report, quality, model) => {
+      addFromResearch: async (
+        task,
+        report,
+        quality,
+        model,
+        usage,
+      ) => {
+        const tokenUsage = {
+          ...(usage?.tokenUsage ?? {}),
+          billing: {
+            estimated_cost_usd: usage?.costUsd ?? null,
+            status: usage?.costStatus ?? "usage_unavailable",
+          },
+        };
         let serverId: number | null = null;
         let acceptedByServer = false;
         try {
@@ -50,6 +76,7 @@ export const useHistoryStore = create<HistoryState>()(
               report,
               quality_score: quality ?? null,
               model_used: model ?? null,
+              token_usage: tokenUsage,
             }),
           });
           if (res.ok) {
@@ -78,6 +105,7 @@ export const useHistoryStore = create<HistoryState>()(
           report: report.slice(0, 3000),  // 列表预览用，完整报告由后端存储
           quality_score: quality ?? null,
           model_used: model ?? null,
+          token_usage: tokenUsage,
           created_at: new Date().toISOString(),
         };
         get().addEntry(entry);

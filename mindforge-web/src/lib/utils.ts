@@ -17,6 +17,26 @@ export function formatCost(usd: number): string {
   return `$${usd.toFixed(3)}`;
 }
 
+export function formatCostEstimate(
+  usd: number | null | undefined,
+  status?: string,
+): string {
+  if (status === "pricing_unconfigured") return "未配置模型价格";
+  if (status === "usage_unavailable") return "API 未返回用量";
+  if (status === "not_applicable") return "不涉及 API 费用";
+  if (status === "partial") {
+    return usd == null
+      ? "部分调用无法估算"
+      : `${formatCost(usd)}+（部分估算）`;
+  }
+  return usd == null ? "暂不可用" : formatCost(usd);
+}
+
+export function formatTokenCount(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 0) return "—";
+  return Math.round(tokens).toLocaleString("zh-CN");
+}
+
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "—";

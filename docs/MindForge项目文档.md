@@ -344,6 +344,8 @@ Agent 可以在隔离子进程中执行 Python 代码。沙箱限制 CPU、地�
 `LLMFactory` 内置 `openai`、`deepseek`、`openai_compatible`、`local` 四个
 Provider，并提供注册/注销接口。通用 `OpenAICompatibleAdapter` 统一普通 Chat、
 流式响应、Tool Calling 增量聚合、JSON Mode/Schema 能力降级和可选 Embedding。
+普通和流式响应都会归一化 Provider usage；流式综合通过最终 usage 事件回传 Token，
+兼容端点可通过 `.env` 声明是否支持 `stream_options.include_usage`。
 
 OpenAI 与 DeepSeek 保留原有 Adapter 和导入路径；兼容云 Provider 可连接通义、
 Kimi、硅基流动、Gemini 等提供兼容协议的服务；Local Provider 可连接 vLLM、
@@ -354,6 +356,10 @@ Ollama、LM Studio。四个 Agent 角色可独立覆盖模型名，未覆盖时�
 和 JSON Schema 按 Provider 显式声明；关闭后 Adapter 不会发送服务不支持的参数。
 Docker Compose 配置 `host.docker.internal:host-gateway`，应用容器可访问宿主机
 推理端点。
+
+模型价格不再写死在代码中。`LLM_MODEL_PRICING` 按 Provider 和模型配置每百万
+Token 的输入、缓存输入与输出价格；系统只显示估算费用，并明确区分价格未配置、
+usage 缺失、本地模型和部分估算，未知情况不会显示成零费用。
 
 #### 3.6.4 配置与验证流程
 
@@ -540,7 +546,7 @@ done             →  { type, result: AgentResult }
 
 1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。当前 LLM Provider 配置不完整时按钮显示“知识库检索”，请求不会初始化 Multi-Agent；问候类输入直接返回模式说明，不触发无关文档召回。
 2. **执行可视化区**：使用 React Flow 实时渲染 DAG 执行图——每个节点是一个子任务，边表示依赖关系。已完成/执行中/等待中的节点用不同颜色区分。规划开始前发送 `planning`，长步骤通过 `heartbeat` 保持连接和状态可见。
-3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、精炼过程记录（如果有精炼循环）。无 LLM 时明确展示未经总结的原始命中片段。显式语言标记优先，无标记代码块自动检测主流语言，无法可靠识别时按纯文本代码块渲染。
+3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告、总 Token 和估算费用状态。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、精炼过程记录（如果有精炼循环）。标题、段落、列表、引用、代码块与 GFM 表格使用统一样式，宽表格在自身容器内滚动。无 LLM 时明确展示未经总结的原始命中片段。显式语言标记优先，无标记代码块自动检测主流语言，无法可靠识别时按纯文本代码块渲染。成功完成后输入框清空，失败时保留问题便于重试。
 
 #### 4.2.3 知识库页面
 
@@ -595,6 +601,9 @@ Orchestrator、Retriever 或 Embedder，不再为普通检索参数修改关闭 
 3. `subtask_result`：更新节点状态为"已完成"（绿色勾），追加内容。
 4. `critic_feedback`：更新雷达图显示 5 维评分。
 5. `done`：渲染最终报告，更新历史记录。
+
+`done` 事件还携带归一化后的 `token_usage`、`cost_usd` 和 `cost_status`。历史记录
+保存 Token 与费用状态，研究页与历史页复用同一 Markdown 渲染器。
 
 这种逐步渲染的体验让用户感觉"有人在后台为我工作"，而不是面对一个 30 秒的白屏。
 

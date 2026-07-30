@@ -18,7 +18,7 @@ from mindforge.models.base import (
 from mindforge.models.openai_compatible_adapter import (
     OpenAICompatibleAdapter,
 )
-from mindforge.agents.base import _estimate_cost
+from mindforge.agents.base import _estimate_cost, _estimate_cost_details
 
 
 class DummyLLM(BaseLLM):
@@ -169,12 +169,70 @@ def test_role_model_mapping_supports_custom_and_local_defaults() -> None:
     assert config.get_model("synthesizer", "local") == "local-default"
 
 
-def test_cost_estimation_does_not_invent_local_or_unknown_prices() -> None:
+def test_cost_estimation_does_not_invent_local_or_unknown_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     usage = {"prompt_tokens": 1000, "completion_tokens": 1000}
+    settings = SimpleNamespace(
+        llm=LLMConfig(
+            model_pricing={
+                "openai:gpt-4o": {
+                    "input": 2.5,
+                    "output": 10.0,
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "mindforge.agents.base.get_settings",
+        lambda: settings,
+    )
 
-    assert _estimate_cost("qwen3", usage, "local") == 0.0
-    assert _estimate_cost("unpriced-cloud-model", usage, "openai_compatible") == 0.0
+    assert _estimate_cost("qwen3", usage, "local") is None
+    assert _estimate_cost(
+        "unpriced-cloud-model",
+        usage,
+        "openai_compatible",
+    ) is None
     assert _estimate_cost("gpt-4o", usage, "openai") > 0.0
+    assert _estimate_cost_details(
+        "unpriced-cloud-model",
+        usage,
+        "openai_compatible",
+    ).status == "pricing_unconfigured"
+
+
+def test_cost_estimation_applies_cached_input_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        llm=LLMConfig(
+            model_pricing={
+                "deepseek:model": {
+                    "input": 1.0,
+                    "cached_input": 0.1,
+                    "output": 2.0,
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "mindforge.agents.base.get_settings",
+        lambda: settings,
+    )
+
+    estimate = _estimate_cost_details(
+        "model",
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "prompt_cache_hit_tokens": 400,
+        },
+        "deepseek",
+    )
+
+    assert estimate.status == "estimated"
+    assert estimate.amount_usd == pytest.approx(0.00164)
 
 
 @pytest.mark.asyncio
@@ -297,3 +355,59 @@ async def test_streaming_tool_calls_are_aggregated() -> None:
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_usage_is_returned_when_supported() -> None:
+    async def chunks():
+        yield SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content="answer",
+                        tool_calls=None,
+                    )
+                )
+            ],
+            usage=None,
+        )
+        yield SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                model_dump=lambda **kwargs: {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "total_tokens": 16,
+                }
+            ),
+        )
+
+    class Completions:
+        async def create(self, **kwargs):
+            assert kwargs["stream"] is True
+            assert kwargs["stream_options"] == {"include_usage": True}
+            return chunks()
+
+    adapter = OpenAICompatibleAdapter(
+        model="model",
+        api_key="",
+        base_url="http://127.0.0.1:8001/v1",
+        require_api_key=False,
+        supports_stream_usage=True,
+    )
+    adapter.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+
+    stream = await adapter.chat(
+        [ChatMessage(role="user", content="test")],
+        stream=True,
+    )
+    events = [event async for event in stream]
+
+    assert events[-1].type == "done"
+    assert events[-1].usage == {
+        "prompt_tokens": 12,
+        "completion_tokens": 4,
+        "total_tokens": 16,
+    }

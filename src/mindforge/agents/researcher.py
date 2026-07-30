@@ -28,6 +28,8 @@ _RESEARCHER_SYSTEM_PROMPT = """你是一名专业的研究助理。你可以使�
 4. 每次回答要**详尽、深入、结构化**——给出一次性的完整答案，包含具体细节、例证、数据。不要简短敷衍，要写到用户满意为止。复杂问题的回答应达到 800-2000 字。
 5. **输出语言必须是中文**（专业术语可保留英文）。
 6. 引用来源时使用 [N] 标记。
+7. 使用标准 Markdown：标题、段落和列表之间保留空行，每段只表达一个主题。
+8. 对比项、参数和统计数据等行列信息使用 GFM 表格；代码块必须标注语言。
 
 记住：你是一个能力强大的模型，拥有广博的知识。优先用你的知识回答，工具只是辅助手段。"""
 
@@ -150,8 +152,8 @@ class ResearcherAgent(BaseAgent):
                 conv.append(ChatMessage(role="assistant", content=final_content))
 
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
-                from mindforge.agents.base import _estimate_cost
-                cost = _estimate_cost(
+                from mindforge.agents.base import _estimate_cost_details
+                cost_estimate = _estimate_cost_details(
                     self._model_name,
                     aggregated_usage,
                     self._provider_name,
@@ -183,7 +185,8 @@ class ResearcherAgent(BaseAgent):
                     },
                     token_usage=aggregated_usage,
                     latency_ms=elapsed_ms,
-                    cost_usd=cost,
+                    cost_usd=cost_estimate.amount_usd,
+                    cost_status=cost_estimate.status,
                 )
                 yield {"type": "final_answer", "content": final_content, "result": agent_result}
                 return
@@ -290,8 +293,8 @@ class ResearcherAgent(BaseAgent):
             final_content = ""
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        from mindforge.agents.base import _estimate_cost
-        cost = _estimate_cost(
+        from mindforge.agents.base import _estimate_cost_details
+        cost_estimate = _estimate_cost_details(
             self._model_name,
             aggregated_usage,
             self._provider_name,
@@ -323,6 +326,7 @@ class ResearcherAgent(BaseAgent):
             },
             token_usage=aggregated_usage,
             latency_ms=elapsed_ms,
-            cost_usd=cost,
+            cost_usd=cost_estimate.amount_usd,
+            cost_status=cost_estimate.status,
         )
         yield {"type": "final_answer", "content": final_content, "result": agent_result}

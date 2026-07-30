@@ -109,6 +109,7 @@ Base URL 下的标准 `/models` 端点，去重后把模型 ID 返回设置页�
 | 工具调用 | 模型和推理服务均支持 Tool Calling | 不向接口发送 `tools` |
 | JSON Mode | 接口支持 `json_object` | 不发送 JSON Mode 参数 |
 | JSON Schema | 接口支持 `json_schema` | 不发送 JSON Schema 参数 |
+| 流式 usage | 流式响应支持 `stream_options.include_usage` | 流式综合阶段不统计 Token |
 
 不确定时先关闭 Tool Calling、JSON Mode 和 JSON Schema，确认普通 Chat 可用后逐项
 启用。关闭 Tool Calling 后模型仍可生成文本，但 Researcher 无法完成完整工具循环。
@@ -244,6 +245,7 @@ LLM_COMPATIBLE_SYNTHESIZER_MODEL=
 LLM_COMPATIBLE_SUPPORTS_TOOLS=true
 LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
 LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA=false
+LLM_COMPATIBLE_SUPPORTS_STREAM_USAGE=false
 ```
 
 ### 本地模型
@@ -261,6 +263,7 @@ LLM_LOCAL_SYNTHESIZER_MODEL=
 LLM_LOCAL_SUPPORTS_TOOLS=true
 LLM_LOCAL_SUPPORTS_JSON_MODE=true
 LLM_LOCAL_SUPPORTS_JSON_SCHEMA=false
+LLM_LOCAL_SUPPORTS_STREAM_USAGE=false
 ```
 
 修改后执行：
@@ -279,7 +282,28 @@ API_MODEL_DISCOVERY_MAX_RESPONSE_BYTES=2097152
 API_MODEL_DISCOVERY_MAX_MODELS=1000
 ```
 
-## 四、高级索引和脚本模型
+## 四、Token 与估算费用
+
+Provider 的 Chat Completions 响应只提供 Token 用量，MindForge 根据 `.env` 中的
+模型单价计算估算费用：
+
+```dotenv
+LLM_MODEL_PRICING={"provider:model-id":{"input":0.0,"cached_input":0.0,"output":0.0}}
+```
+
+- 单价单位是 USD / 100 万 Token，必须替换为供应商当前公布的实际价格。
+- 键优先使用 `provider:model-id`，也支持只写模型 ID。
+- `cached_input` 可省略；省略时按普通输入价格估算。
+- OpenAI 和 DeepSeek 原生流式接口会请求 usage；兼容云和本地端点默认关闭，
+  只有确认支持时才开启 `LLM_COMPATIBLE_SUPPORTS_STREAM_USAGE` 或
+  `LLM_LOCAL_SUPPORTS_STREAM_USAGE`。
+- 页面展示“估算费用”而不是实际账单，并区分“未配置模型价格”“API 未返回用量”
+  “不涉及 API 费用”和“部分估算”。
+
+模型切换后必须同步更新 `LLM_MODEL_PRICING`，否则系统会明确显示未配置价格，不会
+用其他模型的价格猜测，也不会显示为 `$0`。
+
+## 五、高级索引和脚本模型
 
 以下配置留空时会继承当前 Provider 的 Researcher 模型：
 
@@ -300,7 +324,7 @@ python scripts/gen_test_docs.py
 python scripts/generate_qa_dataset.py --domain computer_science
 ```
 
-## 五、常见问题
+## 六、常见问题
 
 ### 保存后仍显示“未就绪”
 
@@ -320,6 +344,12 @@ API 模型 ID。
 
 关闭对应能力开关并重新保存。普通 Chat 成功后，再根据模型和推理服务文档逐项启用。
 
+### 费用显示“未配置模型价格”或“API 未返回用量”
+
+先确认最终使用的模型 ID 与 `LLM_MODEL_PRICING` 键完全一致。兼容端点若支持
+`stream_options.include_usage`，再开启对应流式 usage 开关；不支持时保持关闭，
+避免请求参数导致 400。费用是 Token 单价估算，实际扣费仍以供应商账单为准。
+
 ### 本地模型能从宿主机访问，但 MindForge 访问失败
 
 确认模型服务监听 `0.0.0.0`，并从应用容器执行 `/v1/models` 连通性检查。不要把
@@ -331,7 +361,7 @@ API 模型 ID。
 `GRAPH_COMMUNITY_SUMMARY_MODEL` 留空，使其继承当前 Provider；显式覆盖时必须填写
 当前端点真实存在的模型 ID。
 
-## 六、安全要求
+## 七、安全要求
 
 - `.env`、API Key、Token 和模型服务鉴权信息禁止提交 Git。
 - Base URL 禁止嵌入用户名或密码。

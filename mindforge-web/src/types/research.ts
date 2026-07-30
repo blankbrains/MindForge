@@ -22,7 +22,13 @@ export interface AgentResult {
   data?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   latency_ms?: number;
-  cost_usd?: number;
+  cost_usd?: number | null;
+  cost_status?:
+    | "estimated"
+    | "partial"
+    | "pricing_unconfigured"
+    | "usage_unavailable"
+    | "not_applicable";
   token_usage?: Record<string, number>;
 }
 

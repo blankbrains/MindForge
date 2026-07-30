@@ -7,8 +7,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from mindforge.agents.base import AgentResult, BaseAgent
-from mindforge.models.base import ChatMessage
+from mindforge.agents.base import (
+    AgentResult,
+    BaseAgent,
+    _estimate_cost_details,
+)
+from mindforge.models.base import ChatMessage, ChatResult
 from mindforge.config import get_settings
 
 
@@ -40,6 +44,8 @@ class ResearchPlan:
     subtasks: list[SubTask]
     reasoning: str = ""
     planner_usage: dict[str, int] = field(default_factory=dict)
+    planner_cost_usd: float | None = None
+    planner_cost_status: str = "usage_unavailable"
 
     # ------------------------------------------------------------------
     def get_ready_tasks(self) -> list[SubTask]:
@@ -220,6 +226,7 @@ class PlannerAgent(BaseAgent):
             ),
         ]
 
+        result: ChatResult | None = None
         try:
             result = await self._chat(
                 messages,
@@ -234,6 +241,13 @@ class PlannerAgent(BaseAgent):
 
             plan = ResearchPlan.from_dict(plan_dict)
             plan.planner_usage = result.usage or {}
+            cost_estimate = _estimate_cost_details(
+                result.model or self._model_name,
+                plan.planner_usage,
+                self._provider_name,
+            )
+            plan.planner_cost_usd = cost_estimate.amount_usd
+            plan.planner_cost_status = cost_estimate.status
 
             # Validate at least one subtask
             if not plan.subtasks:
@@ -243,6 +257,17 @@ class PlannerAgent(BaseAgent):
             return plan
 
         except Exception as exc:
+            usage = result.usage if result is not None else {}
+            model_used = (
+                result.model
+                if result is not None and result.model
+                else self._model_name
+            )
+            cost_estimate = _estimate_cost_details(
+                model_used,
+                usage,
+                self._provider_name,
+            )
             # Fallback: create a single-step plan
             return ResearchPlan(
                 plan_id=uuid.uuid4().hex[:12],
@@ -261,4 +286,7 @@ class PlannerAgent(BaseAgent):
                     f"Fallback single-step plan (planner error: {exc}). "
                     "Could not decompose into multiple subtasks."
                 ),
+                planner_usage=usage,
+                planner_cost_usd=cost_estimate.amount_usd,
+                planner_cost_status=cost_estimate.status,
             )

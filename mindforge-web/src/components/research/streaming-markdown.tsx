@@ -59,11 +59,21 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   content: string;
 }) {
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert">
+    <div className="markdown-content">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[[rehypeHighlight, markdownHighlightOptions]]}
         components={{
+          table: ({ children }) => (
+            <div className="markdown-table-scroll">
+              <table>{children}</table>
+            </div>
+          ),
+          a: ({ children, ...props }) => (
+            <a {...props} rel="noreferrer noopener">
+              {children}
+            </a>
+          ),
           img: ({ alt }) => (
             <span className="text-sm text-text-muted">
               [已阻止自动加载图片：{alt || "无说明"}]
@@ -82,7 +92,7 @@ export function StreamingAnswerPanel() {
   if (!content) return null;
 
   return (
-    <div className="rounded-xl border border-border bg-surface p-6">
+    <div className="rounded-lg border border-border bg-surface p-5 sm:p-6">
       <StreamingMarkdown content={content} />
     </div>
   );

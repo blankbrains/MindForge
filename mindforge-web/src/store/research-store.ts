@@ -163,6 +163,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
 
       case "done":
         set({
+          task: event.result.success ? "" : get().task,
           finalResult: event.result,
           status: event.result.success ? "completed" : "error",
           error: event.result.success

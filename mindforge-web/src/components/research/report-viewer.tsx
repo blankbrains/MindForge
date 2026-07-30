@@ -1,9 +1,10 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import type { AgentResult } from "@/types/research";
-import { markdownHighlightOptions } from "@/lib/markdown-highlight";
-import { formatDuration, formatCost } from "@/lib/utils";
+import { StreamingMarkdown } from "@/components/research/streaming-markdown";
+import {
+  formatCostEstimate,
+  formatDuration,
+  formatTokenCount,
+} from "@/lib/utils";
 
 interface Props {
   result: AgentResult | null;
@@ -14,11 +15,23 @@ export function ReportViewer({ result }: Props) {
 
   const metadata =
     (result.metadata ?? {}) as Record<string, unknown>;
+  const totalTokens = result.token_usage?.total_tokens
+    ?? (
+      (result.token_usage?.prompt_tokens ?? 0)
+      + (result.token_usage?.completion_tokens ?? 0)
+    );
+  const hasTokenUsage = totalTokens > 0;
+  const costStatus = result.cost_status
+    ?? (
+      typeof metadata.cost_status === "string"
+        ? metadata.cost_status
+        : undefined
+    );
 
   return (
     <div className="space-y-4">
       {/* Metadata bar */}
-      <div className="flex flex-wrap gap-4 rounded-xl border border-border bg-surface p-4 text-sm">
+      <div className="flex flex-wrap gap-x-6 gap-y-2 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
         {metadata.quality !== undefined && (
           <div>
             <span className="text-text-muted">质量评分：</span>
@@ -35,11 +48,19 @@ export function ReportViewer({ result }: Props) {
             </span>
           </div>
         )}
-        {result.cost_usd !== undefined && (
+        {(result.cost_usd != null || costStatus) && (
           <div>
-            <span className="text-text-muted">费用：</span>
+            <span className="text-text-muted">估算费用：</span>
             <span className="font-semibold">
-              {formatCost(result.cost_usd)}
+              {formatCostEstimate(result.cost_usd, costStatus)}
+            </span>
+          </div>
+        )}
+        {hasTokenUsage && (
+          <div>
+            <span className="text-text-muted">Token：</span>
+            <span className="font-semibold">
+              {formatTokenCount(totalTokens)}
             </span>
           </div>
         )}
@@ -54,22 +75,8 @@ export function ReportViewer({ result }: Props) {
       </div>
 
       {/* Report content */}
-      <div className="rounded-xl border border-border bg-surface p-6 lg:p-8">
-        <div className="prose prose-neutral dark:prose-invert max-w-none leading-relaxed [&_p]:my-4 [&_h2]:mt-8 [&_h2]:mb-4 [&_h3]:mt-6 [&_h3]:mb-2">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[[rehypeHighlight, markdownHighlightOptions]]}
-            components={{
-              img: ({ alt }) => (
-                <span className="text-sm text-text-muted">
-                  [已阻止自动加载图片：{alt || "无说明"}]
-                </span>
-              ),
-            }}
-          >
-            {result.output}
-          </ReactMarkdown>
-        </div>
+      <div className="rounded-lg border border-border bg-surface p-5 sm:p-7 lg:p-8">
+        <StreamingMarkdown content={result.output} />
       </div>
     </div>
   );

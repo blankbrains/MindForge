@@ -13,7 +13,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 | 页面 | 功能 |
 |------|------|
 | 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / PostgreSQL）+ 快捷操作入口 |
-| 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告 |
+| 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告、Token 与估算费用 |
 | 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
 | 🕐 **研究历史** | 自动捕获研究结果、Markdown/代码高亮预览、删除 / 清空管理 |
 | ⚙️ **系统配置** | LLM 供应商切换、检索参数、Agent 参数管理 |
@@ -325,7 +325,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
    未就绪时自动使用知识库检索模式。问候类输入不会触发检索；命中的原始文档
    片段会明确标注为未总结内容，主流语言代码使用安全的高亮代码块展示。
 4. 完成结果会保存到“研究历史”，历史详情与研究结果使用相同的 Markdown 和
-   代码高亮渲染，可查看完整报告或删除记录。
+   代码高亮渲染；GFM 表格带边框并在窄屏内横向滚动。成功完成后输入框自动清空，
+   失败时保留原问题便于重试。
 
 #### 5. 日常更新、排障和停止
 
@@ -435,6 +436,8 @@ LLM_DEEPSEEK_PLANNER=deepseek-chat
 LLM_DEEPSEEK_RESEARCHER=deepseek-chat
 LLM_DEEPSEEK_CRITIC=deepseek-chat
 LLM_DEEPSEEK_SYNTHESIZER=deepseek-chat
+# 价格单位为 USD / 100 万 Token，必须按实际模型和供应商当前价格维护。
+LLM_MODEL_PRICING={"deepseek:deepseek-chat":{"input":0.0,"cached_input":0.0,"output":0.0}}
 ```
 
 OpenAI 兼容云 API：
@@ -448,6 +451,7 @@ LLM_COMPATIBLE_MODEL=<model-id>
 LLM_COMPATIBLE_SUPPORTS_TOOLS=true
 LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
 LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA=false
+LLM_COMPATIBLE_SUPPORTS_STREAM_USAGE=false
 ```
 
 服务器本地模型：
@@ -461,7 +465,14 @@ LLM_LOCAL_MODEL=qwen3:8b
 LLM_LOCAL_SUPPORTS_TOOLS=true
 LLM_LOCAL_SUPPORTS_JSON_MODE=true
 LLM_LOCAL_SUPPORTS_JSON_SCHEMA=false
+LLM_LOCAL_SUPPORTS_STREAM_USAGE=false
 ```
+
+`LLM_MODEL_PRICING` 中的示例零值仅表示字段结构，部署时必须替换为供应商公布的
+当前价格。系统展示的是基于 API Token 用量的**估算费用**，不是账单扣费结果。
+未配置模型价格、API 未返回 usage、本地模型和仅部分调用可估算时会显示不同状态，
+不会再把未知情况误报为 `$0`。兼容云或本地端点只有确认支持流式 usage 时才开启
+对应的 `*_SUPPORTS_STREAM_USAGE`。
 
 修改 `.env` 后执行：
 
@@ -545,6 +556,8 @@ SSE 事件及时反馈状态。当前 LLM Provider 配置不完整时，研究�
 结果按真实语义/关键词证据过滤，原始代码片段以带语法高亮的 Markdown 代码块
 展示。LLM 输出的显式语言标记优先；无标记代码块才执行主流语言自动检测，
 无法可靠识别时按纯文本代码块展示。历史详情复用同一 Markdown 渲染链路。
+报告标题、段落、列表、引用、代码块和 GFM 表格使用统一排版；宽表格只在自身
+容器内滚动，不推动整个页面横向溢出。研究结果同时显示总 Token 和估算费用状态。
 知识库文档卡片会标明基础索引、RAPTOR 和 GraphRAG 的实际启用状态，而不是
 用户提交任务时的勾选状态。
 RAPTOR、GraphRAG 和 QA 生成未设置专用模型覆盖时，会继承当前 Provider 的
@@ -593,8 +606,8 @@ Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和�
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 语法、未定义名称和致命静态错误
-- **pytest + coverage** — 186 个单元与真实 API 回归测试
-- **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
+- **pytest + coverage** — 188 个单元与真实 API 回归测试
+- **前端质量门禁** — 42 个 Vitest 测试 + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验
 
@@ -644,6 +657,10 @@ GitHub Actions 自动运行：
 - **可靠设置交互** — 保存后重新读取服务端状态再报告成功；普通参数修改只重置受影响的运行时组件
 - **接口模型发现** — 按当前 Base URL 和凭证安全拉取 `/models`，四个 Agent
   可从真实模型列表选择，同时保留自定义模型 ID
+- **可读报告渲染** — 标题、段落、列表、引用、代码与 GFM 表格共用稳定样式；
+  完成后清空输入，失败时保留原问题
+- **透明用量状态** — 展示 Token 与估算费用；未知价格、缺失 usage、本地模型和
+  部分估算不会被混同为零费用
 
 ### 🔧 工程化
 

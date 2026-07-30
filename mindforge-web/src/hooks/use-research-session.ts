@@ -165,7 +165,14 @@ export function useResearchSession() {
             const report = (result?.output as string) || "";
             const quality = (result?.metadata as Record<string, unknown> | undefined)?.quality as number | undefined;
             const model = (result?.metadata as Record<string, unknown> | undefined)?.model as string | undefined;
-            void addFromResearch(task, report, quality, model);
+            const tokenUsage = result?.token_usage as Record<string, number> | undefined;
+            const costUsd = result?.cost_usd as number | null | undefined;
+            const costStatus = result?.cost_status as string | undefined;
+            void addFromResearch(task, report, quality, model, {
+              tokenUsage,
+              costUsd,
+              costStatus,
+            });
           }
         },
         () => {

@@ -159,7 +159,7 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         total_usage: dict[str, int] = {}
-        total_cost = {"usd": 0.0}
+        total_cost = self._new_cost_accumulator()
         pipeline_log: dict[str, Any] = {}
 
         # ------------------------------------------------------------------
@@ -224,20 +224,22 @@ class Orchestrator:
                 },
                 metadata={
                     "quality": 0.0,
-                    "cost": 0.0,
+                    "cost": None,
+                    "cost_status": "usage_unavailable",
                     "subtask_count": 0,
                     "refine_rounds": 0,
                     "model": self._settings.llm.llm_provider,
                     "timeout": True,
                 },
                 latency_ms=elapsed_ms,
+                cost_status="usage_unavailable",
             )
 
     async def _run_pipeline(
         self,
         task: str,
         total_usage: dict[str, int],
-        total_cost: dict[str, float],
+        total_cost: dict[str, Any],
         pipeline_log: dict[str, Any],
         start_time: float,
     ) -> AgentResult:
@@ -253,7 +255,7 @@ class Orchestrator:
         }
 
         # Track usage
-        self._accumulate_usage(total_usage, plan.planner_usage, total_cost)
+        self._accumulate_usage(total_usage, plan, total_cost)
 
         # ------------------------------------------------------------------
         # Step 2: Execute DAG (parallel where dependencies allow)
@@ -339,6 +341,7 @@ class Orchestrator:
             failure_output = self._format_pipeline_failure(
                 subtask_outputs
             )
+            cost_usd, cost_status = self._cost_summary(total_cost)
             return AgentResult(
                 agent_name="orchestrator",
                 success=False,
@@ -353,14 +356,16 @@ class Orchestrator:
                 },
                 metadata={
                     "quality": 0.0,
-                    "cost": total_cost["usd"],
+                    "cost": cost_usd,
+                    "cost_status": cost_status,
                     "subtask_count": len(plan.subtasks),
                     "refine_rounds": 0,
                     "model": self._settings.llm.llm_provider,
                 },
                 token_usage=total_usage,
                 latency_ms=elapsed_ms,
-                cost_usd=total_cost["usd"],
+                cost_usd=cost_usd,
+                cost_status=cost_status,
             )
 
         # ------------------------------------------------------------------
@@ -385,6 +390,7 @@ class Orchestrator:
 
         if not draft_result.success or not draft_result.output.strip():
             elapsed_ms = (time.perf_counter() - start_time) * 1000
+            cost_usd, cost_status = self._cost_summary(total_cost)
             pipeline_log["synthesize"] = {
                 "status": "failed",
                 "reason": "empty_response",
@@ -406,14 +412,16 @@ class Orchestrator:
                 },
                 metadata={
                     "quality": 0.0,
-                    "cost": total_cost["usd"],
+                    "cost": cost_usd,
+                    "cost_status": cost_status,
                     "subtask_count": len(plan.subtasks),
                     "refine_rounds": 0,
                     "model": self._settings.llm.llm_provider,
                 },
                 token_usage=total_usage,
                 latency_ms=elapsed_ms,
-                cost_usd=total_cost["usd"],
+                cost_usd=cost_usd,
+                cost_status=cost_status,
             )
 
         # ------------------------------------------------------------------
@@ -446,7 +454,7 @@ class Orchestrator:
                 final_critic = critic_score
                 self._accumulate_usage(
                     total_usage,
-                    critic_score.token_usage,
+                    critic_score,
                     total_cost,
                 )
 
@@ -494,7 +502,7 @@ class Orchestrator:
                 )
                 self._accumulate_usage(
                     total_usage,
-                    final_critic.token_usage,
+                    final_critic,
                     total_cost,
                 )
 
@@ -533,7 +541,7 @@ class Orchestrator:
         # Done
         # ------------------------------------------------------------------
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        total_cost_usd = total_cost["usd"]
+        total_cost_usd, cost_status = self._cost_summary(total_cost)
 
         return AgentResult(
             agent_name="orchestrator",
@@ -550,6 +558,7 @@ class Orchestrator:
             metadata={
                 "quality": final_critic.overall if final_critic else 0.0,
                 "cost": total_cost_usd,
+                "cost_status": cost_status,
                 "subtask_count": len(plan.subtasks),
                 "refine_rounds": refine_count,
                 "model": self._settings.llm.llm_provider,
@@ -557,6 +566,7 @@ class Orchestrator:
             token_usage=total_usage,
             latency_ms=elapsed_ms,
             cost_usd=total_cost_usd,
+            cost_status=cost_status,
         )
 
     # ------------------------------------------------------------------
@@ -656,7 +666,7 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         total_usage: dict[str, int] = {}
-        total_cost = {"usd": 0.0}
+        total_cost = self._new_cost_accumulator()
 
         yield {"type": "planning", "status": "start"}
 
@@ -685,7 +695,7 @@ class Orchestrator:
 
         # --- Step 1: Plan ---
         plan: ResearchPlan = await self._planner.run(task)
-        self._accumulate_usage(total_usage, plan.planner_usage, total_cost)
+        self._accumulate_usage(total_usage, plan, total_cost)
         yield {"type": "planning", "status": "done"}
         yield {"type": "plan_ready", "plan": plan}
 
@@ -772,6 +782,7 @@ class Orchestrator:
             for output in subtask_outputs
         ):
             elapsed_ms = (time.perf_counter() - start_time) * 1000
+            cost_usd, cost_status = self._cost_summary(total_cost)
             result = AgentResult(
                 agent_name="orchestrator",
                 success=False,
@@ -787,14 +798,16 @@ class Orchestrator:
                 },
                 metadata={
                     "quality": 0.0,
-                    "cost": total_cost["usd"],
+                    "cost": cost_usd,
+                    "cost_status": cost_status,
                     "subtask_count": len(plan.subtasks),
                     "refine_rounds": 0,
                     "model": self._settings.llm.llm_provider,
                 },
                 token_usage=total_usage,
                 latency_ms=elapsed_ms,
-                cost_usd=total_cost["usd"],
+                cost_usd=cost_usd,
+                cost_status=cost_status,
             )
             yield {"type": "done", "result": result}
             return
@@ -814,23 +827,35 @@ class Orchestrator:
             draft_result = AgentResult(agent_name="synthesizer", success=True, output=researcher_text)
         else:
             yield {"type": "synthesizing", "status": "start"}
-            draft_chunks: list[str] = []
-            async for chunk in self._synthesizer.synthesize_stream(
+            draft_result: AgentResult | None = None
+            async for synthesis_event in self._synthesizer.synthesize_stream(
                 task=task,
                 subtask_results=subtask_outputs,
                 all_sources=all_sources,
             ):
-                draft_chunks.append(chunk)
-                yield {"type": "answer_chunk", "content": chunk}
-            draft_result = AgentResult(
-                agent_name="synthesizer",
-                success=bool("".join(draft_chunks).strip()),
-                output="".join(draft_chunks),
+                if synthesis_event.type == "chunk":
+                    yield {
+                        "type": "answer_chunk",
+                        "content": synthesis_event.content,
+                    }
+                elif synthesis_event.type == "done":
+                    draft_result = synthesis_event.result
+            if draft_result is None:
+                draft_result = AgentResult(
+                    agent_name="synthesizer",
+                    success=False,
+                    output="",
+                )
+            self._accumulate_usage(
+                total_usage,
+                draft_result,
+                total_cost,
             )
             yield {"type": "synthesizing", "status": "done"}
 
         if not draft_result.success or not draft_result.output.strip():
             elapsed_ms = (time.perf_counter() - start_time) * 1000
+            cost_usd, cost_status = self._cost_summary(total_cost)
             result = AgentResult(
                 agent_name="orchestrator",
                 success=False,
@@ -847,14 +872,16 @@ class Orchestrator:
                 },
                 metadata={
                     "quality": 0.0,
-                    "cost": total_cost["usd"],
+                    "cost": cost_usd,
+                    "cost_status": cost_status,
                     "subtask_count": len(plan.subtasks),
                     "refine_rounds": 0,
                     "model": self._settings.llm.llm_provider,
                 },
                 token_usage=total_usage,
                 latency_ms=elapsed_ms,
-                cost_usd=total_cost["usd"],
+                cost_usd=cost_usd,
+                cost_status=cost_status,
             )
             yield {"type": "done", "result": result}
             return
@@ -885,7 +912,7 @@ class Orchestrator:
                 final_critic = critic_score
                 self._accumulate_usage(
                     total_usage,
-                    critic_score.token_usage,
+                    critic_score,
                     total_cost,
                 )
 
@@ -927,7 +954,7 @@ class Orchestrator:
                 )
                 self._accumulate_usage(
                     total_usage,
-                    final_critic.token_usage,
+                    final_critic,
                     total_cost,
                 )
 
@@ -955,7 +982,7 @@ class Orchestrator:
 
         # --- Done ---
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        total_cost_usd = total_cost["usd"]
+        total_cost_usd, cost_status = self._cost_summary(total_cost)
 
         result = AgentResult(
             agent_name="orchestrator",
@@ -975,6 +1002,7 @@ class Orchestrator:
                     else 0.0
                 ),
                 "cost": total_cost_usd,
+                "cost_status": cost_status,
                 "subtask_count": len(plan.subtasks),
                 "refine_rounds": refine_count,
                 "model": self._settings.llm.llm_provider,
@@ -982,6 +1010,7 @@ class Orchestrator:
             token_usage=total_usage,
             latency_ms=elapsed_ms,
             cost_usd=total_cost_usd,
+            cost_status=cost_status,
         )
         yield {"type": "done", "result": result}
 
@@ -1129,10 +1158,78 @@ class Orchestrator:
         return "\n\n".join(sections)
 
     @staticmethod
+    def _new_cost_accumulator() -> dict[str, Any]:
+        return {
+            "usd": 0.0,
+            "estimated_calls": 0,
+            "unpriced_calls": 0,
+            "missing_usage_calls": 0,
+            "not_applicable_calls": 0,
+        }
+
+    @staticmethod
+    def _cost_summary(
+        accumulator: dict[str, Any],
+    ) -> tuple[float | None, str]:
+        estimated = int(accumulator.get("estimated_calls", 0))
+        unavailable = (
+            int(accumulator.get("unpriced_calls", 0))
+            + int(accumulator.get("missing_usage_calls", 0))
+        )
+        if estimated and unavailable:
+            return float(accumulator.get("usd", 0.0)), "partial"
+        if estimated:
+            return float(accumulator.get("usd", 0.0)), "estimated"
+        if int(accumulator.get("unpriced_calls", 0)):
+            return None, "pricing_unconfigured"
+        if int(accumulator.get("missing_usage_calls", 0)):
+            return None, "usage_unavailable"
+        if int(accumulator.get("not_applicable_calls", 0)):
+            return None, "not_applicable"
+        return None, "usage_unavailable"
+
+    @staticmethod
+    def _accumulate_cost(
+        accumulator: dict[str, Any],
+        amount: Any,
+        status: Any,
+    ) -> None:
+        normalized_status = (
+            status if isinstance(status, str) else "usage_unavailable"
+        )
+        if (
+            normalized_status == "usage_unavailable"
+            and isinstance(amount, (int, float))
+        ):
+            normalized_status = "estimated"
+        if normalized_status == "estimated" and isinstance(
+            amount,
+            (int, float),
+        ):
+            accumulator["usd"] = (
+                float(accumulator.get("usd", 0.0)) + float(amount)
+            )
+            accumulator["estimated_calls"] = (
+                int(accumulator.get("estimated_calls", 0)) + 1
+            )
+        elif normalized_status == "pricing_unconfigured":
+            accumulator["unpriced_calls"] = (
+                int(accumulator.get("unpriced_calls", 0)) + 1
+            )
+        elif normalized_status == "not_applicable":
+            accumulator["not_applicable_calls"] = (
+                int(accumulator.get("not_applicable_calls", 0)) + 1
+            )
+        else:
+            accumulator["missing_usage_calls"] = (
+                int(accumulator.get("missing_usage_calls", 0)) + 1
+            )
+
+    @staticmethod
     def _accumulate_usage(
         accumulator: dict[str, int],
         result: Any,
-        cost_accumulator: Optional[dict[str, float]] = None,
+        cost_accumulator: Optional[dict[str, Any]] = None,
     ) -> None:
         """Merge token usage from an AgentResult or other result objects."""
         if result is None:
@@ -1147,26 +1244,38 @@ class Orchestrator:
                         accumulator.get(key, 0) + int(value)
                     )
             return
-        if cost_accumulator is not None:
-            cost = getattr(result, "cost_usd", 0.0)
-            if isinstance(cost, (int, float)):
-                cost_accumulator["usd"] = (
-                    cost_accumulator.get("usd", 0.0) + float(cost)
-                )
-        if hasattr(result, "token_usage") and result.token_usage:
-            for k, v in result.token_usage.items():
-                if isinstance(v, (int, float)) and k != "cost_usd":
-                    accumulator[k] = accumulator.get(k, 0) + int(v)
-        # Handle list of subtasks (from planner)
         if isinstance(result, list):
             for item in result:
-                if cost_accumulator is not None:
-                    cost = getattr(item, "cost_usd", 0.0)
-                    if isinstance(cost, (int, float)):
-                        cost_accumulator["usd"] = (
-                            cost_accumulator.get("usd", 0.0) + float(cost)
-                        )
-                if hasattr(item, "token_usage") and item.token_usage:
-                    for k, v in item.token_usage.items():
-                        if isinstance(v, (int, float)) and k != "cost_usd":
-                            accumulator[k] = accumulator.get(k, 0) + int(v)
+                Orchestrator._accumulate_usage(
+                    accumulator,
+                    item,
+                    cost_accumulator,
+                )
+            return
+        if cost_accumulator is not None:
+            cost = getattr(
+                result,
+                "cost_usd",
+                getattr(result, "planner_cost_usd", None),
+            )
+            status = getattr(
+                result,
+                "cost_status",
+                getattr(
+                    result,
+                    "planner_cost_status",
+                    "usage_unavailable",
+                ),
+            )
+            Orchestrator._accumulate_cost(
+                cost_accumulator,
+                cost,
+                status,
+            )
+        usage = getattr(result, "token_usage", None)
+        if not usage:
+            usage = getattr(result, "planner_usage", None)
+        if usage:
+            for k, v in usage.items():
+                if isinstance(v, (int, float)) and k != "cost_usd":
+                    accumulator[k] = accumulator.get(k, 0) + int(v)

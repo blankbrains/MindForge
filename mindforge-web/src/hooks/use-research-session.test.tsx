@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SSEEvent } from "@/types/research";
+import { useHistoryStore } from "@/store/history-store";
 import { useResearchStore } from "@/store/research-store";
 import { useSettingsStore } from "@/store/settings-store";
 
@@ -44,6 +45,9 @@ describe("useResearchSession", () => {
     vi.useFakeTimers();
     sseState.connections.length = 0;
     useResearchStore.getState().reset();
+    useHistoryStore.setState({
+      addFromResearch: vi.fn().mockResolvedValue(undefined),
+    });
     useSettingsStore.setState({ researchTimeout: 180 });
   });
 
@@ -130,6 +134,44 @@ describe("useResearchSession", () => {
 
     expect(useResearchStore.getState().error).toContain("本地模型");
     expect(useResearchStore.getState().error).not.toContain("DeepSeek");
+    unmount();
+  });
+
+  it("clears the submitted question only after a successful result", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("completed question"));
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "done",
+        result: {
+          success: true,
+          output: "report",
+        },
+      });
+    });
+
+    expect(useResearchStore.getState().task).toBe("");
+    expect(useResearchStore.getState().status).toBe("completed");
+    unmount();
+  });
+
+  it("keeps the submitted question when research fails", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("retry this question"));
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "done",
+        result: {
+          success: false,
+          output: "failed",
+        },
+      });
+    });
+
+    expect(useResearchStore.getState().task).toBe("retry this question");
+    expect(useResearchStore.getState().status).toBe("error");
     unmount();
   });
 });
