@@ -1,6 +1,6 @@
 # MindForge 文档索引
 
-本目录文档已于 2026-07-29 按当前 `main` 分支代码和自动化测试结果同步。运行参数以项目根目录 `.env.example` 为完整键清单，实际值以未提交的 `.env` 为准；源代码和自动化测试始终是行为事实的最终依据。
+本目录文档已于 2026-07-30 按当前 `main` 分支代码和自动化测试结果同步。运行参数以项目根目录 `.env.example` 为完整键清单，实际值以未提交的 `.env` 为准；源代码和自动化测试始终是行为事实的最终依据。
 
 | 文档 | 用途 |
 |------|------|
@@ -22,13 +22,14 @@
 - PostgreSQL-only，不提供 SQLite 回退。
 - 根目录 `.env` 是运行和部署参数的唯一配置源。
 - `DATABASE_URL` 为后端启动必填项；应用不提供内置数据库连接串回退。
-- API 前缀为 `/api/v1`，当前包含 22 个 REST/SSE 路由方法。
+- API 前缀为 `/api/v1`，当前包含 23 个 REST/SSE 路由方法。
 - 当前 Web 应用已停用 MCP；旧源码、脚本和测试已移除，协议说明仅作历史学习参考。
 - 研究流支持 `planning`、`heartbeat` 和 `answer_chunk` 事件，默认最多精炼 1 轮；当前 LLM Provider 配置不完整时直接进入知识库检索模式。
 - RAPTOR 跳过单节点摘要并批量生成摘要向量；GraphRAG 可由 Agent 的 `auto/graph` 模式触发，使用构建快照与社区摘要复用。
-- 当前验证基线包含 178 项 pytest、31 项前端回归测试、ESLint、构建和 Compose 校验。
+- 当前验证基线包含 186 项 pytest、35 项前端回归测试、ESLint、构建和 Compose 校验。
 - 模型层通过 Provider Registry 统一接入 OpenAI、DeepSeek、兼容云 API 与本地
-  推理服务；设置页可独立配置 Base URL、Key、角色模型和 Tool/JSON 能力。
+  推理服务；设置页可按当前 Base URL 拉取真实模型列表，角色模型支持列表选择和
+  自定义 ID，并可独立配置 Key 与 Tool/JSON 能力。
 - 数据库通过 Alembic 迁移，当前迁移头为 `0006_index_features`。
 - CPU 与 GPU 使用互斥依赖锁；GPU 部署后必须在应用容器内验证
   `torch.cuda.is_available()` 和实际设备。

@@ -2,7 +2,7 @@
 
 > **自适应研究助理系统** · Multi-Agent RAG · 全栈架构详解
 >
-> **同步基线：2026-07-29。** 本文按当前 `main` 分支代码和自动化测试结果校正；运行参数以根目录 `.env.example` 为完整键清单，实际行为以源代码和自动化测试为准。
+> **同步基线：2026-07-30。** 本文按当前 `main` 分支代码和自动化测试结果校正；运行参数以根目录 `.env.example` 为完整键清单，实际行为以源代码和自动化测试为准。
 
 ---
 
@@ -562,6 +562,8 @@ done             →  { type, result: AgentResult }
 
 允许用户动态调整配置，无需重启服务：
 - 四种 LLM Provider 切换；独立配置 Base URL、API Key、默认/角色模型与能力开关。
+- 按当前尚未保存的 Base URL 和凭证调用 `/settings/models`，从 Provider 的
+  `/models` 返回值生成角色模型下拉框；未枚举模型保留自定义 ID 输入。
 - 向量召回 Top-K 与重排 Top-K。
 - Agent 最大迭代、精炼轮数、评判阈值和超时。
 
@@ -572,6 +574,8 @@ Embedding；已有索引时后端拒绝直接切换 Embedding provider，必须�
 保存设置后，前端必须重新读取服务端配置成功才显示保存完成。后端按变更范围重置
 Orchestrator、Retriever 或 Embedder，不再为普通检索参数修改关闭 Qdrant 客户端
 或重置索引并发器；活动索引任务存在时拒绝切换 Embedding provider。
+模型发现不保存草稿、不返回 Key 明文、不跟随重定向，并限制目标网络范围、超时、
+响应大小和返回数量；连接草稿变化后会丢弃旧请求结果。
 
 ### 4.3 状态管理
 
@@ -667,7 +671,7 @@ README 的“服务器完整操作流程”是面向使用者的主入口。
 
 GitHub Actions 自动运行：
 - **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。
-- **pytest + coverage**：178 项单元与回归测试。
+- **pytest + coverage**：186 项单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -699,9 +703,9 @@ GitHub Actions 自动运行：
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 178 项通过 | `python -m pytest -q` |
+| Python 测试 | 186 项通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
-| 前端回归测试 | 31 项通过 | `npm test` |
+| 前端回归测试 | 35 项通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
 | 配置完整性 | 根目录 `.env` 为唯一运行时来源 | Pydantic、Vite、Compose 和脚本共用同一套键 |
 | 文档处理 | 页级解析、资产生命周期、取消与进度可追踪 | 回归测试与私有解析基准 |

@@ -5,7 +5,7 @@ MindForge 的 Agent、RAPTOR、GraphRAG 和 QA 生成统一通过 `LLMFactory` �
 
 | Provider | 用途 | API Key | Base URL | 模型配置 |
 |----------|------|---------|----------|----------|
-| `openai` | OpenAI 原生 API | 必填 | 可留空使用默认地址 | 四个角色模型 |
+| `openai` | OpenAI 原生 API | 必填 | 默认 `https://api.openai.com/v1` | 四个角色模型 |
 | `deepseek` | DeepSeek 原生 API | 必填 | 默认 `https://api.deepseek.com` | 四个角色模型 |
 | `openai_compatible` | 兼容 OpenAI Chat Completions 的云端 API | 默认必填 | 必填 | 默认模型 + 可选角色覆盖 |
 | `local` | 服务器上的 vLLM、Ollama、LM Studio 等服务 | 默认可选 | 必填 | 默认模型 + 可选角色覆盖 |
@@ -28,7 +28,7 @@ http://<服务器地址>:<API_PORT>/settings
 
 | 字段 | 填写方式 |
 |------|----------|
-| Base URL | 使用 OpenAI 默认地址时留空；代理或兼容网关填写完整 HTTP(S) 地址 |
+| Base URL | 默认 `https://api.openai.com/v1`；代理网关填写其完整 HTTP(S) 地址 |
 | API Key | 填写 OpenAI Key |
 | Planner / Researcher / Critic / Synthesizer | 填写账号实际可用的模型 ID |
 
@@ -69,7 +69,23 @@ http://127.0.0.1:<模型服务端口>/v1
 本地 Provider 默认关闭“需要 API Key”。若 vLLM 等服务启用了鉴权，则打开该开关
 并填写对应 Key。
 
-### 3. 配置模型路由
+### 3. 拉取模型列表
+
+填写 Base URL 和 API Key 后点击“拉取模型”。后端会使用当前表单草稿请求该
+Base URL 下的标准 `/models` 端点，去重后把模型 ID 返回设置页：
+
+- OpenAI、DeepSeek、OpenAI-compatible 云 API 和提供 `/v1/models` 的本地服务
+  使用同一发现协议。
+- 已保存的脱敏 Key 由后端解密使用，明文不会返回浏览器。
+- 云 Provider 的模型发现禁止访问私网、链路本地和保留地址；本地 Provider
+  可访问回环和私网模型服务，但仍禁止链路本地元数据地址。
+- 不跟随上游重定向，响应大小、超时和最大模型数量由 `API_MODEL_DISCOVERY_*`
+  配置限制。
+- 接口没有 `/models` 或目标模型未出现在列表时，选择“自定义模型 ID”并手动输入。
+
+连接参数改变后，旧模型列表会立即失效；尚未完成的旧请求也不能覆盖新配置。
+
+### 4. 配置模型路由
 
 四个角色的用途如下：
 
@@ -83,7 +99,7 @@ http://127.0.0.1:<模型服务端口>/v1
 `openai_compatible` 和 `local` 可以只填写“默认模型”，四个角色留空时会继承默认
 模型。OpenAI 和 DeepSeek 使用各自的角色模型字段。
 
-### 4. 设置接口能力
+### 5. 设置接口能力
 
 兼容云 API 和本地模型需要按真实能力配置：
 
@@ -97,7 +113,7 @@ http://127.0.0.1:<模型服务端口>/v1
 不确定时先关闭 Tool Calling、JSON Mode 和 JSON Schema，确认普通 Chat 可用后逐项
 启用。关闭 Tool Calling 后模型仍可生成文本，但 Researcher 无法完成完整工具循环。
 
-### 5. 保存并验证
+### 6. 保存并验证
 
 点击“保存配置”。保存成功后：
 
@@ -194,7 +210,7 @@ docker compose exec mindforge \
 ```dotenv
 LLM_LLM_PROVIDER=openai
 LLM_OPENAI_API_KEY=<your-key>
-LLM_OPENAI_BASE_URL=
+LLM_OPENAI_BASE_URL=https://api.openai.com/v1
 LLM_PLANNER_MODEL=gpt-4o
 LLM_RESEARCHER_MODEL=gpt-4o-mini
 LLM_CRITIC_MODEL=gpt-4o
@@ -253,6 +269,14 @@ LLM_LOCAL_SUPPORTS_JSON_SCHEMA=false
 docker compose config --quiet
 docker compose up -d --build mindforge
 curl --fail http://127.0.0.1:8000/api/v1/ready
+```
+
+模型发现资源边界：
+
+```dotenv
+API_MODEL_DISCOVERY_TIMEOUT_SECONDS=15
+API_MODEL_DISCOVERY_MAX_RESPONSE_BYTES=2097152
+API_MODEL_DISCOVERY_MAX_MODELS=1000
 ```
 
 ## 四、高级索引和脚本模型

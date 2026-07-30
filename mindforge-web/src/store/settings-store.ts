@@ -126,7 +126,7 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
   openai: {
     provider: "openai",
     label: "OpenAI",
-    baseUrl: "",
+    baseUrl: "https://api.openai.com/v1",
     apiKey: "",
     apiKeyRequired: true,
     defaultModel: "",

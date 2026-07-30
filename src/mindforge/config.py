@@ -86,7 +86,7 @@ class LLMConfig(BaseSettings):
     )
     embedding_provider: str = Field(default="openai", description="openai | bge")
     openai_api_key: str = Field(default="")
-    openai_base_url: Optional[str] = Field(default=None)
+    openai_base_url: str = Field(default="https://api.openai.com/v1")
     deepseek_api_key: str = Field(default="")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
     compatible_api_key: str = Field(default="")
@@ -184,6 +184,8 @@ class LLMConfig(BaseSettings):
         value = mapping.get(selected)
         if isinstance(value, str) and value.strip():
             return value.strip()
+        if selected == "openai":
+            return "https://api.openai.com/v1"
         if selected == "deepseek":
             return "https://api.deepseek.com"
         return None
@@ -255,6 +257,21 @@ class APIConfig(BaseSettings):
     health_refresh_seconds: int = Field(default=15, ge=5, le=300)
     max_history_entries: int = Field(default=1000, ge=1, le=100_000)
     allow_local_file_index: bool = Field(default=False)
+    model_discovery_timeout_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        le=60.0,
+    )
+    model_discovery_max_response_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        ge=1024,
+        le=20 * 1024 * 1024,
+    )
+    model_discovery_max_models: int = Field(
+        default=1000,
+        ge=1,
+        le=10_000,
+    )
     model_config = SettingsConfigDict(env_prefix="API_", extra="ignore")
 
     def get_cors_origins(self) -> list[str]:

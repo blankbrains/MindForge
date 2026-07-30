@@ -298,9 +298,11 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 #### 2. 配置模型
 
 1. 打开“系统配置”。
-2. 在“LLM 供应商”中选择 Provider，填写连接参数和模型 ID。
-3. 按模型真实能力设置 Tool Calling、JSON Mode 和 JSON Schema。
-4. 保存后确认状态为“可用”，再执行一次简单研究请求。
+2. 在“LLM 供应商”中选择 Provider，填写 Base URL 和 API Key。
+3. 点击“拉取模型”，再为 Planner、Researcher、Critic 和 Synthesizer
+   从接口返回的模型列表中选择模型；接口不提供 `/models` 时可直接填写自定义模型 ID。
+4. 按模型真实能力设置 Tool Calling、JSON Mode 和 JSON Schema。
+5. 保存后确认状态为“可用”，再执行一次简单研究请求。
 
 完整字段和本地模型命令见下方
 [LLM 配置操作流程](#llm-配置操作流程)。
@@ -367,14 +369,22 @@ docker compose down
 
 3. 填写连接参数：
 
-   - **OpenAI**：填写 API Key；默认 Base URL 可留空；确认四个角色模型可用。
+   - **OpenAI**：Base URL 默认显示
+     `https://api.openai.com/v1`，填写 API Key 后拉取账号可用模型。
    - **DeepSeek**：填写 API Key；Base URL 默认
      `https://api.deepseek.com`；角色模型通常填写 `deepseek-chat`。
    - **兼容云 API**：填写供应商的 `/v1` Base URL、API Key 和准确模型 ID。
    - **本地模型**：填写容器可访问的 Base URL 和模型 ID；无鉴权时关闭
      “需要 API Key”。
 
-4. 配置模型路由：
+4. 点击“拉取模型”：
+
+   - 后端使用当前尚未保存的 Base URL 和新 Key 请求标准 `/models`。
+   - 已保存的 Key 只在后端解密使用，不会把明文返回浏览器。
+   - 成功后四个 Agent 字段变为模型下拉框；选择“自定义模型 ID”仍可手动输入。
+   - 兼容云或本地接口没有 `/models` 时，直接手动填写模型 ID，不影响保存和调用。
+
+5. 配置模型路由：
 
    - `Planner`：任务拆解，需要稳定结构化输出。
    - `Researcher`：检索和工具调用，需要 Tool Calling。
@@ -382,17 +392,17 @@ docker compose down
    - `Synthesizer`：报告生成，建议使用长上下文模型。
    - 兼容云 API 和本地模型只填写“默认模型”也可以，角色模型留空时自动继承。
 
-5. 配置接口能力：
+6. 配置接口能力：
 
    - 模型不支持 Tool Calling 时关闭“工具调用”。
    - 不支持 `json_object` 时关闭“JSON Mode”。
    - 不支持 `json_schema` 时关闭“JSON Schema”。
    - 不确定时先全部关闭，确认普通 Chat 成功后再逐项启用。
 
-6. 点击“保存配置”。右上角显示“可用”后，进入研究页提交一个简单问题。
+7. 点击“保存配置”。右上角显示“可用”后，进入研究页提交一个简单问题。
    如果仍显示“未就绪”，检查 Base URL、模型 ID，以及当前 Key 要求是否满足。
 
-7. 通过 API 验证：
+8. 通过 API 验证：
 
    ```bash
    curl -s http://127.0.0.1:8000/api/v1/settings
@@ -408,7 +418,7 @@ OpenAI：
 ```dotenv
 LLM_LLM_PROVIDER=openai
 LLM_OPENAI_API_KEY=<your-key>
-LLM_OPENAI_BASE_URL=
+LLM_OPENAI_BASE_URL=https://api.openai.com/v1
 LLM_PLANNER_MODEL=gpt-4o
 LLM_RESEARCHER_MODEL=gpt-4o-mini
 LLM_CRITIC_MODEL=gpt-4o
@@ -583,7 +593,7 @@ Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和�
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 语法、未定义名称和致命静态错误
-- **pytest + coverage** — 178 个单元与真实 API 回归测试
+- **pytest + coverage** — 186 个单元与真实 API 回归测试
 - **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验
@@ -632,6 +642,8 @@ GitHub Actions 自动运行：
 - **SSE 流式渲染** — 后端事件逐条推送；旧会话回调不会污染新任务，超时读取运行时设置
 - **响应式布局** — 桌面侧边栏 + 移动端底部导航，Tailwind CSS 断点适配
 - **可靠设置交互** — 保存后重新读取服务端状态再报告成功；普通参数修改只重置受影响的运行时组件
+- **接口模型发现** — 按当前 Base URL 和凭证安全拉取 `/models`，四个 Agent
+  可从真实模型列表选择，同时保留自定义模型 ID
 
 ### 🔧 工程化
 

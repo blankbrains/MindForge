@@ -1,6 +1,6 @@
 # MindForge — 自适应研究助理系统（完整实现）
 
-> **文档同步说明（2026-07-29）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
+> **文档同步说明（2026-07-30）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
 > **项目定位：** 一个面向文本研究任务的自适应研究助理。不是简单的"问答机器人"，而是能**主动分解问题、迭代检索、综合推理、生成结构化研究报告**的 Agent 系统。
 >
 > **面试定位：** 2026 年 Agent 开发实习面试项目。集成 **Agentic RAG + Multi-Agent 协作 + 自适应记忆 + 流式可观测性**。MCP 章节仅保留历史学习说明，旧源码、脚本和测试已从当前 `main` 工作树移除。
@@ -436,9 +436,14 @@ def reload_settings() -> Settings:
 # ── LLM Provider ──
 LLM_LLM_PROVIDER=deepseek
 LLM_OPENAI_API_KEY=
-LLM_OPENAI_BASE_URL=
+LLM_OPENAI_BASE_URL=https://api.openai.com/v1
 LLM_DEEPSEEK_API_KEY=
 LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# ── 模型列表发现 ──
+API_MODEL_DISCOVERY_TIMEOUT_SECONDS=15
+API_MODEL_DISCOVERY_MAX_RESPONSE_BYTES=2097152
+API_MODEL_DISCOVERY_MAX_MODELS=1000
 
 # ── OpenAI-compatible 云端 API ──
 LLM_COMPATIBLE_API_KEY=
@@ -6599,7 +6604,7 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-29 验证基线：178 项 pytest 通过、31 项
+2026-07-30 验证基线：186 项 pytest 通过、35 项
 Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
 GitHub Actions 的实际运行结果为准。
 
@@ -7397,7 +7402,9 @@ A:  设置 `LLM_LLM_PROVIDER`，或在设置页选择 Provider。兼容云 API �
     `LLM_COMPATIBLE_BASE_URL/API_KEY/MODEL`；本地 vLLM/Ollama/LM Studio
     填 `LLM_LOCAL_BASE_URL/MODEL`，无鉴权时关闭 Key 要求。Agent、RAPTOR、
     GraphRAG 和 QA 生成都通过 LLMFactory；专用模型为空时继承 Researcher。
-    Tool Calling、JSON Mode、JSON Schema 按实际服务能力开关。
+    填写连接参数后可以调用 Provider 的 `/models` 拉取真实模型列表，并为四个
+    Agent 直接选择；不支持枚举时使用自定义模型 ID。Tool Calling、JSON Mode、
+    JSON Schema 按实际服务能力开关。
 
 Q13: 怎么控制 LLM 调用成本？
 A:  四层成本控制：① per-role 模型分配（弱 Agent 用便宜模型）

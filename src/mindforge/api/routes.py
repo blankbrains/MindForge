@@ -31,8 +31,9 @@ from mindforge.api.schemas import (
     HistoryItem, HistorySaveRequest, IndexJobResponse, IndexRequest,
     IndexResponse,
     QueryRequest, QueryResponse,
-    LLMProviderConfig, LLMProviderName, SettingsResponse,
-    SettingsUpdateRequest,
+    LLMDiscoveredModel, LLMModelDiscoveryRequest,
+    LLMModelDiscoveryResponse, LLMProviderConfig, LLMProviderName,
+    SettingsResponse, SettingsUpdateRequest,
 )
 from mindforge.agents.base import AgentResult
 from mindforge.agents.orchestrator import Orchestrator
@@ -57,6 +58,10 @@ from mindforge.services.indexing import (
     index_slot,
     remove_document_status,
     set_document_status,
+)
+from mindforge.services.model_discovery import (
+    ModelDiscoveryError,
+    discover_models,
 )
 from mindforge.config import (
     get_project_root,
@@ -1322,6 +1327,95 @@ async def upload_document(
 # ------------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------------
+
+def _stored_provider_api_key(provider: LLMProviderName) -> str:
+    """Resolve a provider key without returning it to the browser."""
+    settings_key = get_settings().llm.get_api_key(provider).strip()
+    try:
+        from mindforge.db import (
+            ApiKey,
+            SessionLocal,
+            decrypt_api_key,
+        )
+
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(ApiKey)
+                .filter(
+                    ApiKey.provider == provider,
+                    ApiKey.is_active,
+                )
+                .first()
+            )
+            if row and row.key_encrypted:
+                return decrypt_api_key(row.key_encrypted).strip()
+        finally:
+            db.close()
+    except Exception:
+        logger.warning(
+            "Stored API key lookup failed for model discovery provider %s.",
+            provider,
+        )
+    return settings_key
+
+
+@router.post(
+    "/settings/models",
+    response_model=LLMModelDiscoveryResponse,
+)
+async def discover_provider_models(
+    body: LLMModelDiscoveryRequest,
+) -> LLMModelDiscoveryResponse:
+    """Fetch model IDs using unsaved provider connection values."""
+    api_key = (
+        _stored_provider_api_key(body.provider)
+        if body.use_stored_api_key
+        else body.api_key.strip()
+    )
+    api_key_required = (
+        True
+        if body.provider in {"openai", "deepseek"}
+        else body.api_key_required
+    )
+    if api_key_required and not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="请先填写或保存该 Provider 的 API Key。",
+        )
+
+    settings = get_settings()
+    try:
+        models, truncated = await discover_models(
+            base_url=body.base_url,
+            api_key=api_key,
+            allow_private=body.provider == "local",
+            timeout_seconds=(
+                settings.api.model_discovery_timeout_seconds
+            ),
+            max_response_bytes=(
+                settings.api.model_discovery_max_response_bytes
+            ),
+            max_models=settings.api.model_discovery_max_models,
+        )
+    except ModelDiscoveryError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+
+    return LLMModelDiscoveryResponse(
+        models=[
+            LLMDiscoveredModel(
+                id=model.id,
+                owned_by=model.owned_by,
+            )
+            for model in models
+        ],
+        count=len(models),
+        truncated=truncated,
+    )
+
 
 @router.get("/settings", response_model=SettingsResponse)
 def get_settings_api():

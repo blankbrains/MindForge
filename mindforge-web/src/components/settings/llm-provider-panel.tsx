@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   CheckCircle2,
   Eye,
   EyeOff,
   KeyRound,
+  RefreshCw,
   RotateCcw,
   Server,
   Trash2,
 } from "lucide-react";
+import { API_BASE } from "@/lib/constants";
 import {
   LLM_PROVIDERS,
   useSettingsStore,
@@ -24,6 +26,57 @@ const providerDescriptions: Record<LLMProvider, string> = {
   openai_compatible: "通义、Kimi、硅基流动、Gemini 等兼容接口",
   local: "vLLM、Ollama、LM Studio 等本地服务",
 };
+
+interface DiscoveredModel {
+  id: string;
+  ownedBy: string;
+}
+
+interface ModelCatalogState {
+  status: "idle" | "loading" | "success" | "error";
+  models: DiscoveredModel[];
+  error: string;
+  truncated: boolean;
+}
+
+function createModelCatalogs(): Record<LLMProvider, ModelCatalogState> {
+  const emptyCatalog = (): ModelCatalogState => ({
+    status: "idle",
+    models: [],
+    error: "",
+    truncated: false,
+  });
+  return {
+    openai: emptyCatalog(),
+    deepseek: emptyCatalog(),
+    openai_compatible: emptyCatalog(),
+    local: emptyCatalog(),
+  };
+}
+
+function createModelRequestIds(): Record<LLMProvider, number> {
+  return {
+    openai: 0,
+    deepseek: 0,
+    openai_compatible: 0,
+    local: 0,
+  };
+}
+
+async function modelDiscoveryError(response: Response): Promise<string> {
+  const raw = await response.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+      return parsed.detail;
+    }
+  } catch {
+    // Fall through to the bounded response below.
+  }
+  return raw && raw.length <= 300
+    ? raw
+    : "模型列表拉取失败，请检查连接配置。";
+}
 
 export function LLMProviderPanel() {
   const provider = useSettingsStore((state) => state.llmProvider);
@@ -46,15 +99,41 @@ export function LLMProviderPanel() {
   const [showKey, setShowKey] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [modelCatalogs, setModelCatalogs] = useState(
+    createModelCatalogs,
+  );
+  const modelRequestIds = useRef(createModelRequestIds());
 
   const config = configs[provider];
+  const catalog = modelCatalogs[provider];
   const isCustomProvider =
     provider === "openai_compatible" || provider === "local";
   const isDirty = dirtyProviders.includes(provider);
 
+  const invalidateModelCatalog = (target: LLMProvider) => {
+    modelRequestIds.current[target] += 1;
+    setModelCatalogs((current) => ({
+      ...current,
+      [target]: {
+        status: "idle",
+        models: [],
+        error: "",
+        truncated: false,
+      },
+    }));
+  };
+
+  const updateConnectionConfig = (
+    target: LLMProvider,
+    update: Partial<LLMProviderConfig>,
+  ) => {
+    invalidateModelCatalog(target);
+    updateConfig(target, update);
+  };
+
   const selectProvider = (nextProvider: LLMProvider) => {
     if (editingKey) {
-      updateConfig(provider, { apiKey: keyBeforeEdit });
+      updateConnectionConfig(provider, { apiKey: keyBeforeEdit });
     }
     setEditingKey(false);
     setShowKey(false);
@@ -64,20 +143,20 @@ export function LLMProviderPanel() {
 
   const startKeyEdit = () => {
     setKeyBeforeEdit(config.apiKey);
-    updateConfig(provider, { apiKey: "" });
+    updateConnectionConfig(provider, { apiKey: "" });
     setEditingKey(true);
     setShowKey(false);
   };
 
   const cancelKeyEdit = () => {
-    updateConfig(provider, { apiKey: keyBeforeEdit });
+    updateConnectionConfig(provider, { apiKey: keyBeforeEdit });
     setEditingKey(false);
     setShowKey(false);
   };
 
   const handleDelete = async () => {
     if (dirtyProviders.length > 0) {
-      updateConfig(provider, { apiKey: "" });
+      updateConnectionConfig(provider, { apiKey: "" });
       setEditingKey(false);
       setShowKey(false);
       return;
@@ -87,10 +166,117 @@ export function LLMProviderPanel() {
     const deleted = await deleteApiKey(provider);
     setDeleting(false);
     if (deleted) {
+      invalidateModelCatalog(provider);
       setEditingKey(false);
       setShowKey(false);
     } else {
       setDeleteError("API Key 删除失败，请重试。");
+    }
+  };
+
+  const fetchModels = async () => {
+    const baseUrl = config.baseUrl.trim();
+    const useStoredApiKey =
+      config.apiKey.startsWith("***") && !editingKey;
+    if (!baseUrl) {
+      setModelCatalogs((current) => ({
+        ...current,
+        [provider]: {
+          ...current[provider],
+          status: "error",
+          error: "请先填写 Base URL。",
+        },
+      }));
+      return;
+    }
+    if (
+      config.apiKeyRequired
+      && !useStoredApiKey
+      && !config.apiKey.trim()
+    ) {
+      setModelCatalogs((current) => ({
+        ...current,
+        [provider]: {
+          ...current[provider],
+          status: "error",
+          error: "请先填写 API Key。",
+        },
+      }));
+      return;
+    }
+
+    const requestId = modelRequestIds.current[provider] + 1;
+    modelRequestIds.current[provider] = requestId;
+    setModelCatalogs((current) => ({
+      ...current,
+      [provider]: {
+        ...current[provider],
+        status: "loading",
+        error: "",
+      },
+    }));
+    try {
+      const response = await fetch(`${API_BASE}/settings/models`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          base_url: baseUrl,
+          api_key: useStoredApiKey ? "" : config.apiKey,
+          api_key_required: config.apiKeyRequired,
+          use_stored_api_key: useStoredApiKey,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await modelDiscoveryError(response));
+      }
+      const payload = (await response.json()) as {
+        models?: Array<{ id?: unknown; owned_by?: unknown }>;
+        truncated?: boolean;
+      };
+      const models = (payload.models ?? [])
+        .filter(
+          (item): item is { id: string; owned_by?: unknown } =>
+            typeof item.id === "string" && item.id.trim().length > 0,
+        )
+        .map((item) => ({
+          id: item.id.trim(),
+          ownedBy:
+            typeof item.owned_by === "string"
+              ? item.owned_by.trim()
+              : "",
+        }));
+      setModelCatalogs((current) => {
+        if (modelRequestIds.current[provider] !== requestId) {
+          return current;
+        }
+        return {
+          ...current,
+          [provider]: {
+            status: "success",
+            models,
+            error: "",
+            truncated: Boolean(payload.truncated),
+          },
+        };
+      });
+    } catch (error) {
+      setModelCatalogs((current) => {
+        if (modelRequestIds.current[provider] !== requestId) {
+          return current;
+        }
+        return {
+          ...current,
+          [provider]: {
+            ...current[provider],
+            status: "error",
+            error:
+              error instanceof Error
+                ? error.message
+                : "模型列表拉取失败，请检查连接配置。",
+          },
+        };
+      });
     }
   };
 
@@ -161,11 +347,11 @@ export function LLMProviderPanel() {
             value={config.baseUrl}
             placeholder={
               provider === "openai"
-                ? "使用 OpenAI 默认地址"
+                ? "https://api.openai.com/v1"
                 : "https://example.com/v1"
             }
             onChange={(value) =>
-              updateConfig(provider, { baseUrl: value })
+              updateConnectionConfig(provider, { baseUrl: value })
             }
           />
           <ApiKeyField
@@ -178,58 +364,106 @@ export function LLMProviderPanel() {
             onCancel={cancelKeyEdit}
             onDelete={() => void handleDelete()}
             onToggleVisibility={() => setShowKey((value) => !value)}
-            onChange={(apiKey) => updateConfig(provider, { apiKey })}
+            onChange={(apiKey) =>
+              updateConnectionConfig(provider, { apiKey })
+            }
           />
         </div>
       </div>
 
       <div className="border-t border-border pt-5">
-        <SectionHeading icon={KeyRound} title="模型路由" />
+        <div className="flex items-center justify-between gap-4">
+          <SectionHeading icon={KeyRound} title="模型路由" />
+          <button
+            type="button"
+            onClick={() => void fetchModels()}
+            disabled={catalog.status === "loading"}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm font-medium text-text transition hover:bg-surface-alt disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${
+                catalog.status === "loading" ? "animate-spin" : ""
+              }`}
+              aria-hidden="true"
+            />
+            {catalog.status === "loading" ? "拉取中" : "拉取模型"}
+          </button>
+        </div>
+        {catalog.status === "success" && (
+          <p
+            className="mt-3 text-xs text-text-muted"
+            role="status"
+            aria-live="polite"
+          >
+            已从接口加载 {catalog.models.length} 个模型
+            {catalog.truncated ? "，列表已按配置上限截断" : ""}
+          </p>
+        )}
+        {catalog.status === "error" && (
+          <p className="mt-3 text-xs text-red-600" role="alert">
+            {catalog.error}
+          </p>
+        )}
         <div className="mt-4 space-y-4">
           {isCustomProvider && (
-            <Field
+            <ModelRouteField
+              key={`${provider}-default`}
               id="llm-default-model"
               label="默认模型"
               value={config.defaultModel}
               placeholder="模型服务返回的模型 ID"
+              models={catalog.models}
+              allowEmpty={false}
               onChange={(defaultModel) =>
                 updateConfig(provider, { defaultModel })
               }
             />
           )}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field
+            <ModelRouteField
+              key={`${provider}-planner`}
               id="llm-planner-model"
               label="Planner"
               value={config.plannerModel}
               placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+              models={catalog.models}
+              allowEmpty={isCustomProvider}
               onChange={(plannerModel) =>
                 updateConfig(provider, { plannerModel })
               }
             />
-            <Field
+            <ModelRouteField
+              key={`${provider}-researcher`}
               id="llm-researcher-model"
               label="Researcher"
               value={config.researcherModel}
               placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+              models={catalog.models}
+              allowEmpty={isCustomProvider}
               onChange={(researcherModel) =>
                 updateConfig(provider, { researcherModel })
               }
             />
-            <Field
+            <ModelRouteField
+              key={`${provider}-critic`}
               id="llm-critic-model"
               label="Critic"
               value={config.criticModel}
               placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+              models={catalog.models}
+              allowEmpty={isCustomProvider}
               onChange={(criticModel) =>
                 updateConfig(provider, { criticModel })
               }
             />
-            <Field
+            <ModelRouteField
+              key={`${provider}-synthesizer`}
               id="llm-synthesizer-model"
               label="Synthesizer"
               value={config.synthesizerModel}
               placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+              models={catalog.models}
+              allowEmpty={isCustomProvider}
               onChange={(synthesizerModel) =>
                 updateConfig(provider, { synthesizerModel })
               }
@@ -247,6 +481,7 @@ export function LLMProviderPanel() {
                 type="button"
                 onClick={() => {
                   restoreConfig(provider);
+                  invalidateModelCatalog(provider);
                   setEditingKey(false);
                   setShowKey(false);
                 }}
@@ -262,7 +497,7 @@ export function LLMProviderPanel() {
               label="需要 API Key"
               checked={config.apiKeyRequired}
               onChange={(apiKeyRequired) =>
-                updateConfig(provider, { apiKeyRequired })
+                updateConnectionConfig(provider, { apiKeyRequired })
               }
             />
             <CapabilityToggle
@@ -364,6 +599,99 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
         className={inputClassName}
       />
+    </div>
+  );
+}
+
+function ModelRouteField({
+  id,
+  label,
+  value,
+  placeholder,
+  models,
+  allowEmpty,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  placeholder: string;
+  models: DiscoveredModel[];
+  allowEmpty: boolean;
+  onChange: (value: string) => void;
+}) {
+  const customValue = "__mindforge_custom_model__";
+  const inheritValue = "__mindforge_inherit_model__";
+  const modelIds = new Set(models.map((model) => model.id));
+  const [manualRequested, setManualRequested] = useState(false);
+
+  if (models.length === 0) {
+    return (
+      <Field
+        id={id}
+        label={label}
+        value={value}
+        placeholder={placeholder}
+        onChange={onChange}
+      />
+    );
+  }
+
+  const manual = (
+    manualRequested
+    || Boolean(value && !modelIds.has(value))
+    || (!allowEmpty && !value)
+  );
+  const selectedValue = manual
+    ? customValue
+    : value || (allowEmpty ? inheritValue : customValue);
+
+  return (
+    <div>
+      <label
+        htmlFor={`${id}-select`}
+        className="mb-1.5 block text-sm font-medium text-text"
+      >
+        {label}
+      </label>
+      <select
+        id={`${id}-select`}
+        value={selectedValue}
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          if (nextValue === customValue) {
+            setManualRequested(true);
+            if (modelIds.has(value)) onChange("");
+            return;
+          }
+          setManualRequested(false);
+          onChange(nextValue === inheritValue ? "" : nextValue);
+        }}
+        className={inputClassName}
+      >
+        {allowEmpty && (
+          <option value={inheritValue}>继承默认模型</option>
+        )}
+        {models.map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.id}
+            {model.ownedBy ? ` · ${model.ownedBy}` : ""}
+          </option>
+        ))}
+        <option value={customValue}>自定义模型 ID…</option>
+      </select>
+      {selectedValue === customValue && (
+        <input
+          id={id}
+          value={value}
+          placeholder={placeholder || "输入自定义模型 ID"}
+          autoComplete="off"
+          spellCheck={false}
+          aria-label={`${label} 自定义模型 ID`}
+          onChange={(event) => onChange(event.target.value)}
+          className={`${inputClassName} mt-2`}
+        />
+      )}
     </div>
   );
 }

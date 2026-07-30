@@ -134,6 +134,36 @@ LLMProviderName = Literal[
 ]
 
 
+def _normalize_http_base_url(
+    value: str | None,
+    *,
+    allow_empty: bool,
+) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        if allow_empty:
+            return ""
+        raise ValueError("Base URL must not be empty.")
+    if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+        raise ValueError("Base URL must not contain control characters.")
+    try:
+        parsed = urlsplit(normalized)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Base URL is invalid.") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Base URL must be an absolute HTTP(S) URL.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Base URL must not contain credentials.")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Base URL must not contain a query or fragment.")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Base URL port is invalid.")
+    return normalized.rstrip("/")
+
+
 class LLMProviderConfig(BaseModel):
     """Public provider configuration with a masked API key."""
 
@@ -205,27 +235,51 @@ class LLMProviderUpdate(BaseModel):
         cls,
         value: str | None,
     ) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            return ""
-        if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
-            raise ValueError("Base URL must not contain control characters.")
-        try:
-            parsed = urlsplit(normalized)
-            port = parsed.port
-        except ValueError as exc:
-            raise ValueError("Base URL is invalid.") from exc
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("Base URL must be an absolute HTTP(S) URL.")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("Base URL must not contain credentials.")
-        if parsed.query or parsed.fragment:
-            raise ValueError("Base URL must not contain a query or fragment.")
-        if port is not None and not 1 <= port <= 65535:
-            raise ValueError("Base URL port is invalid.")
-        return normalized.rstrip("/")
+        return _normalize_http_base_url(value, allow_empty=True)
+
+
+class LLMModelDiscoveryRequest(BaseModel):
+    """Draft provider connection values used to fetch model IDs."""
+
+    provider: LLMProviderName
+    base_url: str = Field(max_length=2048)
+    api_key: str = Field(default="", max_length=4096)
+    api_key_required: bool = True
+    use_stored_api_key: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        normalized = _normalize_http_base_url(
+            value,
+            allow_empty=False,
+        )
+        assert isinstance(normalized, str)
+        return normalized
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: str) -> str:
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("API keys must not contain control characters.")
+        if value.startswith("***"):
+            raise ValueError("Masked API keys cannot be submitted.")
+        return value
+
+
+class LLMDiscoveredModel(BaseModel):
+    """One model exposed by a provider model-list endpoint."""
+
+    id: str
+    owned_by: str = ""
+
+
+class LLMModelDiscoveryResponse(BaseModel):
+    """Bounded provider model catalog."""
+
+    models: list[LLMDiscoveredModel] = Field(default_factory=list)
+    count: int = Field(ge=0)
+    truncated: bool = False
 
 
 class SettingsResponse(BaseModel):
