@@ -32,6 +32,15 @@ export interface AgentResult {
   token_usage?: Record<string, number>;
 }
 
+export interface CitationSource {
+  index: number;
+  title: string;
+  url: string;
+  source: string;
+  chunk_id?: string;
+  doc_id?: string;
+}
+
 // CriticScore — 与后端 critic.py CriticScore.to_dict() 对齐
 export interface CriticScore {
   overall: number;

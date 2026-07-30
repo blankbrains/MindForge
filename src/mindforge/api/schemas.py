@@ -353,6 +353,28 @@ class SettingsUpdateRequest(BaseModel):
         return self
 
 
+class HistoryCitationSource(BaseModel):
+    """Compact source metadata persisted with a research report."""
+
+    index: int = Field(ge=1, le=100_000)
+    title: str = Field(default="", max_length=1_000)
+    url: str = Field(default="", max_length=4_096)
+    source: str = Field(default="", max_length=200)
+    chunk_id: str | None = Field(default=None, max_length=512)
+    doc_id: str | None = Field(default=None, max_length=512)
+
+    @field_validator("url")
+    @classmethod
+    def restrict_url_scheme(cls, value: str) -> str:
+        candidate = value.strip()
+        if not candidate:
+            return ""
+        parsed = urlsplit(candidate)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return ""
+        return candidate
+
+
 class HistoryItem(BaseModel):
     """A single research history entry."""
 
@@ -362,6 +384,7 @@ class HistoryItem(BaseModel):
     quality_score: float | None = None
     model_used: str | None = None
     token_usage: dict[str, Any] = Field(default_factory=dict)
+    sources: list[HistoryCitationSource] = Field(default_factory=list)
     created_at: str | None = None
 
 
@@ -380,16 +403,29 @@ class HistorySaveRequest(BaseModel):
     quality_score: float | None = None
     model_used: str | None = Field(default=None, max_length=200)
     token_usage: dict[str, Any] = Field(default_factory=dict)
+    sources: list[HistoryCitationSource] = Field(
+        default_factory=list,
+        max_length=200,
+    )
 
     @model_validator(mode="after")
-    def enforce_token_usage_size(self) -> HistorySaveRequest:
-        encoded = json.dumps(
+    def enforce_json_field_sizes(self) -> HistorySaveRequest:
+        encoded_usage = json.dumps(
             self.token_usage,
             ensure_ascii=False,
             default=str,
         ).encode("utf-8")
-        if len(encoded) > 100_000:
+        if len(encoded_usage) > 100_000:
             raise ValueError("token_usage exceeds 100000 bytes.")
+        encoded_sources = json.dumps(
+            [
+                source.model_dump(exclude_none=True)
+                for source in self.sources
+            ],
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if len(encoded_sources) > 200_000:
+            raise ValueError("sources exceeds 200000 bytes.")
         return self
 
 

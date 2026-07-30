@@ -245,6 +245,7 @@ export function HistoryPage() {
                   <div className="max-h-96 overflow-y-auto rounded-lg bg-surface-alt p-4 text-sm">
                     <StreamingMarkdown
                       content={entry.report || "（无内容）"}
+                      sources={entry.sources}
                     />
                   </div>
                 </div>

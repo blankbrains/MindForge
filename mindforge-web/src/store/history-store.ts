@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { API_BASE } from "@/lib/constants";
+import { normalizeCitationSources } from "@/lib/citations";
+import type { CitationSource } from "@/types/research";
 
 const LOCAL_HISTORY_ID_FLOOR = 1_000_000_000_000;
 
@@ -11,6 +13,7 @@ export interface HistoryEntry {
   quality_score: number | null;
   model_used: string | null;
   token_usage?: Record<string, unknown>;
+  sources?: CitationSource[];
   created_at: string | null;
 }
 
@@ -31,6 +34,7 @@ export interface HistoryState {
     quality?: number,
     model?: string,
     usage?: ResearchUsageSummary,
+    sources?: CitationSource[],
   ) => Promise<void>;
   loadHistory: () => Promise<void>;
   loadEntry: (id: number) => Promise<void>;
@@ -57,7 +61,9 @@ export const useHistoryStore = create<HistoryState>()(
         quality,
         model,
         usage,
+        sources,
       ) => {
+        const normalizedSources = normalizeCitationSources(sources);
         const tokenUsage = {
           ...(usage?.tokenUsage ?? {}),
           billing: {
@@ -77,6 +83,7 @@ export const useHistoryStore = create<HistoryState>()(
               quality_score: quality ?? null,
               model_used: model ?? null,
               token_usage: tokenUsage,
+              sources: normalizedSources,
             }),
           });
           if (res.ok) {
@@ -106,6 +113,7 @@ export const useHistoryStore = create<HistoryState>()(
           quality_score: quality ?? null,
           model_used: model ?? null,
           token_usage: tokenUsage,
+          sources: normalizedSources,
           created_at: new Date().toISOString(),
         };
         get().addEntry(entry);

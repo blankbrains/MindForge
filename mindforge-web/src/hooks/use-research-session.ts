@@ -5,6 +5,7 @@ import { useResearchStore } from "@/store/research-store";
 import { useHistoryStore } from "@/store/history-store";
 import { useSettingsStore } from "@/store/settings-store";
 import { createSSEConnection } from "@/lib/sse-parser";
+import { normalizeCitationSources } from "@/lib/citations";
 import { useShallow } from "zustand/react/shallow";
 
 const configuredResearchTimeout = Number.parseInt(
@@ -168,11 +169,15 @@ export function useResearchSession() {
             const tokenUsage = result?.token_usage as Record<string, number> | undefined;
             const costUsd = result?.cost_usd as number | null | undefined;
             const costStatus = result?.cost_status as string | undefined;
+            const resultData = result?.data as
+              | Record<string, unknown>
+              | undefined;
+            const sources = normalizeCitationSources(resultData?.sources);
             void addFromResearch(task, report, quality, model, {
               tokenUsage,
               costUsd,
               costStatus,
-            });
+            }, sources);
           }
         },
         () => {

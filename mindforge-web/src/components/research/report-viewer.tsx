@@ -1,5 +1,6 @@
 import type { AgentResult } from "@/types/research";
 import { StreamingMarkdown } from "@/components/research/streaming-markdown";
+import { normalizeCitationSources } from "@/lib/citations";
 import {
   formatCostEstimate,
   formatDuration,
@@ -27,6 +28,7 @@ export function ReportViewer({ result }: Props) {
         ? metadata.cost_status
         : undefined
     );
+  const sources = normalizeCitationSources(result.data?.sources);
 
   return (
     <div className="space-y-4">
@@ -76,7 +78,7 @@ export function ReportViewer({ result }: Props) {
 
       {/* Report content */}
       <div className="rounded-lg border border-border bg-surface p-5 sm:p-7 lg:p-8">
-        <StreamingMarkdown content={result.output} />
+        <StreamingMarkdown content={result.output} sources={sources} />
       </div>
     </div>
   );

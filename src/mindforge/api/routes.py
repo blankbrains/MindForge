@@ -28,7 +28,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from mindforge.api.schemas import (
     DocumentContentResponse, DocumentItem, HealthResponse,
-    HistoryItem, HistorySaveRequest, IndexJobResponse, IndexRequest,
+    HistoryCitationSource, HistoryItem, HistorySaveRequest,
+    IndexJobResponse, IndexRequest,
     IndexResponse,
     QueryRequest, QueryResponse,
     LLMDiscoveredModel, LLMModelDiscoveryRequest,
@@ -841,6 +842,26 @@ def _parse_history_token_usage(value: str | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_history_sources(value: str | None) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    sources: list[dict[str, Any]] = []
+    for item in parsed[:200]:
+        try:
+            source = HistoryCitationSource.model_validate(item)
+        except (TypeError, ValueError):
+            continue
+        sources.append(source.model_dump(exclude_none=True))
+    return sources
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -2139,6 +2160,9 @@ def get_history_entry(history_id: int):
             token_usage=_parse_history_token_usage(
                 getattr(entry, "token_usage", None)
             ),
+            sources=_parse_history_sources(
+                getattr(entry, "sources", None)
+            ),
             created_at=_serialize_datetime_utc(entry.created_at),
         )
     finally:
@@ -2164,6 +2188,13 @@ def save_history(body: HistorySaveRequest):
             quality_score=body.quality_score,
             model_used=body.model_used,
             token_usage=_json.dumps(body.token_usage),
+            sources=_json.dumps(
+                [
+                    source.model_dump(exclude_none=True)
+                    for source in body.sources
+                ],
+                ensure_ascii=False,
+            ),
         )
         db.add(entry)
         try:

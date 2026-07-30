@@ -125,6 +125,28 @@ def test_history_save_request_enforces_body_bounds():
             task="ok",
             token_usage={"payload": "x" * 100_001},
         )
+    with pytest.raises(ValueError, match="at most 200"):
+        HistorySaveRequest(
+            task="ok",
+            sources=[
+                {
+                    "index": index + 1,
+                    "title": "source",
+                }
+                for index in range(201)
+            ],
+        )
+    request = HistorySaveRequest(
+        task="ok",
+        sources=[
+            {
+                "index": 1,
+                "title": "unsafe",
+                "url": "javascript:alert(1)",
+            }
+        ],
+    )
+    assert request.sources[0].url == ""
 
 
 def test_public_service_url_removes_credentials_and_query():
@@ -1414,6 +1436,18 @@ async def test_history_detail_returns_complete_report(
         report="x" * 4_000,
         quality_score=8.5,
         model_used="test-model",
+        token_usage=None,
+        sources=json.dumps(
+            [
+                {
+                    "index": 1,
+                    "title": "Example",
+                    "url": "https://example.com/source",
+                    "source": "web",
+                    "content": "legacy unexpected field",
+                }
+            ]
+        ),
         created_at=None,
     )
 
@@ -1448,6 +1482,16 @@ async def test_history_detail_returns_complete_report(
 
     assert response.status_code == 200
     assert response.json()["report"] == "x" * 4_000
+    assert response.json()["sources"] == [
+        {
+            "index": 1,
+            "title": "Example",
+            "url": "https://example.com/source",
+            "source": "web",
+            "chunk_id": None,
+            "doc_id": None,
+        }
+    ]
 
 
 def test_frontend_path_rejects_sibling_prefix_traversal(

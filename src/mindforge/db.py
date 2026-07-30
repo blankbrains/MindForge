@@ -217,6 +217,7 @@ class ResearchHistory(Base):
     quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     model_used: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     token_usage: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    sources: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

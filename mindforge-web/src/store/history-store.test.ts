@@ -81,4 +81,47 @@ describe("history store", () => {
       },
     });
   });
+
+  it("persists only compact, safe citation source metadata", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: 9 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await useHistoryStore.getState().addFromResearch(
+      "research",
+      "report [1]",
+      8,
+      "model",
+      undefined,
+      [
+        {
+          index: 1,
+          title: "Source",
+          url: "https://example.com/source",
+          source: "web",
+          chunk_id: "chunk-1",
+          doc_id: "doc-1",
+        },
+      ],
+    );
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(String(request.body)) as {
+      sources: Array<Record<string, unknown>>;
+    };
+    expect(body.sources).toEqual([
+      {
+        index: 1,
+        title: "Source",
+        url: "https://example.com/source",
+        source: "web",
+        chunk_id: "chunk-1",
+        doc_id: "doc-1",
+      },
+    ]);
+    expect(body.sources[0]).not.toHaveProperty("content");
+  });
 });

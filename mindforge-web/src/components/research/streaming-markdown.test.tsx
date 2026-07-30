@@ -108,4 +108,109 @@ describe("StreamingAnswerPanel", () => {
     expect(wrapper?.querySelectorAll("th")).toHaveLength(2);
     expect(wrapper?.querySelectorAll("td")).toHaveLength(2);
   });
+
+  it("links citation markers to safe external sources", () => {
+    render(
+      <StreamingMarkdown
+        content="This claim is supported [1]."
+        sources={[
+          {
+            index: 1,
+            title: "Example source",
+            url: "https://example.com/article",
+            source: "web",
+          },
+        ]}
+      />,
+    );
+
+    const citation = screen.getByRole("link", {
+      name: "查看来源 1",
+    });
+    expect(citation.getAttribute("href")).toBe(
+      "https://example.com/article",
+    );
+    expect(citation.getAttribute("target")).toBe("_blank");
+    expect(citation.getAttribute("rel")).toBe("noreferrer noopener");
+    expect(screen.getByRole("heading", { name: "来源" })).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Example source" }),
+    ).toBeTruthy();
+  });
+
+  it("links internal sources to their rendered source entry", () => {
+    const { container } = render(
+      <StreamingMarkdown
+        content="Internal evidence [2]."
+        sources={[
+          {
+            index: 2,
+            title: "Knowledge document",
+            url: "",
+            source: "knowledge_base",
+          },
+        ]}
+      />,
+    );
+
+    const citation = screen.getByRole("link", {
+      name: "查看来源 2",
+    });
+    expect(citation.getAttribute("href")).toBe("#research-source-2");
+    expect(citation.getAttribute("target")).toBeNull();
+    expect(container.querySelector("#research-source-2")).not.toBeNull();
+  });
+
+  it("does not rewrite citations inside code or existing links", () => {
+    const { container } = render(
+      <StreamingMarkdown
+        content={
+          "`[1]`\n\n```text\n[1]\n```\n\n[[1]](https://existing.example/path)"
+        }
+        sources={[
+          {
+            index: 1,
+            title: "Citation source",
+            url: "https://citation.example/source",
+            source: "web",
+          },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll("a.citation-link")).toHaveLength(0);
+    const existing = screen.getByRole("link", { name: "[1]" });
+    expect(existing.getAttribute("href")).toBe(
+      "https://existing.example/path",
+    );
+    expect(container.querySelector("code")?.textContent).toBe("[1]");
+    expect(container.querySelector("pre code")?.textContent).toBe("[1]\n");
+  });
+
+  it("keeps unknown markers as text and rejects unsafe source URLs", () => {
+    const { container } = render(
+      <StreamingMarkdown
+        content="Unknown [99], unsafe [1]."
+        sources={[
+          {
+            index: 1,
+            title: "Unsafe source",
+            url: "javascript:alert(1)",
+            source: "web",
+          },
+        ]}
+      />,
+    );
+
+    expect(container.textContent).toContain("Unknown [99]");
+    const citation = container.querySelector(
+      'a[aria-label="查看来源 1"]',
+    );
+    expect(citation).not.toBeNull();
+    expect(citation?.getAttribute("href")).toBe("#research-source-1");
+    expect(
+      container.querySelector('a[href^="javascript:"]'),
+    ).toBeNull();
+    expect(container.querySelector("#research-source-1 a")).toBeNull();
+  });
 });

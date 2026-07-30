@@ -174,4 +174,53 @@ describe("useResearchSession", () => {
     expect(useResearchStore.getState().status).toBe("error");
     unmount();
   });
+
+  it("persists structured sources with a successful report", () => {
+    const addFromResearch = vi.fn().mockResolvedValue(undefined);
+    useHistoryStore.setState({ addFromResearch });
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("citation test"));
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "done",
+        result: {
+          success: true,
+          output: "Report [1]",
+          data: {
+            sources: [
+              {
+                index: 1,
+                title: "Source",
+                url: "https://example.com/source",
+                source: "web",
+                content: "must not be persisted",
+              },
+            ],
+          },
+        },
+      });
+    });
+
+    expect(addFromResearch).toHaveBeenCalledWith(
+      "citation test",
+      "Report [1]",
+      undefined,
+      undefined,
+      {
+        tokenUsage: undefined,
+        costUsd: undefined,
+        costStatus: undefined,
+      },
+      [
+        {
+          index: 1,
+          title: "Source",
+          url: "https://example.com/source",
+          source: "web",
+        },
+      ],
+    );
+    unmount();
+  });
 });

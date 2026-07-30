@@ -138,6 +138,43 @@ body {
   color: var(--color-primary-light);
 }
 
+.markdown-content .citation-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.45rem;
+  min-height: 1.45rem;
+  margin: 0 0.08rem;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 35%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  font-size: 0.78em;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  vertical-align: 0.08em;
+}
+
+.markdown-content .citation-link:hover,
+.markdown-content .citation-link:focus-visible {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+
+.research-sources {
+  margin-top: 2.25rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.research-sources li {
+  scroll-margin-top: 5rem;
+}
+
+.research-source-kind {
+  margin-left: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.82em;
+}
+
 .markdown-content strong {
   font-weight: 700;
 }
