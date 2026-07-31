@@ -42,7 +42,13 @@ function normalizeCriticScore(value: unknown): CriticScore | null {
 }
 
 interface ResearchState {
-  status: "idle" | "connecting" | "streaming" | "completed" | "error";
+  status:
+    | "idle"
+    | "connecting"
+    | "streaming"
+    | "completed"
+    | "cancelled"
+    | "error";
   error: string | null;
   task: string;
   activeTask: string;
@@ -61,8 +67,9 @@ interface ResearchState {
 
   setTask: (task: string) => void;
   reset: () => void;
+  interrupt: (status?: "idle" | "cancelled") => void;
+  fail: (error: string) => void;
   handleEvent: (event: SSEEvent) => void;
-  setStatus: (status: ResearchState["status"], error?: string) => void;
 }
 
 export const useResearchStore = create<ResearchState>((set, get) => ({
@@ -105,7 +112,36 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       lastHeartbeatAt: null,
     }),
 
-  setStatus: (status, error) => set({ status, error: error ?? null }),
+  interrupt: (status = "idle") =>
+    set({
+      status,
+      error: null,
+      activeTask: "",
+      plan: null,
+      subtasks: {},
+      planning: false,
+      synthesizing: false,
+      criticScore: null,
+      refineRound: 0,
+      finalResult: null,
+      streamingAnswer: "",
+      traceId: null,
+      phase: status,
+      startedAt: null,
+      lastHeartbeatAt: null,
+    }),
+
+  fail: (error) =>
+    set({
+      status: "error",
+      error,
+      activeTask: "",
+      planning: false,
+      synthesizing: false,
+      phase: "failed",
+      startedAt: null,
+      lastHeartbeatAt: null,
+    }),
 
   handleEvent: (event) => {
     if (event.trace_id) {
@@ -212,8 +248,11 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
           synthesizing: false,
           planning: false,
           refineRound: 0,
+          activeTask: "",
           traceId: event.result.trace_id ?? event.trace_id ?? get().traceId,
           phase: event.result.success ? "completed" : "failed",
+          startedAt: null,
+          lastHeartbeatAt: null,
         });
         break;
 
@@ -221,9 +260,12 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         set({
           status: "error",
           error: event.content || "研究任务执行失败",
+          activeTask: "",
           planning: false,
           synthesizing: false,
           phase: "failed",
+          startedAt: null,
+          lastHeartbeatAt: null,
         });
         break;
 

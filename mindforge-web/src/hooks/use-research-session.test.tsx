@@ -81,6 +81,108 @@ describe("useResearchSession", () => {
     unmount();
   });
 
+  it("fully clears the active run when the user cancels", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("cancel me"));
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "planning",
+        status: "start",
+      });
+      result.current.cancelResearch();
+    });
+
+    const state = useResearchStore.getState();
+    expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
+    expect(state.status).toBe("cancelled");
+    expect(state.task).toBe("cancel me");
+    expect(state.activeTask).toBe("");
+    expect(state.startedAt).toBeNull();
+    expect(state.planning).toBe(false);
+    expect(state.phase).toBe("cancelled");
+
+    act(() => {
+      sseState.connections[0].onEvent({
+        type: "answer_chunk",
+        content: "late response",
+      });
+      sseState.connections[0].onComplete();
+    });
+    expect(useResearchStore.getState().status).toBe("cancelled");
+    expect(useResearchStore.getState().streamingAnswer).toBe("");
+
+    unmount();
+  });
+
+  it("interrupts the run when its page unmounts", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("navigate away"));
+    expect(useResearchStore.getState().status).toBe("streaming");
+
+    unmount();
+
+    const state = useResearchStore.getState();
+    expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
+    expect(state.status).toBe("idle");
+    expect(state.startedAt).toBeNull();
+    expect(state.activeTask).toBe("");
+  });
+
+  it("repairs a stale running state when the page mounts again", () => {
+    useResearchStore.setState({
+      status: "streaming",
+      task: "stale question",
+      activeTask: "stale question",
+      phase: "researching",
+      startedAt: Date.now() - 24 * 60 * 1000,
+    });
+
+    const { unmount } = renderHook(() => useResearchSession());
+
+    const state = useResearchStore.getState();
+    expect(state.status).toBe("idle");
+    expect(state.task).toBe("stale question");
+    expect(state.activeTask).toBe("");
+    expect(state.startedAt).toBeNull();
+    expect(state.phase).toBe("idle");
+
+    unmount();
+  });
+
+  it("ends the run and aborts the request at the configured timeout", () => {
+    useSettingsStore.setState({ researchTimeout: 30 });
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("timeout test"));
+    act(() => vi.advanceTimersByTime(30_000));
+
+    const state = useResearchStore.getState();
+    expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
+    expect(state.status).toBe("error");
+    expect(state.error).toContain("研究超时");
+    expect(state.startedAt).toBeNull();
+    expect(state.activeTask).toBe("");
+
+    unmount();
+  });
+
+  it("clears timing state when the stream ends without a result", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("incomplete stream"));
+    act(() => sseState.connections[0].onComplete());
+
+    const state = useResearchStore.getState();
+    expect(state.status).toBe("error");
+    expect(state.error).toContain("未收到完整结果");
+    expect(state.startedAt).toBeNull();
+    expect(state.activeTask).toBe("");
+
+    unmount();
+  });
+
   it("tracks planning and ignores heartbeat state changes", () => {
     const { result, unmount } = renderHook(() => useResearchSession());
 

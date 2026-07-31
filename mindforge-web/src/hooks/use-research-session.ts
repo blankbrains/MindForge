@@ -34,12 +34,19 @@ const MAX_STREAMED_ANSWER_CHARS =
     ? configuredMaxStreamedAnswerChars
     : 1_000_000;
 
+let nextRequestId = 0;
+let activeRequestId: number | null = null;
+
+function isRunningStatus(status: string): boolean {
+  return status === "connecting" || status === "streaming";
+}
+
 export function useResearchSession() {
   const abortRef = useRef<{ abort: () => void } | null>(null);
   const researchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingAnswerRef = useRef("");
-  const requestGenerationRef = useRef(0);
+  const requestIdRef = useRef<number | null>(null);
   const sessionState = useResearchStore(
     useShallow((state) => ({
       status: state.status,
@@ -74,62 +81,102 @@ export function useResearchSession() {
     }
   }, []);
 
-  // 组件卸载时清理 SSE 连接和超时
+  // A running store without a live request belongs to an unmounted page or
+  // an interrupted hot reload. It cannot be resumed and must not keep timing.
   useEffect(() => {
+    const current = useResearchStore.getState();
+    if (isRunningStatus(current.status) && activeRequestId === null) {
+      current.interrupt();
+    }
+
     return () => {
-      requestGenerationRef.current += 1;
+      const requestId = requestIdRef.current;
+      const ownsActiveRequest =
+        requestId !== null && activeRequestId === requestId;
+      if (ownsActiveRequest) {
+        activeRequestId = null;
+      }
+      requestIdRef.current = null;
       abortRef.current?.abort();
+      abortRef.current = null;
       if (streamFlushRef.current) clearTimeout(streamFlushRef.current);
+      streamFlushRef.current = null;
       pendingAnswerRef.current = "";
       if (researchTimeoutRef.current) {
         clearTimeout(researchTimeoutRef.current);
         researchTimeoutRef.current = null;
+      }
+      if (
+        ownsActiveRequest &&
+        isRunningStatus(useResearchStore.getState().status)
+      ) {
+        useResearchStore.getState().interrupt();
       }
     };
   }, []);
 
   const startResearch = useCallback(
     (task: string) => {
-      const generation = requestGenerationRef.current + 1;
-      requestGenerationRef.current = generation;
-      if (researchTimeoutRef.current) { clearTimeout(researchTimeoutRef.current); researchTimeoutRef.current = null; }
+      activeRequestId = null;
+      requestIdRef.current = null;
+      if (researchTimeoutRef.current) {
+        clearTimeout(researchTimeoutRef.current);
+        researchTimeoutRef.current = null;
+      }
       abortRef.current?.abort();
+      abortRef.current = null;
       if (streamFlushRef.current) {
         clearTimeout(streamFlushRef.current);
         streamFlushRef.current = null;
       }
       pendingAnswerRef.current = "";
+      const requestId = ++nextRequestId;
+      activeRequestId = requestId;
+      requestIdRef.current = requestId;
 
       // 使用 getState 确保拿到最新 setState action，避免闭包陈旧引用
       useResearchStore.setState({
-        status: "streaming", error: null, plan: null, subtasks: {},
-        planning: false, synthesizing: false, criticScore: null, refineRound: 0,
-        finalResult: null, streamingAnswer: "", traceId: null,
-        activeTask: task, phase: "connecting", startedAt: Date.now(),
+        status: "streaming",
+        error: null,
+        plan: null,
+        subtasks: {},
+        planning: false,
+        synthesizing: false,
+        criticScore: null,
+        refineRound: 0,
+        finalResult: null,
+        streamingAnswer: "",
+        traceId: null,
+        activeTask: task,
+        phase: "connecting",
+        startedAt: Date.now(),
         lastHeartbeatAt: null,
       });
       useResearchStore.getState().setTask(task);
 
-      const configuredSeconds =
-        useSettingsStore.getState().researchTimeout;
+      const configuredSeconds = useSettingsStore.getState().researchTimeout;
       const settingsState = useSettingsStore.getState();
       const providerLabel =
-        settingsState.providerConfigs[settingsState.llmProvider]?.label
-        || "当前模型服务";
-      const authenticationError =
-        `API Key 无效或已过期，请在设置中更新${providerLabel}凭证。`;
+        settingsState.providerConfigs[settingsState.llmProvider]?.label ||
+        "当前模型服务";
+      const authenticationError = `API Key 无效或已过期，请在设置中更新${providerLabel}凭证。`;
       const timeoutMs =
         Number.isFinite(configuredSeconds) && configuredSeconds > 0
           ? configuredSeconds * 1000
           : RESEARCH_TIMEOUT_MS;
       const timeoutId = setTimeout(() => {
-        if (requestGenerationRef.current !== generation) return;
+        if (activeRequestId !== requestId) return;
+        activeRequestId = null;
+        requestIdRef.current = null;
         researchTimeoutRef.current = null;
-        useResearchStore.getState().setStatus(
-          "error",
-          `研究超时（${Math.ceil(timeoutMs / 60_000)} 分钟），请尝试简化问题`,
-        );
-        abortRef.current?.abort();
+        useResearchStore
+          .getState()
+          .fail(
+            `研究超时（${Math.ceil(timeoutMs / 60_000)} 分钟），请尝试简化问题`,
+          );
+        const connection = abortRef.current;
+        abortRef.current = null;
+        connection?.abort();
       }, timeoutMs);
       researchTimeoutRef.current = timeoutId;
 
@@ -137,7 +184,7 @@ export function useResearchSession() {
         `${API_BASE}/query`,
         { task, stream: true },
         (event) => {
-          if (requestGenerationRef.current !== generation) return;
+          if (activeRequestId !== requestId) return;
           if (event.type === "answer_chunk") {
             const currentLength =
               useResearchStore.getState().streamingAnswer.length;
@@ -162,17 +209,30 @@ export function useResearchSession() {
           useResearchStore.getState().handleEvent(event);
           if (event.type === "error") {
             clearTimeout(timeoutId);
-            abortRef.current?.abort();
+            researchTimeoutRef.current = null;
+            activeRequestId = null;
+            requestIdRef.current = null;
+            const connection = abortRef.current;
+            abortRef.current = null;
+            connection?.abort();
             return;
           }
           if (event.type === "done") {
             clearTimeout(timeoutId);
             if (!event.result.success) return;
-            const result = event.result as unknown as Record<string, unknown> | undefined;
+            const result = event.result as unknown as
+              | Record<string, unknown>
+              | undefined;
             const report = (result?.output as string) || "";
-            const quality = (result?.metadata as Record<string, unknown> | undefined)?.quality as number | undefined;
-            const model = (result?.metadata as Record<string, unknown> | undefined)?.model as string | undefined;
-            const tokenUsage = result?.token_usage as Record<string, number> | undefined;
+            const quality = (
+              result?.metadata as Record<string, unknown> | undefined
+            )?.quality as number | undefined;
+            const model = (
+              result?.metadata as Record<string, unknown> | undefined
+            )?.model as string | undefined;
+            const tokenUsage = result?.token_usage as
+              | Record<string, number>
+              | undefined;
             const costUsd = result?.cost_usd as number | null | undefined;
             const costStatus = result?.cost_status as string | undefined;
             const resultData = result?.data as
@@ -180,10 +240,10 @@ export function useResearchSession() {
               | undefined;
             const sources = normalizeCitationSources(resultData?.sources);
             const traceId =
-              (result?.trace_id as string | undefined)
-              ?? event.trace_id
-              ?? useResearchStore.getState().traceId
-              ?? undefined;
+              (result?.trace_id as string | undefined) ??
+              event.trace_id ??
+              useResearchStore.getState().traceId ??
+              undefined;
             const usageSummary = {
               tokenUsage,
               costUsd,
@@ -212,53 +272,75 @@ export function useResearchSession() {
           }
         },
         () => {
-          if (requestGenerationRef.current !== generation) return;
+          if (activeRequestId !== requestId) return;
+          activeRequestId = null;
+          requestIdRef.current = null;
           clearTimeout(timeoutId);
           researchTimeoutRef.current = null;
           abortRef.current = null;
           // 仅当 done 事件已将 finalResult 写入后才置 completed，
           // 避免 [DONE] 标记先于 done 事件到达时出现"已完成但无报告"白屏
           const current = useResearchStore.getState();
-          if (current.finalResult?.success) {
-            useResearchStore.getState().setStatus("completed");
-          } else if (current.status !== "error") {
-            useResearchStore.getState().setStatus(
-              "error",
-              "研究连接已结束，但未收到完整结果",
-            );
+          if (!current.finalResult?.success && current.status !== "error") {
+            useResearchStore
+              .getState()
+              .fail("研究连接已结束，但未收到完整结果");
           }
         },
         (err) => {
-          if (requestGenerationRef.current !== generation) return;
+          if (activeRequestId !== requestId) return;
+          activeRequestId = null;
+          requestIdRef.current = null;
           clearTimeout(timeoutId);
           researchTimeoutRef.current = null;
           abortRef.current = null;
           const msg = err.message || "";
           // 分类错误信息，提供用户友好的中文提示
           if (err instanceof Error && "status" in err) {
-            const status = (err as unknown as Record<string, unknown>).status as number;
+            const status = (err as unknown as Record<string, unknown>)
+              .status as number;
             if (status === 401 || status === 403) {
-              useResearchStore.getState().setStatus("error", authenticationError);
+              useResearchStore.getState().fail(authenticationError);
               return;
             }
             if (status >= 500) {
-              useResearchStore.getState().setStatus("error", "服务器繁忙，请稍后重试。若持续出现请检查 API Key 余额。");
+              useResearchStore
+                .getState()
+                .fail(
+                  "服务器繁忙，请稍后重试。若持续出现请检查 API Key 余额。",
+                );
               return;
             }
           }
           const lower = msg.toLowerCase();
-          if (lower.includes("401") || lower.includes("403") || lower.includes("auth")) {
-            useResearchStore.getState().setStatus("error", authenticationError);
+          if (
+            lower.includes("401") ||
+            lower.includes("403") ||
+            lower.includes("auth")
+          ) {
+            useResearchStore.getState().fail(authenticationError);
           } else if (lower.includes("timeout") || lower.includes("abort")) {
-            useResearchStore.getState().setStatus("error", "研究超时，请尝试简化问题或减少问题范围。");
-          } else if (lower.includes("network") || lower.includes("fetch") || lower.includes("connect")) {
-            useResearchStore.getState().setStatus("error", "网络连接失败，请检查网络后重试。");
+            useResearchStore
+              .getState()
+              .fail("研究超时，请尝试简化问题或减少问题范围。");
+          } else if (
+            lower.includes("network") ||
+            lower.includes("fetch") ||
+            lower.includes("connect")
+          ) {
+            useResearchStore
+              .getState()
+              .fail("网络连接失败，请检查网络后重试。");
           } else if (msg && msg.length < 80) {
             // 简短的后端消息，可能是中文错误，直接展示
-            useResearchStore.getState().setStatus("error", msg);
+            useResearchStore.getState().fail(msg);
           } else {
             // 长错误/未知错误，给通用提示
-            useResearchStore.getState().setStatus("error", "研究请求失败，请稍后重试。如持续出现请检查 API Key 余额。");
+            useResearchStore
+              .getState()
+              .fail(
+                "研究请求失败，请稍后重试。如持续出现请检查 API Key 余额。",
+              );
           }
         },
       );
@@ -267,7 +349,8 @@ export function useResearchSession() {
   );
 
   const cancelResearch = useCallback(() => {
-    requestGenerationRef.current += 1;
+    activeRequestId = null;
+    requestIdRef.current = null;
     abortRef.current?.abort();
     abortRef.current = null;
     if (streamFlushRef.current) {
@@ -275,14 +358,11 @@ export function useResearchSession() {
       streamFlushRef.current = null;
     }
     pendingAnswerRef.current = "";
-    if (researchTimeoutRef.current) { clearTimeout(researchTimeoutRef.current); researchTimeoutRef.current = null; }
-    useResearchStore.getState().setStatus("idle");
-    useResearchStore.setState({
-      phase: "idle",
-      activeTask: "",
-      startedAt: null,
-      lastHeartbeatAt: null,
-    });
+    if (researchTimeoutRef.current) {
+      clearTimeout(researchTimeoutRef.current);
+      researchTimeoutRef.current = null;
+    }
+    useResearchStore.getState().interrupt("cancelled");
   }, []);
 
   return {
@@ -291,9 +371,10 @@ export function useResearchSession() {
     cancelResearch,
     isIdle: sessionState.status === "idle",
     isStreaming:
-      sessionState.status === "streaming"
-      || sessionState.status === "connecting",
+      sessionState.status === "streaming" ||
+      sessionState.status === "connecting",
     isCompleted: sessionState.status === "completed",
+    isCancelled: sessionState.status === "cancelled",
     isError: sessionState.status === "error",
   };
 }

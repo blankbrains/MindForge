@@ -32,9 +32,16 @@ export function createSSEConnection<T>(
 ): { abort: () => void } {
   const controller = new AbortController();
   let completed = false; // 防重复触发 onComplete
+  let aborted = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  const abort = () => {
+    if (aborted) return;
+    aborted = true;
+    controller.abort();
+    reader?.cancel().catch(() => {});
+  };
 
   (async () => {
-    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     try {
       const response = await fetch(url, {
         method: "POST",
@@ -64,13 +71,16 @@ export function createSSEConnection<T>(
       const parser = createParser({
         onEvent: (event: EventSourceMessage) => {
           if (event.data.length > MAX_SSE_EVENT_CHARS) {
-            controller.abort();
+            abort();
             onError(new Error("SSE event exceeded the configured size limit"));
             return;
           }
           // 兼容尾部空白：trim 后比较
           if (!event.data || event.data.trim() === "[DONE]") {
-            if (!completed) { completed = true; onComplete(); }
+            if (!completed) {
+              completed = true;
+              onComplete();
+            }
             reader?.cancel().catch(() => {});
             return;
           }
@@ -86,7 +96,10 @@ export function createSSEConnection<T>(
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          if (!completed) { completed = true; onComplete(); }
+          if (!aborted && !completed) {
+            completed = true;
+            onComplete();
+          }
           break;
         }
         receivedBytes += value.byteLength;
@@ -101,13 +114,15 @@ export function createSSEConnection<T>(
       }
     } finally {
       // 确保 reader 锁被释放
-      try { reader?.releaseLock(); } catch { /* already released */ }
+      try {
+        reader?.releaseLock();
+      } catch {
+        /* already released */
+      }
     }
   })();
 
   return {
-    abort: () => {
-      controller.abort();
-    },
+    abort,
   };
 }
