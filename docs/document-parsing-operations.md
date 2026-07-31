@@ -38,9 +38,10 @@ persisted images alone are not represented as semantic vision vectors.
 
 ## Versioning and benchmarks
 
-`PARSER_PIPELINE_VERSION`, `PARSER_OCR_MODEL_VERSION`,
-`PARSER_TABLE_MODEL_VERSION`, parser settings, and non-secret visual settings
-are included in the index signature. A change requires reindexing.
+`PARSER_PIPELINE_VERSION`, parser settings, and non-secret visual settings are
+included in the index signature. A change requires reindexing. PaddleOCR model
+selection follows the installed PaddleOCR 3 runtime; MindForge does not expose
+model-version variables that the parser cannot actually apply.
 
 The benchmark manifest is `benchmarks/parser/manifest.json`. Keep private
 corpus PDFs under `benchmarks/parser/corpus/` and results under

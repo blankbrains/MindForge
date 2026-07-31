@@ -8,7 +8,8 @@ import logging
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -39,6 +40,7 @@ from mindforge.ingestion.parsers import (
 )
 from mindforge.ingestion.raptor import RAPTORIndexer
 from mindforge.memory.episodic import Episode, EpisodicMemory
+from mindforge.memory.semantic import SemanticMemory
 from mindforge.retrieval.adaptive import AdaptiveRetriever, QueryMode
 from mindforge.retrieval.bm25 import BM25Retriever
 from mindforge.retrieval.graphrag import Entity, GraphRAGEngine
@@ -131,9 +133,7 @@ async def test_indexing_slots_enforce_configured_concurrency(
     monkeypatch.setattr(
         indexing_service,
         "get_settings",
-        lambda: SimpleNamespace(
-            api=SimpleNamespace(max_concurrent_index_jobs=1)
-        ),
+        lambda: SimpleNamespace(api=SimpleNamespace(max_concurrent_index_jobs=1)),
     )
     indexing_service.reset_indexing_service()
     active = 0
@@ -204,6 +204,7 @@ async def test_persistent_index_job_records_stage_progress(
         "get_reusable_document",
         no_reusable_document,
     )
+
     def parse_with_ocr_progress(_self, _path):
         assert _self._progress_callback is not None
         _self._progress_callback("ocr", 1, 2)
@@ -491,7 +492,7 @@ async def test_index_lifecycle_persists_features_that_were_actually_applied(
         lambda **_kwargs: "signature",
     )
 
-    chunks = await routes._index_with_lifecycle(
+    chunks, applied_raptor, applied_graphrag = await routes._index_with_lifecycle(
         parsed=SimpleNamespace(
             doc_id="doc",
             content="content",
@@ -503,6 +504,8 @@ async def test_index_lifecycle_persists_features_that_were_actually_applied(
     )
 
     assert len(chunks) == 1
+    assert applied_raptor is False
+    assert applied_graphrag is False
     assert statuses[-1]["status"] == "indexed"
     assert statuses[-1]["use_raptor"] is False
     assert statuses[-1]["use_graphrag"] is False
@@ -538,11 +541,145 @@ async def test_episodic_store_does_not_block_event_loop(
     loop = asyncio.get_running_loop()
     loop.call_later(0.01, loop_progressed.set)
 
-    store_task = asyncio.create_task(
-        memory.store("task", {"output": "result"})
-    )
+    store_task = asyncio.create_task(memory.store("task", {"output": "result"}))
     await asyncio.wait_for(loop_progressed.wait(), timeout=0.05)
     await store_task
+
+
+@pytest.mark.asyncio
+async def test_episodic_cache_preserves_complete_research_result() -> None:
+    memory = EpisodicMemory(redis_client=None)
+    original = AgentResult(
+        agent_name="orchestrator",
+        success=True,
+        output="Report with citation [1].",
+        data={
+            "sources": [
+                {
+                    "index": 1,
+                    "title": "Source",
+                    "url": "https://example.com/source",
+                }
+            ],
+            "critic_score": {"overall": 8.5},
+            "refine_rounds": 1,
+        },
+        metadata={
+            "quality": 8.5,
+            "cost": 0.0123,
+            "model": "test-model",
+        },
+        token_usage={"prompt_tokens": 20, "completion_tokens": 10},
+        cost_usd=0.0123,
+        cost_status="estimated",
+    )
+
+    await memory.store("cached task", original)
+    cached = await memory.recall("cached task")
+
+    assert cached is not None
+    restored = AgentResult.from_dict(cached)
+    assert restored.output == original.output
+    assert restored.data["sources"] == original.data["sources"]
+    assert restored.data["critic_score"] == {"overall": 8.5}
+    assert restored.metadata["quality"] == 8.5
+    assert restored.token_usage == original.token_usage
+    assert restored.cost_usd == pytest.approx(0.0123)
+    assert restored.cost_status == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_recalls_chinese_research(
+    tmp_path,
+) -> None:
+    memory = SemanticMemory(storage_dir=tmp_path)
+    memory.add_fact(
+        "向量数据库支持向量相似性检索和元数据过滤。",
+        ["https://example.com/vector-search"],
+        confidence=0.9,
+    )
+
+    facts = await memory.recall("如何进行向量相似性检索")
+
+    assert len(facts) == 1
+    assert "向量数据库" in facts[0].content
+
+
+def test_tracer_uses_langfuse_generation_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from mindforge.observability import tracer as tracer_module
+
+    updates: list[dict] = []
+    starts: list[dict] = []
+
+    class FakeObservation:
+        def update(self, **kwargs):
+            updates.append(kwargs)
+
+    class FakeContext:
+        def __enter__(self):
+            return FakeObservation()
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeLangfuse:
+        def __init__(self, **kwargs):
+            starts.append({"client": kwargs})
+
+        def start_as_current_observation(self, **kwargs):
+            starts.append(kwargs)
+            return FakeContext()
+
+        def flush(self):
+            return None
+
+        def shutdown(self):
+            return None
+
+    settings = SimpleNamespace(
+        app=SimpleNamespace(traces_dir=str(tmp_path)),
+        observability=SimpleNamespace(
+            langfuse_public_key="pk-test",
+            langfuse_secret_key="sk-test",
+            langfuse_host="https://langfuse.example",
+            capture_content=True,
+            max_record_chars=20_000,
+            max_trace_file_bytes=1024 * 1024,
+            trace_retention_days=7,
+        ),
+    )
+    monkeypatch.setattr(tracer_module, "get_settings", lambda: settings)
+    monkeypatch.setitem(
+        sys.modules,
+        "langfuse",
+        SimpleNamespace(Langfuse=FakeLangfuse),
+    )
+
+    tracer = tracer_module.Tracer()
+    with tracer.span(
+        "llm.chat",
+        metadata={"model": "test-model"},
+    ) as span:
+        span.input = {"messages": ["hello"]}
+        span.output = {
+            "content": "answer",
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+            },
+        }
+    tracer.close()
+
+    assert starts[0]["client"]["base_url"] == "https://langfuse.example"
+    assert starts[1]["as_type"] == "generation"
+    assert starts[1]["model"] == "test-model"
+    assert updates[0]["usage_details"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 3,
+    }
 
 
 class _ProbeAgent(BaseAgent):
@@ -594,9 +731,7 @@ async def test_synthesizer_empty_llm_response_is_not_success(
 
     result = await SynthesizerAgent(llm=EmptyLLM()).synthesize(
         task="test",
-        subtask_results=[
-            {"task_id": "one", "description": "one", "output": "finding"}
-        ],
+        subtask_results=[{"task_id": "one", "description": "one", "output": "finding"}],
     )
 
     assert result.success is False
@@ -768,18 +903,13 @@ async def test_graphrag_reuses_unchanged_community_summary() -> None:
     engine = GraphRAGEngine(llm_fn=FakeLLM())
     engine.min_community_size = 1
 
-    await engine.build_graph(
-        [{"doc_id": "doc-alpha", "content": "alpha document"}]
-    )
-    await engine.build_graph(
-        [{"doc_id": "doc-beta", "content": "beta document"}]
-    )
+    await engine.build_graph([{"doc_id": "doc-alpha", "content": "alpha document"}])
+    await engine.build_graph([{"doc_id": "doc-beta", "content": "beta document"}])
 
     assert summary_calls == 2
     assert len(engine.communities) == 2
     assert all(
-        community.summary == "stable summary"
-        for community in engine.communities
+        community.summary == "stable summary" for community in engine.communities
     )
 
 
@@ -807,9 +937,7 @@ async def test_graphrag_query_remains_available_during_build() -> None:
     await engine.query("Existing")
 
     build_task = asyncio.create_task(
-        engine.build_graph(
-            [{"doc_id": "new-doc", "content": "new document"}]
-        )
+        engine.build_graph([{"doc_id": "new-doc", "content": "new document"}])
     )
     await extraction_started.wait()
     results = await asyncio.wait_for(
@@ -880,9 +1008,7 @@ async def test_rag_tool_auto_and_graph_modes_reach_adaptive_retriever() -> None:
 async def test_orchestrator_research_queue_is_bounded() -> None:
     orchestrator = object.__new__(routes.Orchestrator)
     orchestrator._research_semaphore = asyncio.Semaphore(1)
-    orchestrator._settings = SimpleNamespace(
-        agent=SimpleNamespace(queue_timeout=0.01)
-    )
+    orchestrator._settings = SimpleNamespace(agent=SimpleNamespace(queue_timeout=0.01))
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -949,9 +1075,7 @@ async def test_streaming_orchestrator_emits_planning_and_heartbeat() -> None:
         llm=SimpleNamespace(llm_provider="test"),
     )
 
-    events = [
-        event async for event in orchestrator.stream_run("heartbeat test")
-    ]
+    events = [event async for event in orchestrator.stream_run("heartbeat test")]
     event_types = [event["type"] for event in events]
 
     assert event_types[0] == "planning"
@@ -1005,7 +1129,11 @@ async def test_failed_agent_result_uses_retrieval_fallback(
         return ToolResult(
             success=True,
             output="retrieval fallback",
-            data={"quality": 2.5, "sources": []},
+            data={
+                "retrieval_quality": 2.5,
+                "sources": [],
+                "total": 1,
+            },
         )
 
     monkeypatch.setattr(
@@ -1024,7 +1152,10 @@ async def test_failed_agent_result_uses_retrieval_fallback(
     response = await routes.query(QueryRequest(task="test task"))
 
     assert response.report == "retrieval fallback"
-    assert response.quality_score == 2.5
+    assert response.quality_score is None
+    assert response.retrieval_quality == 2.5
+    assert response.outcome == "degraded"
+    assert response.failure_reason == "agent failed: test task"
 
 
 @pytest.mark.asyncio
@@ -1043,7 +1174,11 @@ async def test_orchestrator_initialization_failure_uses_retrieval_fallback(
         return ToolResult(
             success=True,
             output="retrieval without llm",
-            data={"quality": 1.5, "sources": []},
+            data={
+                "retrieval_quality": 1.5,
+                "sources": [],
+                "total": 1,
+            },
         )
 
     monkeypatch.setattr(
@@ -1062,7 +1197,9 @@ async def test_orchestrator_initialization_failure_uses_retrieval_fallback(
     response = await routes.query(QueryRequest(task="test task"))
 
     assert response.report == "retrieval without llm"
-    assert response.quality_score == 1.5
+    assert response.quality_score is None
+    assert response.retrieval_quality == 1.5
+    assert response.outcome == "degraded"
     assert any(
         record.levelno == logging.WARNING
         and "using retrieval fallback" in record.getMessage()
@@ -1083,6 +1220,9 @@ async def test_stream_unsuccessful_agent_result_uses_retrieval_fallback(
                     agent_name="orchestrator",
                     success=False,
                     output=f"failed: {task}",
+                    token_usage={"total_tokens": 321},
+                    cost_usd=0.0123,
+                    cost_status="estimated",
                 ),
             }
 
@@ -1091,7 +1231,11 @@ async def test_stream_unsuccessful_agent_result_uses_retrieval_fallback(
             return ToolResult(
                 success=True,
                 output="stream retrieval fallback",
-                data={"quality": 1.0, "sources": []},
+                data={
+                    "retrieval_quality": 7.0,
+                    "sources": [{"index": 1, "title": "source"}],
+                    "total": 1,
+                },
             )
 
     import mindforge.tools.rag_tool as rag_module
@@ -1112,15 +1256,76 @@ async def test_stream_unsuccessful_agent_result_uses_retrieval_fallback(
 
     assert any(
         event.get("type") == "done"
-        and event.get("result", {}).get("output")
-        == "stream retrieval fallback"
+        and event.get("result", {}).get("output") == "stream retrieval fallback"
+        and event.get("result", {}).get("metadata", {}).get("outcome")
+        == "degraded"
+        and event.get("result", {}).get("metadata", {}).get("quality") is None
+        and event.get("result", {}).get("data", {}).get("primary_failure")
+        == "failed: test"
+        and event.get("result", {}).get("token_usage", {}).get("total_tokens")
+        == 321
+        and event.get("result", {}).get("cost_usd") == pytest.approx(0.0123)
         for event in events
     )
     assert not any(
-        event.get("type") == "done"
-        and event.get("result", {}).get("success") is False
+        event.get("type") == "done" and event.get("result", {}).get("success") is False
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_sse_trace_context_is_owned_by_one_producer_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace_stack: ContextVar[tuple[str, ...]] = ContextVar(
+        "test_trace_stack",
+        default=(),
+    )
+    closed: list[bool] = []
+
+    @contextmanager
+    def trace_context(_task: str, *, transport: str):
+        assert transport == "sse"
+        token = trace_stack.set((*trace_stack.get(), "trace"))
+        span = SimpleNamespace(
+            trace_id="a" * 32,
+            input=None,
+            output=None,
+            metadata={},
+            error=None,
+        )
+        try:
+            yield span
+        finally:
+            trace_stack.reset(token)
+            closed.append(True)
+
+    class SuccessfulOrchestrator:
+        async def stream_run(self, _task: str):
+            yield {"type": "planning", "status": "start"}
+            await asyncio.sleep(0)
+            yield {
+                "type": "done",
+                "result": AgentResult(
+                    agent_name="orchestrator",
+                    success=True,
+                    output="done",
+                    metadata={"outcome": "success"},
+                ),
+            }
+
+    monkeypatch.setattr(routes, "_research_trace_context", trace_context)
+    stream = routes._stream_response(SuccessfulOrchestrator(), "test")
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunks.append(await asyncio.create_task(anext(stream)))
+        except StopAsyncIteration:
+            break
+
+    assert closed == [True]
+    assert any(b'"type": "done"' in chunk for chunk in chunks)
+    assert chunks[-1] == b"data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio
@@ -1213,9 +1418,7 @@ async def test_raptor_reuses_precomputed_leaf_embeddings(
     nodes = await indexer.build_tree(chunks)
 
     summary_nodes = [node for node in nodes if node.level > 0]
-    assert embedder.calls == [
-        [node.content for node in summary_nodes]
-    ]
+    assert embedder.calls == [[node.content for node in summary_nodes]]
     assert all(node.embedding is not None for node in summary_nodes)
 
 
@@ -1255,12 +1458,8 @@ async def test_raptor_summary_ids_include_source_chunk_identity() -> None:
 
     first_nodes = await indexer.build_tree(first_chunks)
     second_nodes = await indexer.build_tree(second_chunks)
-    first_summary_ids = {
-        node.node_id for node in first_nodes if node.level > 0
-    }
-    second_summary_ids = {
-        node.node_id for node in second_nodes if node.level > 0
-    }
+    first_summary_ids = {node.node_id for node in first_nodes if node.level > 0}
+    second_summary_ids = {node.node_id for node in second_nodes if node.level > 0}
 
     assert first_summary_ids
     assert first_summary_ids.isdisjoint(second_summary_ids)
@@ -1291,9 +1490,7 @@ async def test_raptor_does_not_summarize_singleton_clusters() -> None:
     nodes = await indexer.build_tree(chunks)
 
     assert summary_calls == 0
-    assert nodes == [
-        node for node in nodes if node.level == 0
-    ]
+    assert nodes == [node for node in nodes if node.level == 0]
 
 
 @pytest.mark.asyncio
@@ -1405,10 +1602,7 @@ def test_large_pdf_parser_does_not_share_pdf_objects_across_threads(
     class FakePDF:
         def __init__(self) -> None:
             owner_thread = threading.get_ident()
-            self.pages = [
-                FakePage(index, owner_thread)
-                for index in range(12)
-            ]
+            self.pages = [FakePage(index, owner_thread) for index in range(12)]
 
         def __enter__(self):
             return self
@@ -1468,9 +1662,7 @@ def test_pdf_page_limit_reports_detected_and_configured_counts(
 async def test_parser_limit_error_is_returned_as_http_413() -> None:
     class Parser:
         def parse(self, _path):
-            raise DocumentLimitError(
-                "PDF 共 523 页，超过当前上限 500 页。"
-            )
+            raise DocumentLimitError("PDF 共 523 页，超过当前上限 500 页。")
 
     with pytest.raises(HTTPException) as exc_info:
         await routes._parse_document_file(Parser(), "document.pdf")
@@ -1614,6 +1806,7 @@ def test_runtime_retrieval_limits_are_wired(monkeypatch: pytest.MonkeyPatch) -> 
             reranker_local_files_only=True,
             max_request_top_k=50,
             vector_top_k=24,
+            bm25_top_k=18,
             rerank_top_k=7,
         ),
         graphrag=SimpleNamespace(graph_enabled=False),
@@ -1629,6 +1822,7 @@ def test_runtime_retrieval_limits_are_wired(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert captured["retrieval_top_k"] == 24
     assert captured["rerank_top_k"] == 7
+    assert captured["hybrid_retriever"].bm25_top_k == 18
 
 
 def test_embedding_provider_change_requires_empty_index(
@@ -1637,9 +1831,7 @@ def test_embedding_provider_change_requires_empty_index(
     monkeypatch.setattr(
         routes,
         "get_settings",
-        lambda: SimpleNamespace(
-            llm=SimpleNamespace(embedding_provider="bge")
-        ),
+        lambda: SimpleNamespace(llm=SimpleNamespace(embedding_provider="bge")),
     )
     monkeypatch.setattr(
         routes,
@@ -1661,9 +1853,7 @@ def test_embedding_provider_change_rejects_active_index_jobs(
     monkeypatch.setattr(
         routes,
         "get_settings",
-        lambda: SimpleNamespace(
-            llm=SimpleNamespace(embedding_provider="bge")
-        ),
+        lambda: SimpleNamespace(llm=SimpleNamespace(embedding_provider="bge")),
     )
     monkeypatch.setattr(
         routes,
@@ -1780,9 +1970,7 @@ def test_settings_response_exposes_unified_provider_configs(
         ApiKey=ApiKey,
         SessionLocal=Session,
         decrypt_api_key=lambda value: (
-            "cloud-secret-1234"
-            if value == "encrypted-cloud-key"
-            else ""
+            "cloud-secret-1234" if value == "encrypted-cloud-key" else ""
         ),
     )
     settings = SimpleNamespace(
@@ -1815,9 +2003,7 @@ def test_settings_response_exposes_unified_provider_configs(
     )
 
     response = routes.get_settings_api()
-    providers = {
-        item.provider: item for item in response.llm_providers
-    }
+    providers = {item.provider: item for item in response.llm_providers}
 
     assert set(providers) == {
         "openai",
@@ -1901,9 +2087,7 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
     monkeypatch.setattr(
         routes,
         "get_settings",
-        lambda: SimpleNamespace(
-            llm=SimpleNamespace(embedding_provider="bge")
-        ),
+        lambda: SimpleNamespace(llm=SimpleNamespace(embedding_provider="bge")),
     )
     monkeypatch.setattr(
         routes,
@@ -1950,17 +2134,11 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
     assert result == {"status": "saved"}
     assert captured["LLM_LLM_PROVIDER"] == "local"
     assert captured["LLM_COMPATIBLE_API_KEY"] == "cloud-key"
-    assert (
-        captured["LLM_COMPATIBLE_BASE_URL"]
-        == "https://cloud.example/v1"
-    )
+    assert captured["LLM_COMPATIBLE_BASE_URL"] == "https://cloud.example/v1"
     assert captured["LLM_COMPATIBLE_MODEL"] == "cloud-model"
     assert captured["LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA"] == "true"
     assert captured["LLM_LOCAL_API_KEY"] == ""
-    assert (
-        captured["LLM_LOCAL_BASE_URL"]
-        == "http://host.docker.internal:8001/v1"
-    )
+    assert captured["LLM_LOCAL_BASE_URL"] == "http://host.docker.internal:8001/v1"
     assert captured["LLM_LOCAL_MODEL"] == "qwen3"
     assert captured["LLM_LOCAL_API_KEY_REQUIRED"] == "false"
     assert reset_scopes == [
@@ -2070,8 +2248,7 @@ async def test_stream_fallback_does_not_report_failed_retrieval_as_success(
 
     assert any(event.get("type") == "error" for event in events)
     assert not any(
-        event.get("type") == "done"
-        and event.get("result", {}).get("success") is True
+        event.get("type") == "done" and event.get("result", {}).get("success") is True
         for event in events
     )
 
@@ -2469,9 +2646,7 @@ def test_asset_persistence_records_source_and_table_structure(
                 source_method="native_table",
                 metadata={
                     "table_html": "<table><tr><td>Ada</td></tr></table>",
-                    "table_cells": [
-                        {"row": 0, "column": 0, "text": "Ada"}
-                    ],
+                    "table_cells": [{"row": 0, "column": 0, "text": "Ada"}],
                     "row_count": 2,
                     "column_count": 1,
                 },
@@ -2509,9 +2684,7 @@ def test_asset_persistence_records_source_and_table_structure(
     )
 
     assert len(assets) == 2
-    assert (
-        tmp_path / "assets" / ("a" * 24) / "source" / "source.txt"
-    ).is_file()
+    assert (tmp_path / "assets" / ("a" * 24) / "source" / "source.txt").is_file()
     assert parsed.elements[0].metadata["asset_id"]
     table_asset = next(asset for asset in captured if asset["kind"] == "table")
     assert table_asset["metadata"]["cells"][0]["text"] == "Ada"

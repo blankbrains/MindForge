@@ -14,6 +14,7 @@ export interface HistoryEntry {
   model_used: string | null;
   token_usage?: Record<string, unknown>;
   sources?: CitationSource[];
+  trace_id?: string | null;
   created_at: string | null;
 }
 
@@ -35,6 +36,7 @@ export interface HistoryState {
     model?: string,
     usage?: ResearchUsageSummary,
     sources?: CitationSource[],
+    traceId?: string,
   ) => Promise<void>;
   loadHistory: () => Promise<void>;
   loadEntry: (id: number) => Promise<void>;
@@ -62,6 +64,7 @@ export const useHistoryStore = create<HistoryState>()(
         model,
         usage,
         sources,
+        traceId,
       ) => {
         const normalizedSources = normalizeCitationSources(sources);
         const tokenUsage = {
@@ -84,6 +87,7 @@ export const useHistoryStore = create<HistoryState>()(
               model_used: model ?? null,
               token_usage: tokenUsage,
               sources: normalizedSources,
+              trace_id: traceId ?? null,
             }),
           });
           if (res.ok) {
@@ -114,6 +118,7 @@ export const useHistoryStore = create<HistoryState>()(
           model_used: model ?? null,
           token_usage: tokenUsage,
           sources: normalizedSources,
+          trace_id: traceId ?? null,
           created_at: new Date().toISOString(),
         };
         get().addEntry(entry);

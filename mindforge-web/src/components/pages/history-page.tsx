@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useHistoryStore } from "@/store/history-store";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Modal } from "@/components/shared/modal";
@@ -10,6 +11,7 @@ import {
   Clock,
   Loader2,
   Trash2,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -242,6 +244,18 @@ export function HistoryPage() {
                   id={detailId}
                   className="border-t border-border px-5 py-4"
                 >
+                  {entry.trace_id && (
+                    <div className="mb-3 flex justify-end">
+                      <Link
+                        to="/observability"
+                        search={{ traceId: entry.trace_id }}
+                        className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+                      >
+                        <Activity className="h-3.5 w-3.5" />
+                        查看 Trace
+                      </Link>
+                    </div>
+                  )}
                   <div className="max-h-96 overflow-y-auto rounded-lg bg-surface-alt p-4 text-sm">
                     <StreamingMarkdown
                       content={entry.report || "（无内容）"}

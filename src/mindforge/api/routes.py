@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import threading
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Awaitable, Callable, Literal
@@ -27,14 +28,27 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from mindforge.api.schemas import (
-    DocumentContentResponse, DocumentItem, HealthResponse,
-    HistoryCitationSource, HistoryItem, HistorySaveRequest,
-    IndexJobResponse, IndexRequest,
+    DocumentContentResponse,
+    DocumentItem,
+    HealthResponse,
+    HistoryCitationSource,
+    HistoryItem,
+    HistorySaveRequest,
+    IndexJobResponse,
+    IndexRequest,
     IndexResponse,
-    QueryRequest, QueryResponse,
-    LLMDiscoveredModel, LLMModelDiscoveryRequest,
-    LLMModelDiscoveryResponse, LLMProviderConfig, LLMProviderName,
-    SettingsResponse, SettingsUpdateRequest,
+    QueryRequest,
+    QueryResponse,
+    LLMDiscoveredModel,
+    LLMModelDiscoveryRequest,
+    LLMModelDiscoveryResponse,
+    LLMProviderConfig,
+    LLMProviderName,
+    ObservabilityStatusResponse,
+    SettingsResponse,
+    SettingsUpdateRequest,
+    TraceDetailResponse,
+    TraceListResponse,
 )
 from mindforge.agents.base import AgentResult
 from mindforge.agents.orchestrator import Orchestrator
@@ -107,9 +121,7 @@ def _public_service_url(value: str) -> str:
         netloc = host
         if parsed.port is not None:
             netloc = f"{netloc}:{parsed.port}"
-        return urlunsplit(
-            (parsed.scheme, netloc, parsed.path, "", "")
-        )
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
     except (TypeError, ValueError):
         return ""
 
@@ -190,9 +202,7 @@ def get_orchestrator() -> Orchestrator:
             )
             redis_client.ping()
         except Exception:
-            logger.info(
-                "Redis episodic memory unavailable; using process memory."
-            )
+            logger.info("Redis episodic memory unavailable; using process memory.")
             redis_client = None
 
         semantic_path = Path(settings.app.semantic_memory_dir).expanduser()
@@ -281,9 +291,7 @@ def _build_chunk_points(
     import hashlib as _hashlib
 
     if len(vectors) != len(chunks):
-        raise ValueError(
-            "Embedding vector count does not match document chunk count."
-        )
+        raise ValueError("Embedding vector count does not match document chunk count.")
 
     points: list[PointStruct] = []
     for chunk_index, (chunk, vector) in enumerate(zip(chunks, vectors)):
@@ -345,7 +353,7 @@ async def _embed_and_store_chunks(
     vectors: list[list[float]] = []
     batch_size = get_settings().api.index_batch_size
     for index in range(0, len(texts), batch_size):
-        batch = texts[index:index + batch_size]
+        batch = texts[index : index + batch_size]
         vectors.extend(await asyncio.to_thread(embedder.embed, batch))
         completed = min(index + len(batch), len(texts))
         await _report_index_progress(
@@ -380,7 +388,7 @@ async def _embed_and_store_chunks(
     )
     await store.delete(doc_id)
     for index in range(0, len(points), batch_size):
-        await store.upsert(points[index:index + batch_size])
+        await store.upsert(points[index : index + batch_size])
         completed = min(index + batch_size, len(points))
         await _report_index_progress(
             progress_callback,
@@ -492,8 +500,7 @@ async def _index_parsed_document(
     enable_graphrag = use_graphrag
     if (enable_raptor or enable_graphrag) and len(chunks) <= 5:
         logger.info(
-            "Skipping RAPTOR/GraphRAG for '%s' (%d chunks): "
-            "document is too short.",
+            "Skipping RAPTOR/GraphRAG for '%s' (%d chunks): document is too short.",
             source,
             len(chunks),
         )
@@ -509,9 +516,8 @@ async def _index_parsed_document(
 
             settings = get_settings()
             provider = settings.llm.llm_provider
-            model = (
-                settings.raptor.summary_model.strip()
-                or settings.llm.get_model("researcher", provider)
+            model = settings.raptor.summary_model.strip() or settings.llm.get_model(
+                "researcher", provider
             )
             raptor_llm = LLMFactory.create(
                 provider,
@@ -530,8 +536,7 @@ async def _index_parsed_document(
                 or settings.llm.get_model("researcher", provider)
             )
             summary_model = (
-                settings.graphrag.community_summary_model.strip()
-                or entity_model
+                settings.graphrag.community_summary_model.strip() or entity_model
             )
             graph_entity_llm = LLMFactory.create(
                 provider,
@@ -600,9 +605,7 @@ async def _index_parsed_document(
                 )
             batch_size = get_settings().api.index_batch_size
             for index in range(0, len(raptor_points), batch_size):
-                await store.upsert(
-                    raptor_points[index:index + batch_size]
-                )
+                await store.upsert(raptor_points[index : index + batch_size])
             raptor_applied = bool(raptor_points)
             logger.info(
                 "RAPTOR: %d summary nodes indexed.",
@@ -637,11 +640,7 @@ async def _index_parsed_document(
         auxiliary_docs,
         graph_entity_llm=graph_entity_llm,
         graph_summary_llm=graph_summary_llm,
-        use_graphrag=bool(
-            enable_graphrag
-            and graph_entity_llm
-            and graph_summary_llm
-        ),
+        use_graphrag=bool(enable_graphrag and graph_entity_llm and graph_summary_llm),
         progress_callback=progress_callback,
         timings=stage_timings,
         start_progress=94.0 if enable_raptor and raptor_llm else 88.0,
@@ -677,7 +676,7 @@ async def _index_with_lifecycle(
     timings: dict[str, float] | None = None,
     source_path: str | Path | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> list[DocumentChunk]:
+) -> tuple[list[DocumentChunk], bool, bool]:
     """Index one document under a bounded slot and persist its state."""
     from mindforge.services.indexing import build_index_signature
 
@@ -721,9 +720,7 @@ async def _index_with_lifecycle(
                 except DocumentAssetCancelledError as exc:
                     raise IndexingCancelledError(str(exc)) from exc
                 if timings is not None:
-                    timings["asset_persistence"] = (
-                        time.perf_counter() - asset_started
-                    )
+                    timings["asset_persistence"] = time.perf_counter() - asset_started
                 await set_document_status(
                     doc_id=parsed.doc_id,
                     filename=source,
@@ -731,9 +728,7 @@ async def _index_with_lifecycle(
                     index_strategy=strategy,
                     use_raptor=use_raptor,
                     use_graphrag=use_graphrag,
-                    parser_metadata=dict(
-                        getattr(parsed, "metadata", {}) or {}
-                    ),
+                    parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
                 )
                 if cancelled is not None and cancelled():
                     raise IndexingCancelledError("Indexing was cancelled.")
@@ -787,7 +782,7 @@ async def _index_with_lifecycle(
         use_graphrag=applied_graphrag,
         parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
     )
-    return chunks
+    return chunks, applied_raptor, applied_graphrag
 
 
 def _reconstruct_document_content(
@@ -864,6 +859,187 @@ def _parse_history_sources(value: str | None) -> list[dict[str, Any]]:
     return sources
 
 
+def _research_trace_context(task: str, *, transport: str):
+    settings = get_settings()
+    if not settings.observability.enable_tracing:
+        return nullcontext(None)
+    try:
+        from mindforge.observability.tracer import get_tracer
+
+        tracer = get_tracer()
+        if tracer.current_trace_id is not None:
+            return nullcontext(None)
+        return tracer.span(
+            "orchestrator.research",
+            metadata={
+                "component": "orchestrator",
+                "transport": transport,
+                "task_chars": len(task),
+                "display_name": task,
+            },
+        )
+    except Exception:
+        logger.exception("Research trace initialization failed.")
+        return nullcontext(None)
+
+
+def _finish_research_trace(
+    span: Any,
+    *,
+    success: bool,
+    latency_ms: float,
+    cost_usd: float | None,
+    cost_status: str,
+    total_tokens: int = 0,
+    report_chars: int = 0,
+    fallback: bool = False,
+    outcome: str | None = None,
+    failure_reason: str | None = None,
+) -> None:
+    if span is None:
+        return
+    span.output = {
+        "success": success,
+        "latency_ms": round(latency_ms, 3),
+        "cost_usd": cost_usd,
+        "cost_status": cost_status,
+        "total_tokens": total_tokens,
+        "report_chars": report_chars,
+        "fallback": fallback,
+        "outcome": outcome or ("success" if success else "failed"),
+        "failure_reason": failure_reason,
+    }
+    span.metadata["status"] = (
+        "degraded"
+        if outcome == "degraded"
+        else ("success" if success else "error")
+    )
+    if failure_reason:
+        span.error = failure_reason[:1000]
+    if not success and not span.error:
+        span.error = "Research request failed."
+
+
+async def _execute_query_non_stream(
+    body: QueryRequest,
+    *,
+    llm_available: bool,
+    start: float,
+) -> QueryResponse:
+    """Execute one non-streaming request inside the caller's trace context."""
+    primary_failure: AgentResult | None = None
+    primary_failure_reason: str | None = None
+    if llm_available:
+        try:
+            orch = await asyncio.to_thread(get_orchestrator)
+            result = await orch.run(body.task)
+            if not result.success:
+                primary_failure = result
+                primary_failure_reason = (
+                    result.output
+                    or "Agent pipeline returned an unsuccessful result."
+                )
+            else:
+                latency = (time.time() - start) * 1000
+                cost_value = result.metadata.get("cost")
+                trace_id = result.trace_id
+                return QueryResponse(
+                    task_id=trace_id[:12] if trace_id else uuid.uuid4().hex[:12],
+                    trace_id=trace_id,
+                    report=result.output,
+                    sources=list(result.data.get("sources", [])),
+                    quality_score=float(result.metadata.get("quality", 0)),
+                    latency_ms=round(latency, 2),
+                    cost_usd=(
+                        round(float(cost_value), 10)
+                        if isinstance(cost_value, (int, float))
+                        else None
+                    ),
+                    cost_status=str(
+                        result.metadata.get(
+                            "cost_status",
+                            result.cost_status,
+                        )
+                    ),
+                    iterations=int(result.metadata.get("subtask_count", 0)),
+                    outcome="success",
+                )
+        except LLMConfigurationError as exc:
+            primary_failure_reason = str(exc)
+            logger.warning(
+                "Configured Agent provider became unavailable; "
+                "using retrieval fallback: %s",
+                exc,
+            )
+        except Exception as exc:
+            primary_failure_reason = str(exc)
+            logger.exception("Agent pipeline failed, falling back to retrieval-only.")
+    else:
+        logger.info("No LLM credentials configured; using retrieval-only.")
+
+    fallback_enabled = get_settings().agent.fallback_enabled
+    if llm_available and not fallback_enabled:
+        raise HTTPException(
+            status_code=502,
+            detail=primary_failure_reason or "研究任务执行失败。",
+        )
+
+    try:
+        from mindforge.tools.rag_tool import RAGTool
+
+        rag = RAGTool()
+        result = await rag.execute_async(
+            query=body.task,
+            mode="hybrid",
+        )
+        if not result.success:
+            raise RuntimeError(result.error or "Retrieval fallback failed.")
+        result_data = result.data or {}
+        has_relevant_results = (
+            bool(result_data.get("total"))
+            if "total" in result_data
+            else bool(result.output.strip())
+        )
+        if primary_failure_reason and not has_relevant_results:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"{primary_failure_reason}；知识库中也没有检索到高度相关资料。"
+                ),
+            )
+        latency = (time.time() - start) * 1000
+        degraded = primary_failure_reason is not None
+        trace_id = primary_failure.trace_id if primary_failure else None
+        return QueryResponse(
+            task_id=trace_id[:12] if trace_id else uuid.uuid4().hex[:12],
+            trace_id=trace_id,
+            report=result.output,
+            sources=list(result_data.get("sources", [])),
+            quality_score=None,
+            latency_ms=round(latency, 2),
+            cost_usd=primary_failure.cost_usd if primary_failure else 0.0,
+            cost_status=(
+                primary_failure.cost_status
+                if primary_failure
+                else "not_applicable"
+            ),
+            iterations=0,
+            outcome="degraded" if degraded else "retrieval_only",
+            failure_reason=primary_failure_reason,
+            retrieval_quality=float(
+                result_data.get("retrieval_quality", 0.0)
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Retrieval-only query failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge base retrieval is temporarily unavailable.",
+        ) from exc
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query(body: QueryRequest):
     """Submit a research task. Falls back to retrieval-only if LLM is unavailable."""
@@ -883,115 +1059,54 @@ async def query(body: QueryRequest):
                 )
             except Exception:
                 logger.exception(
-                    "Agent initialization failed for SSE; "
-                    "using retrieval fallback."
+                    "Agent initialization failed for SSE; using retrieval fallback."
                 )
         else:
-            logger.info(
-                "No LLM credentials configured; using retrieval-only SSE."
-            )
+            logger.info("No LLM credentials configured; using retrieval-only SSE.")
         return StreamingResponse(
             _stream_response(orch, body.task),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # Try full Agent pipeline first when the configured provider is available.
-    if llm_available:
-        try:
-            orch = await asyncio.to_thread(get_orchestrator)
-            result = await orch.run(body.task)
-            if not result.success:
-                raise RuntimeError(
-                    result.output
-                    or "Agent pipeline returned an unsuccessful result."
-                )
-            latency = (time.time() - start) * 1000
-            cost_value = result.metadata.get("cost")
-            return QueryResponse(
-                task_id=uuid.uuid4().hex[:12],
-                report=result.output,
-                sources=list(result.data.get("sources", [])),
-                quality_score=float(result.metadata.get("quality", 0)),
-                latency_ms=round(latency, 2),
-                cost_usd=(
-                    round(float(cost_value), 10)
-                    if isinstance(cost_value, (int, float))
-                    else None
-                ),
-                cost_status=str(
-                    result.metadata.get(
-                        "cost_status",
-                        result.cost_status,
-                    )
-                ),
-                iterations=int(result.metadata.get("subtask_count", 0)),
-            )
-        except LLMConfigurationError as exc:
-            logger.warning(
-                "Configured Agent provider became unavailable; "
-                "using retrieval fallback: %s",
-                exc,
-            )
-        except Exception:
-            logger.exception(
-                "Agent pipeline failed, falling back to retrieval-only."
-            )
-    else:
-        logger.info("No LLM credentials configured; using retrieval-only.")
-
-    # Fallback: search knowledge base directly (no LLM needed)
-    try:
-        from mindforge.tools.rag_tool import RAGTool
-        rag = RAGTool()
-        result = await rag.execute_async(
-            query=body.task,
-            mode="hybrid",
+    with _research_trace_context(body.task, transport="rest") as trace_span:
+        if trace_span is not None:
+            trace_span.input = {"task": body.task}
+        response = await _execute_query_non_stream(
+            body,
+            llm_available=llm_available,
+            start=start,
         )
-        if not result.success:
-            raise RuntimeError(
-                result.error or "Retrieval fallback failed."
-            )
-        latency = (time.time() - start) * 1000
-        return QueryResponse(
-            task_id=uuid.uuid4().hex[:12],
-            report=result.output,
-            sources=list((result.data or {}).get("sources", [])),
-            quality_score=float((result.data or {}).get("quality", 0.0)),
-            latency_ms=round(latency, 2),
-            cost_usd=0.0,
-            cost_status="not_applicable",
-            iterations=0,
+        trace_id = (
+            trace_span.trace_id
+            if trace_span is not None
+            else response.trace_id
         )
-    except Exception as exc:
-        logger.exception("Retrieval-only query failed.")
-        raise HTTPException(
-            status_code=503,
-            detail="Knowledge base retrieval is temporarily unavailable.",
-        ) from exc
+        response.trace_id = trace_id
+        if trace_id:
+            response.task_id = trace_id[:12]
+        _finish_research_trace(
+            trace_span,
+            success=True,
+            latency_ms=response.latency_ms,
+            cost_usd=response.cost_usd,
+            cost_status=response.cost_status,
+            report_chars=len(response.report or ""),
+            fallback=response.iterations == 0,
+        )
+        return response
 
 
 @router.post("/index", response_model=IndexResponse)
 async def index_document(body: IndexRequest):
     """Ingest a document into the Qdrant knowledge base."""
-    if not body.file_url and not body.file_path:
-        raise HTTPException(status_code=422, detail="file_url or file_path required")
-
-    if body.file_url:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Remote URL indexing is not supported. Upload the document "
-                "through /api/v1/upload."
-            ),
-        )
     if not get_settings().api.allow_local_file_index:
         raise HTTPException(
             status_code=403,
             detail="Local file indexing is disabled by configuration.",
         )
 
-    file_path = body.file_path or ""
+    file_path = body.file_path
     data_root = Path(get_settings().app.data_dir).expanduser()
     if not data_root.is_absolute():
         data_root = get_project_root() / data_root
@@ -1006,7 +1121,7 @@ async def index_document(body: IndexRequest):
     file_path = str(resolved_file)
     parser = DocumentParser()
     doc = await _parse_document_file(parser, file_path)
-    chunks = await _index_with_lifecycle(
+    chunks, applied_raptor, applied_graphrag = await _index_with_lifecycle(
         parsed=doc,
         source=doc.filename,
         strategy=body.strategy,
@@ -1022,6 +1137,9 @@ async def index_document(body: IndexRequest):
         filename=doc.filename,
         chunk_count=len(chunks),
         status="indexed",
+        index_strategy=body.strategy,
+        use_raptor=applied_raptor,
+        use_graphrag=applied_graphrag,
     )
 
 
@@ -1041,10 +1159,7 @@ async def create_index_job(
 
     job_id = uuid.uuid4().hex
     filename = _sanitize_upload_filename(file.filename)
-    job_dir = (
-        resolve_project_path(get_settings().app.data_dir)
-        / "index-jobs"
-    )
+    job_dir = resolve_project_path(get_settings().app.data_dir) / "index-jobs"
     file_path = await _persist_upload(
         file,
         target_dir=job_dir,
@@ -1162,9 +1277,7 @@ async def stats():
     from mindforge.repositories.documents import get_document_stats
 
     try:
-        document_count, chunk_count = await asyncio.to_thread(
-            get_document_stats
-        )
+        document_count, chunk_count = await asyncio.to_thread(get_document_stats)
     except Exception:
         logger.exception("Failed to load document statistics.")
         document_count, chunk_count = 0, 0
@@ -1176,12 +1289,8 @@ async def stats():
         "documents_indexed": document_count,
         "chunks_indexed": chunk_count,
         "qdrant_connected": snapshot.qdrant_connected,
-        "qdrant_url": _public_service_url(
-            get_settings().vector_store.qdrant_url
-        ),
-        "redis_url": _public_service_url(
-            get_settings().cache.redis_url
-        ),
+        "qdrant_url": _public_service_url(get_settings().vector_store.qdrant_url),
+        "redis_url": _public_service_url(get_settings().cache.redis_url),
         "max_upload_mb": get_settings().api.max_upload_mb,
         "max_pdf_pages": get_settings().api.max_pdf_pages,
         "embedding_provider": embedding["provider"],
@@ -1264,7 +1373,9 @@ async def get_document_asset_file(doc_id: str, asset_id: str):
     try:
         path = resolve_asset_path(str(asset.get("relative_path") or ""))
     except DocumentAssetError as exc:
-        raise HTTPException(status_code=404, detail="Document asset is unavailable.") from exc
+        raise HTTPException(
+            status_code=404, detail="Document asset is unavailable."
+        ) from exc
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Document asset is unavailable.")
     return FileResponse(
@@ -1278,6 +1389,7 @@ async def get_document_asset_file(doc_id: str, asset_id: str):
 # Document content
 # ------------------------------------------------------------------
 
+
 @router.get("/documents/{doc_id}/content", response_model=DocumentContentResponse)
 async def get_document_content(
     doc_id: str,
@@ -1290,17 +1402,16 @@ async def get_document_content(
     filename = ""
     for p in points:
         pl = p.payload or {}
-        if (
-            pl.get("doc_id") == doc_id
-            and not pl.get("is_summary", False)
-        ):
-            chunks.append({
-                "chunk_id": pl.get("chunk_id", ""),
-                "content": pl.get("content", ""),
-                "chunk_index": pl.get("chunk_index"),
-                "chunk_start": pl.get("chunk_start"),
-                "chunk_end": pl.get("chunk_end"),
-            })
+        if pl.get("doc_id") == doc_id and not pl.get("is_summary", False):
+            chunks.append(
+                {
+                    "chunk_id": pl.get("chunk_id", ""),
+                    "content": pl.get("content", ""),
+                    "chunk_index": pl.get("chunk_index"),
+                    "chunk_start": pl.get("chunk_start"),
+                    "chunk_end": pl.get("chunk_end"),
+                }
+            )
             if not filename:
                 filename = pl.get("source", "")
     if not chunks:
@@ -1327,6 +1438,7 @@ async def get_document_content(
 # File upload
 # ------------------------------------------------------------------
 
+
 @router.post("/upload", response_model=IndexResponse)
 async def upload_document(
     file: UploadFile = File(...),
@@ -1345,7 +1457,11 @@ async def upload_document(
         parser = DocumentParser()
         parsed = await _parse_document_file(parser, str(file_path))
         source = file.filename or parsed.filename
-        chunks = await _index_with_lifecycle(
+        (
+            chunks,
+            applied_raptor,
+            applied_graphrag,
+        ) = await _index_with_lifecycle(
             parsed=parsed,
             source=source,
             use_raptor=use_raptor,
@@ -1358,6 +1474,9 @@ async def upload_document(
             filename=source,
             chunk_count=len(chunks),
             status="indexed",
+            index_strategy="auto",
+            use_raptor=applied_raptor,
+            use_graphrag=applied_graphrag,
         )
     finally:
         # Always attempt cleanup of the uploaded temp file after indexing
@@ -1370,6 +1489,7 @@ async def upload_document(
 # ------------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------------
+
 
 def _stored_provider_api_key(provider: LLMProviderName) -> str:
     """Resolve a provider key without returning it to the browser."""
@@ -1417,9 +1537,7 @@ async def discover_provider_models(
         else body.api_key.strip()
     )
     api_key_required = (
-        True
-        if body.provider in {"openai", "deepseek"}
-        else body.api_key_required
+        True if body.provider in {"openai", "deepseek"} else body.api_key_required
     )
     if api_key_required and not api_key:
         raise HTTPException(
@@ -1433,12 +1551,8 @@ async def discover_provider_models(
             base_url=body.base_url,
             api_key=api_key,
             allow_private=body.provider == "local",
-            timeout_seconds=(
-                settings.api.model_discovery_timeout_seconds
-            ),
-            max_response_bytes=(
-                settings.api.model_discovery_max_response_bytes
-            ),
+            timeout_seconds=(settings.api.model_discovery_timeout_seconds),
+            max_response_bytes=(settings.api.model_discovery_max_response_bytes),
             max_models=settings.api.model_discovery_max_models,
         )
     except ModelDiscoveryError as exc:
@@ -1469,6 +1583,7 @@ def get_settings_api():
         decrypt_api_key,
     )
     from mindforge.config import get_settings
+
     db = SessionLocal()
     try:
         keys = {k.provider: k for k in db.query(ApiKey).filter(ApiKey.is_active).all()}
@@ -1476,17 +1591,15 @@ def get_settings_api():
 
         def _masked(provider: str, db_keys: dict, settings_key: str) -> str:
             if provider in db_keys:
-                decrypted = decrypt_api_key(
-                    db_keys[provider].key_encrypted
-                )
-                return (
-                    "***" + decrypted[-4:]
-                    if decrypted
-                    else "***configured"
-                )
+                decrypted = decrypt_api_key(db_keys[provider].key_encrypted)
+                return "***" + decrypted[-4:] if decrypted else "***configured"
             if settings_key:
                 return "***" + settings_key[-4:]
             return ""
+
+        def _masked_value(value: str | None) -> str:
+            normalized = str(value or "").strip()
+            return "***" + normalized[-4:] if normalized else ""
 
         provider_labels = {
             "openai": "OpenAI",
@@ -1511,11 +1624,7 @@ def get_settings_api():
                 critic_model = s.llm.deepseek_critic
                 synthesizer_model = s.llm.deepseek_synthesizer
             else:
-                prefix = (
-                    "compatible"
-                    if provider == "openai_compatible"
-                    else "local"
-                )
+                prefix = "compatible" if provider == "openai_compatible" else "local"
                 default_model = getattr(s.llm, f"{prefix}_model")
                 planner_model = getattr(
                     s.llm,
@@ -1563,6 +1672,9 @@ def get_settings_api():
                 "local",
             )
         ]
+        from mindforge.retrieval.service import get_reranker_status
+
+        reranker_status = get_reranker_status()
         return SettingsResponse(
             llm_provider=s.llm.llm_provider,
             llm_configured=has_llm_credentials(s.llm.llm_provider),
@@ -1580,13 +1692,67 @@ def get_settings_api():
                 s.llm.local_api_key,
             ),
             embedding_provider=s.llm.embedding_provider,
+            research_mode=getattr(s.agent, "research_mode", "balanced"),
+            source_policy=getattr(s.agent, "source_policy", "auto"),
+            fallback_enabled=getattr(s.agent, "fallback_enabled", True),
             retrieval_top_k=s.retrieval.vector_top_k,
             rerank_top_k=s.retrieval.rerank_top_k,
+            retrieval_min_score=getattr(s.retrieval, "min_score", 0.60),
+            keyword_min_coverage=getattr(
+                s.retrieval,
+                "keyword_min_coverage",
+                0.60,
+            ),
             max_iterations=s.agent.max_iterations,
             max_refine_rounds=s.agent.max_refine_rounds,
             critic_threshold=s.agent.critic_threshold,
             subtask_timeout=s.agent.subtask_timeout,
             research_timeout=s.agent.research_timeout,
+            llm_request_timeout=getattr(s.agent, "llm_request_timeout", 45),
+            max_subtasks=getattr(s.agent, "max_subtasks", 5),
+            max_tool_calls_total=getattr(
+                s.agent,
+                "max_tool_calls_total",
+                12,
+            ),
+            max_history_entries=getattr(
+                getattr(s, "api", None),
+                "max_history_entries",
+                0,
+            ),
+            langfuse_public_key=_masked_value(
+                getattr(
+                    getattr(s, "observability", None),
+                    "langfuse_public_key",
+                    "",
+                )
+            ),
+            langfuse_secret_key=_masked_value(
+                getattr(
+                    getattr(s, "observability", None),
+                    "langfuse_secret_key",
+                    "",
+                )
+            ),
+            langfuse_host=getattr(
+                getattr(s, "observability", None),
+                "langfuse_host",
+                "https://cloud.langfuse.com",
+            ),
+            observability_capture_content=getattr(
+                getattr(s, "observability", None),
+                "capture_content",
+                False,
+            ),
+            trace_retention_days=getattr(
+                getattr(s, "observability", None),
+                "trace_retention_days",
+                0,
+            ),
+            tavily_configured=bool(os.environ.get("TAVILY_API_KEY", "").strip()),
+            reranker_configured=reranker_status["configured"],
+            reranker_available=reranker_status["available"],
+            reranker_load_failed=reranker_status["load_failed"],
         )
     finally:
         db.close()
@@ -1644,10 +1810,7 @@ def _snapshot_env_file(keys: set[str]) -> dict[str, tuple[bool, str]]:
     env_path = get_project_root() / ".env"
     with _ENV_FILE_LOCK:
         values = dotenv_values(env_path) if env_path.is_file() else {}
-    return {
-        key: (key in values, values.get(key) or "")
-        for key in keys
-    }
+    return {key: (key in values, values.get(key) or "") for key in keys}
 
 
 def _restore_env_file(
@@ -1670,10 +1833,47 @@ def update_settings_api(body: SettingsUpdateRequest):
 def _update_settings_locked(body: SettingsUpdateRequest):
     """Save user settings (API keys encrypted in DB, synced to .env)."""
     current_settings = get_settings()
+    current_agent = getattr(current_settings, "agent", None)
+    effective_llm_timeout = (
+        body.llm_request_timeout
+        if body.llm_request_timeout is not None
+        else getattr(current_agent, "llm_request_timeout", 45)
+    )
+    effective_subtask_timeout = (
+        body.subtask_timeout
+        if body.subtask_timeout is not None
+        else getattr(current_agent, "subtask_timeout", 60)
+    )
+    effective_research_timeout = (
+        body.research_timeout
+        if body.research_timeout is not None
+        else getattr(current_agent, "research_timeout", 180)
+    )
+    timeout_update_requested = any(
+        value is not None
+        for value in (
+            body.llm_request_timeout,
+            body.subtask_timeout,
+            body.research_timeout,
+        )
+    )
+    if timeout_update_requested and effective_llm_timeout > effective_subtask_timeout:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The LLM request timeout must not exceed the subtask timeout."
+            ),
+        )
+    if timeout_update_requested and effective_subtask_timeout > effective_research_timeout:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The subtask timeout must not exceed the research timeout."
+            ),
+        )
     embedding_provider_changed = (
         body.embedding_provider is not None
-        and body.embedding_provider
-        != current_settings.llm.embedding_provider
+        and body.embedding_provider != current_settings.llm.embedding_provider
     )
     if embedding_provider_changed:
         try:
@@ -1747,9 +1947,7 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             key_updates[provider_update.provider] = provider_update.api_key
 
         for provider, key_val in key_updates.items():
-            existing = db.query(ApiKey).filter(
-                ApiKey.provider == provider
-            ).first()
+            existing = db.query(ApiKey).filter(ApiKey.provider == provider).first()
             # 拒绝脱敏值（***开头）被当作真实 key 保存
             if key_val is None:
                 continue  # undefined → 不修改
@@ -1795,13 +1993,9 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                 },
                 "openai_compatible": {
                     "planner_model": "LLM_COMPATIBLE_PLANNER_MODEL",
-                    "researcher_model": (
-                        "LLM_COMPATIBLE_RESEARCHER_MODEL"
-                    ),
+                    "researcher_model": ("LLM_COMPATIBLE_RESEARCHER_MODEL"),
                     "critic_model": "LLM_COMPATIBLE_CRITIC_MODEL",
-                    "synthesizer_model": (
-                        "LLM_COMPATIBLE_SYNTHESIZER_MODEL"
-                    ),
+                    "synthesizer_model": ("LLM_COMPATIBLE_SYNTHESIZER_MODEL"),
                 },
                 "local": {
                     "planner_model": "LLM_LOCAL_PLANNER_MODEL",
@@ -1816,34 +2010,20 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             }
             capability_key_maps = {
                 "openai_compatible": {
-                    "api_key_required": (
-                        "LLM_COMPATIBLE_API_KEY_REQUIRED"
-                    ),
-                    "supports_tools": (
-                        "LLM_COMPATIBLE_SUPPORTS_TOOLS"
-                    ),
-                    "supports_json_mode": (
-                        "LLM_COMPATIBLE_SUPPORTS_JSON_MODE"
-                    ),
-                    "supports_json_schema": (
-                        "LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA"
-                    ),
+                    "api_key_required": ("LLM_COMPATIBLE_API_KEY_REQUIRED"),
+                    "supports_tools": ("LLM_COMPATIBLE_SUPPORTS_TOOLS"),
+                    "supports_json_mode": ("LLM_COMPATIBLE_SUPPORTS_JSON_MODE"),
+                    "supports_json_schema": ("LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA"),
                 },
                 "local": {
                     "api_key_required": "LLM_LOCAL_API_KEY_REQUIRED",
                     "supports_tools": "LLM_LOCAL_SUPPORTS_TOOLS",
-                    "supports_json_mode": (
-                        "LLM_LOCAL_SUPPORTS_JSON_MODE"
-                    ),
-                    "supports_json_schema": (
-                        "LLM_LOCAL_SUPPORTS_JSON_SCHEMA"
-                    ),
+                    "supports_json_mode": ("LLM_LOCAL_SUPPORTS_JSON_MODE"),
+                    "supports_json_schema": ("LLM_LOCAL_SUPPORTS_JSON_SCHEMA"),
                 },
             }
             if provider_update.base_url is not None:
-                env_updates[base_url_keys[provider]] = (
-                    provider_update.base_url
-                )
+                env_updates[base_url_keys[provider]] = provider_update.base_url
             if (
                 provider_update.default_model is not None
                 and provider in default_model_keys
@@ -1861,33 +2041,72 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             ).items():
                 value = getattr(provider_update, field_name)
                 if value is not None:
-                    env_updates[env_key] = (
-                        "true" if value else "false"
-                    )
+                    env_updates[env_key] = "true" if value else "false"
 
         if body.llm_provider:
             env_updates["LLM_LLM_PROVIDER"] = body.llm_provider
         if body.embedding_provider:
             env_updates["LLM_EMBEDDING_PROVIDER"] = body.embedding_provider
+        if body.research_mode is not None:
+            env_updates["AGENT_RESEARCH_MODE"] = body.research_mode
+        if body.source_policy is not None:
+            env_updates["AGENT_SOURCE_POLICY"] = body.source_policy
+        if body.fallback_enabled is not None:
+            env_updates["AGENT_FALLBACK_ENABLED"] = (
+                "true" if body.fallback_enabled else "false"
+            )
         if body.retrieval_top_k is not None:
             env_updates["RETRIEVAL_VECTOR_TOP_K"] = str(body.retrieval_top_k)
         if body.rerank_top_k is not None:
             env_updates["RETRIEVAL_RERANK_TOP_K"] = str(body.rerank_top_k)
+        if body.retrieval_min_score is not None:
+            env_updates["RETRIEVAL_MIN_SCORE"] = str(
+                body.retrieval_min_score
+            )
+        if body.keyword_min_coverage is not None:
+            env_updates["RETRIEVAL_KEYWORD_MIN_COVERAGE"] = str(
+                body.keyword_min_coverage
+            )
         if body.max_iterations is not None:
             env_updates["AGENT_MAX_ITERATIONS"] = str(body.max_iterations)
         if body.max_refine_rounds is not None:
-            env_updates["AGENT_MAX_REFINE_ROUNDS"] = str(
-                body.max_refine_rounds
-            )
+            env_updates["AGENT_MAX_REFINE_ROUNDS"] = str(body.max_refine_rounds)
         if body.critic_threshold is not None:
             env_updates["AGENT_CRITIC_THRESHOLD"] = str(body.critic_threshold)
         if body.subtask_timeout is not None:
-            env_updates["AGENT_SUBTASK_TIMEOUT"] = str(
-                body.subtask_timeout
-            )
+            env_updates["AGENT_SUBTASK_TIMEOUT"] = str(body.subtask_timeout)
         if body.research_timeout is not None:
-            env_updates["AGENT_RESEARCH_TIMEOUT"] = str(
-                body.research_timeout
+            env_updates["AGENT_RESEARCH_TIMEOUT"] = str(body.research_timeout)
+        if body.llm_request_timeout is not None:
+            env_updates["AGENT_LLM_REQUEST_TIMEOUT"] = str(
+                body.llm_request_timeout
+            )
+        if body.max_subtasks is not None:
+            env_updates["AGENT_MAX_SUBTASKS"] = str(body.max_subtasks)
+        if body.max_tool_calls_total is not None:
+            env_updates["AGENT_MAX_TOOL_CALLS_TOTAL"] = str(
+                body.max_tool_calls_total
+            )
+        if body.max_history_entries is not None:
+            env_updates["API_MAX_HISTORY_ENTRIES"] = str(
+                body.max_history_entries
+            )
+        for field_name, env_key in (
+            ("langfuse_public_key", "OBSERVABILITY_LANGFUSE_PUBLIC_KEY"),
+            ("langfuse_secret_key", "OBSERVABILITY_LANGFUSE_SECRET_KEY"),
+        ):
+            value = getattr(body, field_name)
+            if value is not None and not value.startswith("***"):
+                env_updates[env_key] = value
+        if body.langfuse_host is not None:
+            env_updates["OBSERVABILITY_LANGFUSE_HOST"] = body.langfuse_host
+        if body.observability_capture_content is not None:
+            env_updates["OBSERVABILITY_CAPTURE_CONTENT"] = (
+                "true" if body.observability_capture_content else "false"
+            )
+        if body.trace_retention_days is not None:
+            env_updates["OBSERVABILITY_TRACE_RETENTION_DAYS"] = str(
+                body.trace_retention_days
             )
 
         env_snapshot: dict[str, tuple[bool, str]] = {}
@@ -1940,8 +2159,7 @@ def _update_settings_locked(body: SettingsUpdateRequest):
 
         reload_settings()
         provider_updates_present = bool(
-            body.llm_provider_configs
-            or body.llm_provider_config is not None
+            body.llm_provider_configs or body.llm_provider_config is not None
         )
         direct_key_update = any(
             value is not None
@@ -1981,6 +2199,14 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     body.rerank_top_k,
                     getattr(current_retrieval, "rerank_top_k", None),
                 ),
+                (
+                    body.retrieval_min_score,
+                    getattr(current_retrieval, "min_score", None),
+                ),
+                (
+                    body.keyword_min_coverage,
+                    getattr(current_retrieval, "keyword_min_coverage", None),
+                ),
             )
         )
         current_agent = getattr(current_settings, "agent", None)
@@ -2007,16 +2233,52 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     body.research_timeout,
                     getattr(current_agent, "research_timeout", None),
                 ),
+                (
+                    body.research_mode,
+                    getattr(current_agent, "research_mode", None),
+                ),
+                (
+                    body.source_policy,
+                    getattr(current_agent, "source_policy", None),
+                ),
+                (
+                    body.fallback_enabled,
+                    getattr(current_agent, "fallback_enabled", None),
+                ),
+                (
+                    body.llm_request_timeout,
+                    getattr(current_agent, "llm_request_timeout", None),
+                ),
+                (
+                    body.max_subtasks,
+                    getattr(current_agent, "max_subtasks", None),
+                ),
+                (
+                    body.max_tool_calls_total,
+                    getattr(current_agent, "max_tool_calls_total", None),
+                ),
             )
         )
+        observability_changed = any(
+            value is not None
+            for value in (
+                body.langfuse_public_key,
+                body.langfuse_secret_key,
+                body.langfuse_host,
+                body.observability_capture_content,
+                body.trace_retention_days,
+            )
+        )
+        if observability_changed:
+            from mindforge.observability.tracer import close_tracer
+
+            close_tracer()
         reset_runtime_components(
             reset_orchestrator=llm_changed or agent_changed,
             reset_embedder=embedding_provider_changed,
             reset_vector_store=False,
             reset_retrieval=(
-                llm_changed
-                or embedding_provider_changed
-                or retrieval_changed
+                llm_changed or embedding_provider_changed or retrieval_changed
             ),
             reset_indexing=False,
         )
@@ -2042,9 +2304,7 @@ def reset_runtime_components(
         try:
             previous_orchestrator.close()
         except Exception:
-            logger.exception(
-                "Failed to close the previous orchestrator during reset."
-            )
+            logger.exception("Failed to close the previous orchestrator during reset.")
 
     from mindforge.ingestion.embedder import (
         reset_embedder as reset_embedder_component,
@@ -2075,8 +2335,80 @@ def reset_runtime_components(
 
 
 # ------------------------------------------------------------------
+# Observability
+# ------------------------------------------------------------------
+
+
+@router.get(
+    "/observability/status",
+    response_model=ObservabilityStatusResponse,
+)
+def get_observability_status():
+    """Return public tracing status without exposing credentials or paths."""
+    from mindforge.observability.store import TraceRepository
+
+    return TraceRepository().status()
+
+
+@router.get(
+    "/observability/traces",
+    response_model=TraceListResponse,
+)
+def list_observability_traces(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    status: Literal["success", "degraded", "error", "cancelled"] | None = Query(
+        None
+    ),
+    search: str = Query("", max_length=200),
+):
+    """Return bounded local trace summaries for the operations UI."""
+    from mindforge.observability.store import TraceRepository
+
+    return TraceRepository().list_traces(
+        limit=limit,
+        offset=offset,
+        status=status,
+        search=search,
+    )
+
+
+@router.get(
+    "/observability/traces/{trace_id}",
+    response_model=TraceDetailResponse,
+)
+def get_observability_trace(trace_id: str):
+    """Return one local trace and its bounded observation chain."""
+    from mindforge.observability.store import TraceRepository
+
+    detail = TraceRepository().get_trace(trace_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Trace not found.")
+    return detail
+
+
+@router.delete("/observability/traces/{trace_id}", status_code=204)
+def delete_observability_trace(trace_id: str):
+    """Delete one local trace without affecting research history."""
+    from mindforge.observability.store import TraceRepository
+
+    if not TraceRepository().delete_trace(trace_id):
+        raise HTTPException(status_code=404, detail="Trace not found.")
+    return None
+
+
+@router.delete("/observability/traces")
+def clear_observability_traces():
+    """Delete all local traces without affecting research history."""
+    from mindforge.observability.store import TraceRepository
+
+    return {"deleted": TraceRepository().clear_traces()}
+
+
+# ------------------------------------------------------------------
 # History
 # ------------------------------------------------------------------
+
 
 @router.get("/history")
 def list_history(
@@ -2089,6 +2421,7 @@ def list_history(
         SessionLocal,
         get_default_user_id,
     )
+
     db = SessionLocal()
     try:
         user_id = get_default_user_id(db)
@@ -2098,8 +2431,7 @@ def list_history(
         )
         total = base_query.count()
         entries = (
-            base_query
-            .order_by(ResearchHistory.created_at.desc())
+            base_query.order_by(ResearchHistory.created_at.desc())
             .offset(offset)
             .limit(page_size)
             .all()
@@ -2115,6 +2447,7 @@ def list_history(
                     token_usage=_parse_history_token_usage(
                         getattr(e, "token_usage", None)
                     ),
+                    trace_id=getattr(e, "trace_id", None),
                     created_at=_serialize_datetime_utc(e.created_at),
                 ).model_dump()
                 for e in entries
@@ -2157,12 +2490,9 @@ def get_history_entry(history_id: int):
             report=entry.report,
             quality_score=entry.quality_score,
             model_used=entry.model_used,
-            token_usage=_parse_history_token_usage(
-                getattr(entry, "token_usage", None)
-            ),
-            sources=_parse_history_sources(
-                getattr(entry, "sources", None)
-            ),
+            token_usage=_parse_history_token_usage(getattr(entry, "token_usage", None)),
+            sources=_parse_history_sources(getattr(entry, "sources", None)),
+            trace_id=getattr(entry, "trace_id", None),
             created_at=_serialize_datetime_utc(entry.created_at),
         )
     finally:
@@ -2178,6 +2508,7 @@ def save_history(body: HistorySaveRequest):
         get_default_user_id,
     )
     import json as _json
+
     db = SessionLocal()
     try:
         user_id = get_default_user_id(db)
@@ -2189,28 +2520,28 @@ def save_history(body: HistorySaveRequest):
             model_used=body.model_used,
             token_usage=_json.dumps(body.token_usage),
             sources=_json.dumps(
-                [
-                    source.model_dump(exclude_none=True)
-                    for source in body.sources
-                ],
+                [source.model_dump(exclude_none=True) for source in body.sources],
                 ensure_ascii=False,
             ),
+            trace_id=body.trace_id,
         )
         db.add(entry)
         try:
             db.flush()
-            stale_entries = (
-                db.query(ResearchHistory)
-                .filter(ResearchHistory.user_id == user_id)
-                .order_by(
-                    ResearchHistory.created_at.desc(),
-                    ResearchHistory.id.desc(),
+            max_entries = get_settings().api.max_history_entries
+            if max_entries > 0:
+                stale_entries = (
+                    db.query(ResearchHistory)
+                    .filter(ResearchHistory.user_id == user_id)
+                    .order_by(
+                        ResearchHistory.created_at.desc(),
+                        ResearchHistory.id.desc(),
+                    )
+                    .offset(max_entries)
+                    .all()
                 )
-                .offset(get_settings().api.max_history_entries)
-                .all()
-            )
-            for stale in stale_entries:
-                db.delete(stale)
+                for stale in stale_entries:
+                    db.delete(stale)
             db.commit()
         except Exception:
             db.rollback()
@@ -2228,6 +2559,7 @@ def delete_history_entry(entry_id: int):
         ResearchHistory,
         get_default_user_id,
     )
+
     db = SessionLocal()
     try:
         entry = (
@@ -2259,6 +2591,7 @@ def clear_history():
         ResearchHistory,
         get_default_user_id,
     )
+
     db = SessionLocal()
     try:
         db.query(ResearchHistory).filter(
@@ -2277,6 +2610,7 @@ def clear_history():
 def _serialize_event(event: dict) -> dict:
     """Convert dataclass values in an event dict to plain dicts for JSON serialization."""
     import dataclasses as _dc
+
     serialized: dict[str, Any] = {}
     for key, val in event.items():
         if _dc.is_dataclass(val) and not isinstance(val, type):
@@ -2293,66 +2627,159 @@ async def _stream_response(
     orch: Orchestrator | None,
     task: str,
 ) -> AsyncGenerator[bytes, None]:
-    """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
-    use_retrieval_fallback = orch is None
-    if orch is not None:
-        try:
-            async for event in orch.stream_run(task):
-                if event.get("type") == "done":
-                    result = event.get("result")
-                    success = (
-                        result.success
-                        if isinstance(result, AgentResult)
-                        else (
-                            result.get("success")
-                            if isinstance(result, dict)
-                            else None
-                        )
-                    )
-                    if success is False:
-                        output = (
-                            result.output
-                            if isinstance(result, AgentResult)
-                            else str(result.get("output", ""))
-                        )
-                        raise RuntimeError(
-                            output
-                            or "Agent pipeline returned an unsuccessful result."
-                        )
-                try:
-                    payload = json.dumps(
-                        _serialize_event(event),
-                        ensure_ascii=False,
-                    )
-                except TypeError:
-                    payload = json.dumps(
-                        {
-                            "event": "info",
-                            "content": str(event)[:200],
-                        },
-                        ensure_ascii=False,
-                    )
-                yield f"data: {payload}\n\n".encode()
-        except Exception as exc:
-            logger.warning(
-                "Agent SSE stream failed: %s; using retrieval fallback.",
-                exc,
-            )
-            use_retrieval_fallback = True
+    """Stream SSE bytes while one producer task owns the trace context."""
+    chunk_queue: asyncio.Queue[bytes | object] = asyncio.Queue()
+    stream_finished = object()
 
-    if use_retrieval_fallback:
-        from mindforge.tools.rag_tool import RAGTool
+    async def pump_chunks() -> None:
         try:
-            rag = RAGTool()
-            result = await rag.execute_async(
-                query=task,
-                mode="hybrid",
-                top_k=5,
-            )
-            if result.success:
-                fallback = {
-                    "type": "done",
-                    "result": {
+            async for chunk in _stream_response_events(orch, task):
+                chunk_queue.put_nowait(chunk)
+        finally:
+            chunk_queue.put_nowait(stream_finished)
+
+    producer_task = asyncio.create_task(pump_chunks())
+    await asyncio.sleep(0)
+    try:
+        while True:
+            chunk = await chunk_queue.get()
+            if chunk is stream_finished:
+                await producer_task
+                return
+            if not isinstance(chunk, bytes):
+                raise RuntimeError("SSE producer returned an invalid chunk.")
+            yield chunk
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+
+
+async def _stream_response_events(
+    orch: Orchestrator | None,
+    task: str,
+) -> AsyncGenerator[bytes, None]:
+    """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
+    started = time.perf_counter()
+    completed_result: AgentResult | dict[str, Any] | None = None
+    primary_failure: AgentResult | None = None
+    primary_failure_reason: str | None = None
+    with _research_trace_context(task, transport="sse") as trace_span:
+        if trace_span is not None:
+            trace_span.input = {"task": task}
+        trace_id = trace_span.trace_id if trace_span is not None else None
+        if trace_id:
+            started_event = {
+                "type": "trace_started",
+                "trace_id": trace_id,
+            }
+            yield (
+                f"data: {json.dumps(started_event, ensure_ascii=False)}\n\n"
+            ).encode()
+
+        use_retrieval_fallback = orch is None
+        fallback_enabled = get_settings().agent.fallback_enabled
+        if orch is not None:
+            try:
+                async for event in orch.stream_run(task):
+                    if trace_id:
+                        event = {**event, "trace_id": trace_id}
+                    if event.get("type") == "done":
+                        result = event.get("result")
+                        success = (
+                            result.success
+                            if isinstance(result, AgentResult)
+                            else (
+                                result.get("success")
+                                if isinstance(result, dict)
+                                else None
+                            )
+                        )
+                        if success is False:
+                            primary_failure = (
+                                result if isinstance(result, AgentResult) else None
+                            )
+                            primary_failure_reason = (
+                                result.output
+                                if isinstance(result, AgentResult)
+                                else str(result.get("output", ""))
+                            )
+                            primary_failure_reason = (
+                                primary_failure_reason
+                                or "Agent pipeline returned an unsuccessful result."
+                            )
+                            use_retrieval_fallback = fallback_enabled
+                            if not fallback_enabled:
+                                completed_result = result
+                                yield f"data: {json.dumps(_serialize_event(event), ensure_ascii=False)}\n\n".encode()
+                            break
+                        completed_result = result
+                    elif event.get("type") == "error":
+                        primary_failure_reason = str(
+                            event.get("content") or "研究任务执行失败。"
+                        )
+                        use_retrieval_fallback = fallback_enabled
+                        if fallback_enabled:
+                            continue
+                    try:
+                        payload = json.dumps(
+                            _serialize_event(event),
+                            ensure_ascii=False,
+                        )
+                    except TypeError:
+                        payload = json.dumps(
+                            {
+                                "type": "info",
+                                "content": str(event)[:200],
+                                "trace_id": trace_id,
+                            },
+                            ensure_ascii=False,
+                        )
+                    yield f"data: {payload}\n\n".encode()
+            except Exception as exc:
+                primary_failure_reason = str(exc)
+                logger.warning(
+                    "Agent SSE stream failed: %s; using retrieval fallback.",
+                    exc,
+                )
+                use_retrieval_fallback = fallback_enabled
+
+        if use_retrieval_fallback:
+            from mindforge.tools.rag_tool import RAGTool
+
+            try:
+                rag = RAGTool()
+                result = await rag.execute_async(
+                    query=task,
+                    mode="hybrid",
+                    top_k=5,
+                )
+                result_data = result.data or {}
+                has_relevant_results = (
+                    bool(result_data.get("total"))
+                    if "total" in result_data
+                    else bool(result.output.strip())
+                )
+                if result.success and (
+                    primary_failure_reason is None or has_relevant_results
+                ):
+                    degraded = primary_failure_reason is not None
+                    token_usage = (
+                        dict(primary_failure.token_usage)
+                        if primary_failure is not None
+                        else {}
+                    )
+                    cost_usd = (
+                        primary_failure.cost_usd
+                        if primary_failure is not None
+                        else 0.0
+                    )
+                    cost_status = (
+                        primary_failure.cost_status
+                        if primary_failure is not None
+                        else "not_applicable"
+                    )
+                    completed_result = {
                         "agent_name": "orchestrator",
                         "success": True,
                         "output": result.output,
@@ -2362,41 +2789,130 @@ async def _stream_response(
                             "critic_score": None,
                             "refine_rounds": 0,
                             "fallback": True,
-                            "sources": list(
-                                (result.data or {}).get("sources", [])
+                            "primary_failure": primary_failure_reason,
+                            "retrieval_quality": float(
+                                result_data.get("retrieval_quality", 0.0)
                             ),
+                            "sources": list(result_data.get("sources", [])),
                         },
                         "metadata": {
-                            "quality": (
-                                float(result.data.get("quality", 0.0))
-                                if result.data
-                                else 0.0
+                            "quality": None,
+                            "retrieval_quality": float(
+                                result_data.get("retrieval_quality", 0.0)
                             ),
-                            "cost": 0.0,
+                            "outcome": (
+                                "degraded" if degraded else "retrieval_only"
+                            ),
+                            "failure_reason": primary_failure_reason,
+                            "cost": cost_usd,
+                            "cost_status": cost_status,
                             "subtask_count": 0,
                             "refine_rounds": 0,
                             "model": "fallback-retrieval",
+                            "trace_id": trace_id,
                         },
-                    },
-                }
-            else:
+                        "token_usage": token_usage,
+                        "cost_usd": cost_usd,
+                        "cost_status": cost_status,
+                        "trace_id": trace_id,
+                    }
+                    fallback = {
+                        "type": "done",
+                        "trace_id": trace_id,
+                        "result": completed_result,
+                    }
+                else:
+                    fallback = {
+                        "type": "error",
+                        "trace_id": trace_id,
+                        "content": (
+                            (
+                                f"{primary_failure_reason}；"
+                                if primary_failure_reason
+                                else "研究失败；"
+                            )
+                            + (
+                                "知识库中没有检索到高度相关资料。"
+                                if result.success
+                                else "知识库检索回退也未成功："
+                                f"{result.error or '未知错误'}"
+                            )
+                        ),
+                    }
+                yield (
+                    f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
+                ).encode()
+            except Exception:
+                logger.exception("Retrieval fallback failed during SSE streaming.")
                 fallback = {
                     "type": "error",
-                    "content": (
-                        "研究失败，知识库检索回退也未成功："
-                        f"{result.error or '未知错误'}"
-                    ),
+                    "trace_id": trace_id,
+                    "content": "研究服务暂时不可用，请稍后重试。",
                 }
-            yield (
-                f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
-            ).encode()
-        except Exception:
-            logger.exception("Retrieval fallback failed during SSE streaming.")
-            fallback = {
-                "type": "error",
-                "content": "研究服务暂时不可用，请稍后重试。",
-            }
-            yield (
-                f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
-            ).encode()
-    yield b"data: [DONE]\n\n"
+                yield (
+                    f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"
+                ).encode()
+
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if isinstance(completed_result, AgentResult):
+            _finish_research_trace(
+                trace_span,
+                success=completed_result.success,
+                latency_ms=elapsed_ms,
+                cost_usd=completed_result.cost_usd,
+                cost_status=completed_result.cost_status,
+                total_tokens=int(
+                    completed_result.token_usage.get("total_tokens", 0)
+                ),
+                report_chars=len(completed_result.output),
+                fallback=bool(completed_result.data.get("fallback")),
+                outcome=str(completed_result.metadata.get("outcome") or "success"),
+                failure_reason=(
+                    str(completed_result.metadata.get("failure_reason"))
+                    if completed_result.metadata.get("failure_reason")
+                    else None
+                ),
+            )
+        elif isinstance(completed_result, dict):
+            _finish_research_trace(
+                trace_span,
+                success=bool(completed_result.get("success")),
+                latency_ms=elapsed_ms,
+                cost_usd=(
+                    float(completed_result["cost_usd"])
+                    if isinstance(completed_result.get("cost_usd"), (int, float))
+                    else None
+                ),
+                cost_status=str(
+                    completed_result.get("cost_status") or "usage_unavailable"
+                ),
+                report_chars=len(str(completed_result.get("output") or "")),
+                fallback=bool(
+                    dict(completed_result.get("data") or {}).get("fallback")
+                ),
+                outcome=str(
+                    dict(completed_result.get("metadata") or {}).get("outcome")
+                    or "success"
+                ),
+                failure_reason=(
+                    str(
+                        dict(completed_result.get("metadata") or {}).get(
+                            "failure_reason"
+                        )
+                    )
+                    if dict(completed_result.get("metadata") or {}).get(
+                        "failure_reason"
+                    )
+                    else None
+                ),
+            )
+        else:
+            _finish_research_trace(
+                trace_span,
+                success=False,
+                latency_ms=elapsed_ms,
+                cost_usd=None,
+                cost_status="usage_unavailable",
+                failure_reason=primary_failure_reason,
+            )
+        yield b"data: [DONE]\n\n"

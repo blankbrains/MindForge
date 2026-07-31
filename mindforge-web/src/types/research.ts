@@ -30,7 +30,14 @@ export interface AgentResult {
     | "usage_unavailable"
     | "not_applicable";
   token_usage?: Record<string, number>;
+  trace_id?: string | null;
 }
+
+export type ResearchOutcome =
+  | "success"
+  | "degraded"
+  | "retrieval_only"
+  | "failed";
 
 export interface CitationSource {
   index: number;
@@ -54,7 +61,8 @@ export interface CriticScore {
   should_refine: boolean;
 }
 
-export type SSEEvent =
+type SSEEventPayload =
+  | { type: "trace_started" }
   | { type: "planning"; status: "start" | "done" }
   | { type: "heartbeat"; timestamp: number }
   | { type: "plan_ready"; plan: ResearchPlan }
@@ -64,5 +72,13 @@ export type SSEEvent =
   | { type: "critic_feedback"; score: CriticScore; round: number }
   | { type: "refining"; round: number }
   | { type: "answer_chunk"; content: string }
-  | { type: "error"; content: string }
+  | {
+      type: "error";
+      content: string;
+      stage?: string;
+      code?: string;
+      retryable?: boolean;
+    }
   | { type: "done"; result: AgentResult };
+
+export type SSEEvent = SSEEventPayload & { trace_id?: string | null };

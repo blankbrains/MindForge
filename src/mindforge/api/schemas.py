@@ -6,6 +6,7 @@ Defines request / response models used by all API endpoints.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # Query endpoints
 # ------------------------------------------------------------------
 
+
 class QueryRequest(BaseModel):
     """Payload for submitting a research task."""
 
@@ -26,18 +28,14 @@ class QueryRequest(BaseModel):
         max_length=20_000,
         description="Natural-language research task or question.",
     )
-    user_id: str | None = Field(None, description="Optional caller identifier.")
     stream: bool = Field(False, description="If true, use SSE streaming response.")
-    options: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Arbitrary options forwarded to the orchestrator.",
-    )
 
 
 class QueryResponse(BaseModel):
     """Result returned by the research orchestrator."""
 
     task_id: str
+    trace_id: str | None = None
     report: str | None = None
     sources: list[dict[str, Any]] = Field(default_factory=list)
     quality_score: float | None = None
@@ -45,17 +43,24 @@ class QueryResponse(BaseModel):
     cost_usd: float | None = None
     cost_status: str = "usage_unavailable"
     iterations: int = 0
+    outcome: Literal["success", "degraded", "retrieval_only"] = "success"
+    failure_reason: str | None = None
+    retrieval_quality: float | None = None
 
 
 # ------------------------------------------------------------------
 # Index endpoints
 # ------------------------------------------------------------------
 
+
 class IndexRequest(BaseModel):
     """Payload for ingesting a document into the knowledge base."""
 
-    file_url: str | None = Field(None, description="Public URL of the document.")
-    file_path: str | None = Field(None, description="Local filesystem path.")
+    file_path: str = Field(
+        ...,
+        min_length=1,
+        description="Local filesystem path inside MINDFORGE_DATA_DIR.",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     strategy: Literal["auto", "fixed", "semantic"] = Field(
         "auto",
@@ -116,6 +121,7 @@ DocumentsListResponse = list[DocumentItem]
 # ------------------------------------------------------------------
 # Health
 # ------------------------------------------------------------------
+
 
 class DocumentContentResponse(BaseModel):
     """Full content of a document (all chunks combined)."""
@@ -294,13 +300,31 @@ class SettingsResponse(BaseModel):
     compatible_api_key: str = ""
     local_api_key: str = ""
     embedding_provider: str = "openai"
+    research_mode: Literal["fast", "balanced", "deep"] = "balanced"
+    source_policy: Literal["auto", "knowledge_base", "web"] = "auto"
+    fallback_enabled: bool = True
     retrieval_top_k: int = 20
     rerank_top_k: int = 6
+    retrieval_min_score: float = 0.60
+    keyword_min_coverage: float = 0.60
     max_iterations: int = 3
     max_refine_rounds: int = 1
     critic_threshold: float = 7.0
-    subtask_timeout: int = 30
+    subtask_timeout: int = 60
     research_timeout: int = 180
+    llm_request_timeout: int = 45
+    max_subtasks: int = 5
+    max_tool_calls_total: int = 12
+    max_history_entries: int = 0
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    observability_capture_content: bool = False
+    trace_retention_days: int = 0
+    tavily_configured: bool = False
+    reranker_configured: bool = False
+    reranker_available: bool = False
+    reranker_load_failed: bool = False
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -317,19 +341,35 @@ class SettingsUpdateRequest(BaseModel):
     compatible_api_key: str | None = Field(None, max_length=4096)
     local_api_key: str | None = Field(None, max_length=4096)
     embedding_provider: Literal["openai", "bge"] | None = None
+    research_mode: Literal["fast", "balanced", "deep"] | None = None
+    source_policy: Literal["auto", "knowledge_base", "web"] | None = None
+    fallback_enabled: bool | None = None
     retrieval_top_k: int | None = Field(None, ge=1, le=100)
     rerank_top_k: int | None = Field(None, ge=1, le=50)
+    retrieval_min_score: float | None = Field(None, ge=0.0, le=1.0)
+    keyword_min_coverage: float | None = Field(None, ge=0.0, le=1.0)
     max_iterations: int | None = Field(None, ge=1, le=20)
     max_refine_rounds: int | None = Field(None, ge=0, le=5)
     critic_threshold: float | None = Field(None, ge=0.0, le=10.0)
     subtask_timeout: int | None = Field(None, ge=10, le=600)
     research_timeout: int | None = Field(None, ge=30, le=3600)
+    llm_request_timeout: int | None = Field(None, ge=5, le=600)
+    max_subtasks: int | None = Field(None, ge=1, le=20)
+    max_tool_calls_total: int | None = Field(None, ge=1, le=100)
+    max_history_entries: int | None = Field(None, ge=0, le=100_000)
+    langfuse_public_key: str | None = Field(None, max_length=4096)
+    langfuse_secret_key: str | None = Field(None, max_length=4096)
+    langfuse_host: str | None = Field(None, max_length=2048)
+    observability_capture_content: bool | None = None
+    trace_retention_days: int | None = Field(None, ge=0, le=3650)
 
     @field_validator(
         "deepseek_api_key",
         "openai_api_key",
         "compatible_api_key",
         "local_api_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
     )
     @classmethod
     def reject_api_key_control_characters(
@@ -341,6 +381,11 @@ class SettingsUpdateRequest(BaseModel):
         if any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError("API keys must not contain control characters.")
         return value
+
+    @field_validator("langfuse_host")
+    @classmethod
+    def validate_langfuse_host(cls, value: str | None) -> str | None:
+        return _normalize_http_base_url(value, allow_empty=False)
 
     @model_validator(mode="after")
     def validate_provider_updates(self) -> SettingsUpdateRequest:
@@ -385,14 +430,8 @@ class HistoryItem(BaseModel):
     model_used: str | None = None
     token_usage: dict[str, Any] = Field(default_factory=dict)
     sources: list[HistoryCitationSource] = Field(default_factory=list)
+    trace_id: str | None = None
     created_at: str | None = None
-
-
-class HistoryListResponse(BaseModel):
-    """Paginated history list."""
-
-    entries: list[HistoryItem] = Field(default_factory=list)
-    total: int = 0
 
 
 class HistorySaveRequest(BaseModel):
@@ -407,6 +446,17 @@ class HistorySaveRequest(BaseModel):
         default_factory=list,
         max_length=200,
     )
+    trace_id: str | None = Field(default=None, max_length=32)
+
+    @field_validator("trace_id")
+    @classmethod
+    def validate_trace_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{32}", normalized):
+            raise ValueError("trace_id must be 32 lowercase hexadecimal characters.")
+        return normalized
 
     @model_validator(mode="after")
     def enforce_json_field_sizes(self) -> HistorySaveRequest:
@@ -418,10 +468,7 @@ class HistorySaveRequest(BaseModel):
         if len(encoded_usage) > 100_000:
             raise ValueError("token_usage exceeds 100000 bytes.")
         encoded_sources = json.dumps(
-            [
-                source.model_dump(exclude_none=True)
-                for source in self.sources
-            ],
+            [source.model_dump(exclude_none=True) for source in self.sources],
             ensure_ascii=False,
         ).encode("utf-8")
         if len(encoded_sources) > 200_000:
@@ -437,3 +484,98 @@ class HealthResponse(BaseModel):
     qdrant_connected: bool = False
     redis_connected: bool = False
     postgres_connected: bool = False
+
+
+# ------------------------------------------------------------------
+# Observability
+# ------------------------------------------------------------------
+
+
+class ObservabilityStatusResponse(BaseModel):
+    """Public observability state without backend credentials."""
+
+    enabled: bool
+    local_storage: bool
+    remote_configured: bool
+    langfuse_host: str | None = None
+    capture_content: bool
+    retention_days: int
+
+
+class TraceSummary(BaseModel):
+    """Bounded summary of one local research trace."""
+
+    trace_id: str
+    name: str
+    start_time: float
+    end_time: float | None = None
+    duration_ms: float = 0.0
+    status: Literal["success", "degraded", "error", "cancelled"]
+    display_name: str | None = None
+    error: str | None = None
+    failure_summary: str | None = None
+    failure_count: int = 0
+    task_preview: str | None = None
+    input: Any = None
+    output: Any = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    span_count: int = 0
+    generation_count: int = 0
+    tool_count: int = 0
+    error_count: int = 0
+    total_tokens: int = 0
+    cost_usd: float | None = None
+    cost_status: str = "usage_unavailable"
+    remote_url: str | None = None
+
+
+class TraceListResponse(BaseModel):
+    """Paginated local trace summaries."""
+
+    traces: list[TraceSummary] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+    truncated: bool = False
+
+
+class TraceObservation(BaseModel):
+    """One local observation in a trace."""
+
+    span_id: str
+    trace_id: str
+    name: str
+    start_time: float
+    end_time: float | None = None
+    duration_ms: float = 0.0
+    parent_id: str | None = None
+    error: str | None = None
+    input: Any = None
+    output: Any = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    payloads_omitted: str | None = None
+
+
+class TraceFailure(BaseModel):
+    """Structured failure derived from one failed trace observation."""
+
+    span_id: str
+    parent_id: str | None = None
+    observation_name: str
+    stage: str
+    error_code: str
+    error_type: str
+    message: str
+    status: str
+    agent: str | None = None
+    model: str | None = None
+    attempt: int | None = None
+
+
+class TraceDetailResponse(BaseModel):
+    """One trace summary and its bounded observation chain."""
+
+    summary: TraceSummary
+    observations: list[TraceObservation] = Field(default_factory=list)
+    failures: list[TraceFailure] = Field(default_factory=list)
+    observations_truncated: bool = False

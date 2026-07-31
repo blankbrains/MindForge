@@ -2,8 +2,10 @@
 
 DeepSeek 的 chat API 与 OpenAI 完全兼容，但价格约为 OpenAI 的 1/10。
 DeepSeek 不提供原生 Embedding API，因此使用本地 sentence-transformers 模型
-（默认 BAAI/bge-m3，1024 维，由 LLM_LOCAL_EMBEDDING_MODEL / LLM_LOCAL_EMBEDDING_DIM 配置）。
+（默认 BAAI/bge-m3，由 LLM_LOCAL_EMBEDDING_MODEL 配置，向量维度统一使用
+VECTOR_EMBEDDING_DIM）。
 """
+
 from __future__ import annotations
 from typing import List, Optional, AsyncIterator, Union
 import asyncio
@@ -22,6 +24,7 @@ from mindforge.models.base import (
 
 # 延迟加载 embedding 模型（单例，线程安全）
 import threading as _threading
+
 _EMBEDDER = None
 _EMBEDDER_LOCK = _threading.Lock()
 
@@ -33,6 +36,7 @@ def _get_embedder():
             if _EMBEDDER is None:  # double-check
                 from mindforge.config import get_settings
                 from sentence_transformers import SentenceTransformer
+
                 settings = get_settings().llm
                 model_name = settings.local_embedding_model or "BAAI/bge-m3"
                 _EMBEDDER = SentenceTransformer(
@@ -55,8 +59,14 @@ class DeepSeekAdapter(BaseLLM):
     - 价格约为 OpenAI 的 1/10
     """
 
-    def __init__(self, model: str = "deepseek-chat", api_key: Optional[str] = None,
-                 base_url: str = DEEPSEEK_BASE_URL, max_retries: int = 3, **kwargs):
+    def __init__(
+        self,
+        model: str = "deepseek-chat",
+        api_key: Optional[str] = None,
+        base_url: str = DEEPSEEK_BASE_URL,
+        max_retries: int = 0,
+        **kwargs,
+    ):
         normalized_model = model.strip()
         if not normalized_model:
             raise LLMConfigurationError("DeepSeek model is not configured.")
@@ -79,9 +89,14 @@ class DeepSeekAdapter(BaseLLM):
     # ------------------------------------------------------------------
     # chat
     # ------------------------------------------------------------------
-    async def chat(self, messages: List[ChatMessage], tools: Optional[List[dict]] = None,
-                   response_format: Optional[dict] = None, temperature: float = 0.7,
-                   stream: bool = False) -> Union[ChatResult, AsyncIterator[StreamEvent]]:
+    async def chat(
+        self,
+        messages: List[ChatMessage],
+        tools: Optional[List[dict]] = None,
+        response_format: Optional[dict] = None,
+        temperature: float = 0.7,
+        stream: bool = False,
+    ) -> Union[ChatResult, AsyncIterator[StreamEvent]]:
         body = dict(
             model=self.model,
             messages=[self._to_openai_msg(m) for m in messages],
@@ -108,7 +123,10 @@ class DeepSeekAdapter(BaseLLM):
                 {
                     "id": tc.id,
                     "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
                 }
                 for tc in msg.tool_calls
             ]
@@ -130,9 +148,7 @@ class DeepSeekAdapter(BaseLLM):
         tool_acc: dict[int, dict] = {}
         usage: dict[str, int] = {}
         async for chunk in stream:
-            chunk_usage = normalize_token_usage(
-                getattr(chunk, "usage", None)
-            )
+            chunk_usage = normalize_token_usage(getattr(chunk, "usage", None))
             if chunk_usage:
                 usage = chunk_usage
             if not chunk.choices:
@@ -143,10 +159,14 @@ class DeepSeekAdapter(BaseLLM):
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index if tc.index is not None else 0
-                    slot = tool_acc.setdefault(idx, {
-                        "id": None, "type": "function",
-                        "function": {"name": None, "arguments": ""},
-                    })
+                    slot = tool_acc.setdefault(
+                        idx,
+                        {
+                            "id": None,
+                            "type": "function",
+                            "function": {"name": None, "arguments": ""},
+                        },
+                    )
                     if tc.id:
                         slot["id"] = tc.id
                     if tc.function:

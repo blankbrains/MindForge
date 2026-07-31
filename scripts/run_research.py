@@ -1,110 +1,62 @@
 #!/usr/bin/env python3
-"""MindForge 研究任务执行脚本"""
+"""Run one MindForge research task from the command line."""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
-def safe_terminal_text(value: object, limit: int) -> str:
-    return re.sub(
-        r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]",
-        "",
-        str(value),
-    )[:limit]
-
-
-async def main():
-    sys.stdout.reconfigure(encoding='utf-8')
-    print("=" * 60)
-    print("MindForge — 自适应研究助理系统")
-    print("=" * 60)
-
-    # Step 1: Check configuration
-    print("\n[1/4] 检查配置...")
-    from mindforge.config import get_settings, resolve_project_path
-    settings = get_settings()
-    print(f"   模型提供商: {settings.llm.llm_provider}")
-    from mindforge.models.base import is_llm_configured
-
-    print(f"   LLM 配置就绪: {is_llm_configured()}")
-
-    # Step 2: Prepare knowledge base document
-    print("\n[2/4] 准备知识库文档...")
-    doc_dir = resolve_project_path(Path(settings.app.data_dir) / "docs")
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    doc_path = doc_dir / "transformer_intro.md"
-    doc_path.write_text("""# Transformer 架构简介
-
-## 自注意力机制
-自注意力机制（Self-Attention）是 Transformer 的核心创新。
-它允许模型在处理序列时，直接捕捉任意两个位置之间的关系。
-计算公式：Attention(Q, K, V) = softmax(QK^T / d_k) V
-
-## 多头注意力
-多头注意力（Multi-Head Attention）通过并行计算多组注意力，
-让模型从不同表示子空间学习信息。
-
-## 位置编码
-由于自注意力本身没有位置感知能力，
-Transformer 使用正弦位置编码来注入位置信息。
-
-## 前馈网络
-每个 Transformer 层包含一个前馈神经网络（FFN），
-对每个位置的表示进行非线性变换。
-""", encoding="utf-8")
-    print(f"   文档已创建: {doc_path.name}")
-
-    from mindforge.ingestion.parsers import DocumentParser
-    from mindforge.ingestion.chunker import TextSplitter
-    parser = DocumentParser()
-    doc = parser.parse(str(doc_path))
-    splitter = TextSplitter()
-    chunks = splitter.split(doc.doc_id, doc.content)
-    print(f"   解析完成: {len(doc.content)} 字符, {len(chunks)} 个块")
-
-    # Step 3: Test DeepSeek API
-    print("\n[3/4] 测试 LLM API...")
-    try:
-        from mindforge.models.base import ChatMessage, LLMFactory
-
-        provider = settings.llm.llm_provider
-        llm = LLMFactory.create(
-            provider,
-            settings.llm.get_model("researcher", provider),
-        )
-
-        result = await llm.chat([
-            ChatMessage(role="system", content="你是一个AI专家，用中文简洁回答。"),
-            ChatMessage(role="user", content="请用一句话解释Transformer中的自注意力机制是什么？"),
-        ], temperature=0.3)
-
-        print(f"   [{settings.llm.llm_provider} Response]")
-        print(f"   {safe_terminal_text(result.content, 200)}")
-        print(f"   Token用量: {result.usage.get('total_tokens', 'N/A')}")
-        print("   API 调用成功!")
-
-    except Exception as e:
-        print(f"   API 调用失败: {e}")
-        print("   请检查 API Key 配置")
-
-    # Step 4: Start API server info
-    print("\n[4/4] 服务就绪")
-    print()
-    api_url = f"http://127.0.0.1:{settings.api.port}"
-    print(
-        "   API 服务: uvicorn mindforge.api.server:app "
-        f"--reload --host {settings.api.host} --port {settings.api.port}"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Execute a research task through the MindForge pipeline.",
     )
-    print(f"   API 文档: {api_url}/docs")
-    print(f"   健康检查: {api_url}/api/v1/health")
-    print()
-    print("=" * 60)
-    print("系统就绪!")
-    print("=" * 60)
+    parser.add_argument(
+        "task",
+        nargs="+",
+        help="Research question or task.",
+    )
+    return parser.parse_args()
+
+
+async def run(task: str) -> int:
+    from mindforge.api.routes import get_orchestrator
+    from mindforge.models.base import has_llm_credentials
+
+    if not has_llm_credentials():
+        print(
+            "No usable LLM provider is configured. Update .env or the "
+            "application settings first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    orchestrator = await asyncio.to_thread(get_orchestrator)
+    result = await orchestrator.run(task)
+    if result.output:
+        print(result.output)
+    if not result.success:
+        return 1
+
+    sources = result.data.get("sources", [])
+    print(
+        "\n"
+        f"Sources: {len(sources) if isinstance(sources, list) else 0} | "
+        f"Cost status: {result.cost_status} | "
+        f"Cost: {result.cost_usd if result.cost_usd is not None else 'N/A'}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def main() -> int:
+    args = parse_args()
+    return asyncio.run(run(" ".join(args.task).strip()))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

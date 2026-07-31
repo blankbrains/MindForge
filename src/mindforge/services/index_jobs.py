@@ -200,10 +200,7 @@ class IndexJobService:
                 progress = max(parser_progress, start + (end - start) * ratio)
                 progress_bucket = int(progress)
                 progress_key = (stage, progress_bucket)
-                if (
-                    progress_key == reported_parser_progress
-                    and completed < total
-                ):
+                if progress_key == reported_parser_progress and completed < total:
                     return
                 parser_progress = progress
                 reported_parser_progress = progress_key
@@ -222,9 +219,7 @@ class IndexJobService:
                         "total_pages": total,
                         "elapsed_seconds": round(elapsed, 3),
                         "eta_seconds": (
-                            round(eta_seconds, 3)
-                            if eta_seconds is not None
-                            else None
+                            round(eta_seconds, 3) if eta_seconds is not None else None
                         ),
                     }
                     await asyncio.to_thread(
@@ -244,9 +239,7 @@ class IndexJobService:
             parser = DocumentParser()
             parser.set_progress_callback(report_parser_progress)
             parser.set_cancellation_callback(
-                lambda: bool(
-                    (get_index_job(job_id) or {}).get("cancel_requested")
-                )
+                lambda: bool((get_index_job(job_id) or {}).get("cancel_requested"))
             )
             parsed = await asyncio.to_thread(parser.parse, path)
             timings["parsing"] = time.perf_counter() - stage_started
@@ -257,9 +250,7 @@ class IndexJobService:
                 "table_count": int(parse_metadata.get("table_count") or 0),
                 "image_count": int(parse_metadata.get("image_count") or 0),
                 "visual_only": bool(parse_metadata.get("visual_only")),
-                "page_metrics": list(
-                    parse_metadata.get("page_metrics") or []
-                ),
+                "page_metrics": list(parse_metadata.get("page_metrics") or []),
             }
             await self._check_cancelled(job_id)
             index_signature = build_index_signature(
@@ -379,9 +370,7 @@ class IndexJobService:
     async def _check_cancelled(self, job_id: str) -> None:
         job = await self.get(job_id)
         if job is not None and job["cancel_requested"]:
-            raise IndexingCancelledError(
-                f"Index job {job_id} was cancelled."
-            )
+            raise IndexingCancelledError(f"Index job {job_id} was cancelled.")
 
     async def _finish_cancelled(
         self,
@@ -403,8 +392,7 @@ class IndexJobService:
     @staticmethod
     def _remove_job_file(path: Path) -> None:
         job_root = (
-            resolve_project_path(get_settings().app.data_dir)
-            / "index-jobs"
+            resolve_project_path(get_settings().app.data_dir) / "index-jobs"
         ).resolve()
         try:
             path.relative_to(job_root)
@@ -433,8 +421,3 @@ def get_index_job_service() -> IndexJobService:
     if _service is None:
         _service = IndexJobService()
     return _service
-
-
-def reset_index_job_service() -> None:
-    global _service
-    _service = None

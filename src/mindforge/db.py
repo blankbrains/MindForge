@@ -60,13 +60,6 @@ _engine = create_engine(
 )
 
 SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
-
-
-def get_db() -> Session:
-    """Return a new DB session. Caller must close it."""
-    return SessionLocal()
-
-
 # ---------------------------------------------------------------------------
 # Encrypted API key helpers. New values use Fernet; legacy XOR values remain
 # readable only for migration compatibility.
@@ -80,9 +73,7 @@ def _persist_generated_secret(secret: str) -> bool:
     """Persist a generated APP_SECRET to the project env file when possible."""
     env_override = os.getenv("MINDFORGE_ENV_FILE")
     env_path = (
-        Path(env_override).expanduser()
-        if env_override
-        else get_project_root() / ".env"
+        Path(env_override).expanduser() if env_override else get_project_root() / ".env"
     )
     try:
         from dotenv import set_key
@@ -106,6 +97,7 @@ def _get_secret() -> bytes:
         persisted = _persist_generated_secret(secret)
         if not _SECRET_WARNED:
             import logging
+
             logging.getLogger(__name__).warning(
                 "APP_SECRET was not set; generated %s secret.",
                 "and persisted a" if persisted else "an in-process",
@@ -148,6 +140,7 @@ def decrypt_api_key(encrypted: str) -> str:
 # Base model
 # ---------------------------------------------------------------------------
 
+
 class Base(DeclarativeBase):
     pass
 
@@ -155,6 +148,7 @@ class Base(DeclarativeBase):
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
 
 class User(Base):
     __tablename__ = "users"
@@ -186,11 +180,15 @@ class User(Base):
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
-    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_api_keys_user_provider"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_api_keys_user_provider"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # openai, deepseek
+    provider: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # openai, deepseek
     key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     base_url: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -218,6 +216,11 @@ class ResearchHistory(Base):
     model_used: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     token_usage: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
     sources: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    trace_id: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -279,9 +282,7 @@ class IndexJob(Base):
     """Persistent state for asynchronous document indexing."""
 
     __tablename__ = "index_jobs"
-    __table_args__ = (
-        Index("ix_index_jobs_status_created", "status", "created_at"),
-    )
+    __table_args__ = (Index("ix_index_jobs_status_created", "status", "created_at"),)
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     doc_id: Mapped[Optional[str]] = mapped_column(
@@ -401,6 +402,7 @@ class DocumentAsset(Base):
 # ---------------------------------------------------------------------------
 # Init
 # ---------------------------------------------------------------------------
+
 
 def _alembic_config():
     from alembic.config import Config

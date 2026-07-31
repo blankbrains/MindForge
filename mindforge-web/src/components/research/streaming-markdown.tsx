@@ -192,6 +192,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
             </div>
           ),
           a: ({ children, href, node: _node, ...props }) => {
+            void _node;
             const externalUrl = safeHttpUrl(href);
             return (
               <a

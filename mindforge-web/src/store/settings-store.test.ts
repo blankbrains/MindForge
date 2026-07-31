@@ -132,18 +132,21 @@ describe("settings store", () => {
     };
     useSettingsStore.setState({
       llmProvider: "openai",
-      llmConfigured: true,
       hasLLMKey: true,
       providerConfigs,
       savedProviderConfigs: structuredClone(providerConfigs),
       dirtyProviders: [],
+      embeddingProvider: "bge",
       retrievalTopK: 20,
       rerankTopK: 6,
+      retrievalMinScore: 0.6,
+      keywordMinCoverage: 0.6,
       maxIterations: 3,
       maxRefineRounds: 1,
       criticThreshold: 7,
-      subtaskTimeout: 30,
+      subtaskTimeout: 60,
       researchTimeout: 180,
+      llmRequestTimeout: 45,
       loaded: true,
       loadError: null,
       saveError: null,
@@ -164,7 +167,8 @@ describe("settings store", () => {
       unknown
     >;
     expect(payload.llm_provider).toBe("openai");
-    expect(payload).not.toHaveProperty("embedding_provider");
+    expect(payload.embedding_provider).toBe("bge");
+    expect(useSettingsStore.getState().embeddingProvider).toBe("bge");
   });
 
   it("does not report success when the saved settings cannot be reloaded", async () => {
@@ -253,7 +257,6 @@ describe("settings store", () => {
 
     const state = useSettingsStore.getState();
     expect(state.llmProvider).toBe("local");
-    expect(state.llmConfigured).toBe(true);
     expect(state.hasLLMKey).toBe(true);
     expect(state.providerConfigs.local.apiKey).toBe("");
   });
@@ -301,5 +304,21 @@ describe("settings store", () => {
     expect(state.dirtyProviders).toContain("local");
     expect(state.retrievalTopK).toBe(20);
     expect(state.maxIterations).toBe(3);
+    expect(state.subtaskTimeout).toBe(60);
+  });
+
+  it("rejects contradictory timeout budgets", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    useSettingsStore.setState({
+      llmRequestTimeout: 90,
+      subtaskTimeout: 60,
+      researchTimeout: 180,
+    });
+
+    expect(await useSettingsStore.getState().saveSettings()).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(useSettingsStore.getState().saveError).toContain(
+      "单次模型调用超时不能大于子任务超时",
+    );
   });
 });

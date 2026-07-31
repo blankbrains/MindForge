@@ -30,14 +30,14 @@ MindForge 的分层架构可以分为五个层次，从下到上依次是：
 | **模型与检索层** | LLM适配器、Embedding、检索管线 | 模型调用抽象、多策略检索 |
 | **Agent 层** | BaseAgent、Orchestrator、4个Agent | 任务规划、执行、综合、评估 |
 | **API 层** | FastAPI 路由、SSE 流式、Pydantic | REST + 流式接口 |
-| **前端层** | React 19 SPA、5个页面 | 用户交互与可视化 |
+| **前端层** | React 19 SPA、6个页面 | 用户交互与可视化 |
 
 ### 2.2 架构设计原则
 
 1. **关注点分离**：每个 Agent 只负责一个职责（规划/检索/综合/评估），Agent 之间通过约定的 Schema 通信，不传递自由格式文本。
 2. **可扩展性**：新增 Agent 只需继承 BaseAgent 并实现 `run()` 方法，通过 `__init_subclass__` 自动注册到工厂，无需修改 Orchestrator 代码。
 3. **容错性**：每个环节都有超时、重试、降级策略。子任务失败不会导致整个任务崩溃，不完整的结果也会被保留。
-4. **可观测性**：Agent 的每步执行（Thought/Action/Observation）都被记录，通过 LangFuse 和本地 JSONL 双重追踪。
+4. **可观测性**：每次研究建立一个以问题为显示标题的顶层 Trace，Planner、Researcher、Synthesizer、Critic、LLM 和工具调用按父子关系挂载；本地 JSONL 与 Langfuse 3 双重追踪，内容默认脱敏，远程追踪失败不影响主流程。
 
 ---
 
@@ -299,7 +299,11 @@ Agent 检索内部知识库的主要工具。内部调用混合检索管线（�
 
 #### 3.4.2 WebSearch（web_search.py）
 
-允许 Agent 搜索互联网获取实时信息。配置 `TAVILY_API_KEY` 时优先使用 `tavily-python`，未配置或 Tavily 请求失败时回退到 DuckDuckGo HTML。运行时会校验结果数、搜索深度和域名列表，并使用结构化 HTML 解析处理 DuckDuckGo 重定向链接。
+允许 Agent 搜索互联网获取实时信息。联网搜索是显式可选能力：只有配置
+`TAVILY_API_KEY` 后才会把 `WebSearchTool` 注册给 Agent，避免默认把研究查询发送给
+第三方。启用后优先使用 `tavily-python`，Tavily 请求失败时回退到 DuckDuckGo
+HTML。运行时会校验结果数、搜索深度和域名列表，并使用结构化 HTML 解析处理
+DuckDuckGo 重定向链接。
 
 #### 3.4.3 CodeExecutor（code_executor.py）
 
@@ -385,36 +389,43 @@ usage 缺失、本地模型和部分估算，未知情况不会显示成零费�
 
 #### 3.7.1 工作记忆（working.py）
 
-存储**当前会话**的上下文——用户查询、Agent 的 Thought/Action/Observation 历史、中间结果。存在于 LLM 的上下文窗口中，会话结束后清除。不需要额外持久化。
+存储**当前研究任务**的上下文——相关语义记忆、Planner 推理、中间子任务结果和来源片段。容量超限时按重要性与新鲜度淘汰，会话结束后释放。
 
 #### 3.7.2 情节记忆（episodic.py）
 
-存储**过去任务的关键事件**——用户提过什么问题、Agent 用了什么策略、结果如何、用户是否满意。每次研究任务结束后，关键信息被向量化后存入 Qdrant。
-
-下次相似查询到来时，Agent 可以检索历史情节（"上次类似这种情况，我们用了爬取策略，用户反馈不错"），复用成功经验、避免重复犯错。
+保存完整成功结果及来源、质量、费用、Token 和模型元数据。只有完全相同且未过期的任务可以直接命中缓存；缓存命中会保留原生成用量供内部追溯，但本次请求的 Token 清零并标记为不产生新的 API 费用。Redis 不可用时使用进程内缓存，不会用模糊匹配替代新的研究任务。
 
 #### 3.7.3 语义记忆（semantic.py）
 
-存储**总结性知识**——从多次交互中提炼出的领域规则、常用策略、最佳实践。不同于情节记忆的"我记得那次…"，语义记忆是"我知道通常应该…"。
-
-语义记忆的内容由 LLM 定期从情节记忆中归纳生成，存入 PostgreSQL（结构化查询）+ Qdrant（语义检索）。
+持久化成功研究结果及其来源和置信度。新任务开始时按关键词、置信度和新鲜度检索相关记录，并加入工作记忆供 Researcher 使用。当前实现使用受容量、保留时间和文件大小限制的本地 JSON 存储。
 
 ---
 
 ### 3.8 可观测性（observability/）
 
-#### 3.8.1 LangFuse 集成
+#### 3.8.1 Langfuse 3 集成
 
-LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
+Langfuse 是开源的 LLM 可观测性平台。SDK 是正式运行时依赖，只有公钥、私钥和 Host 同时配置时才启用远程追踪。MindForge 将其用于跟踪：
+- 每次研究一个合法的 32 位 Trace ID，REST、SSE、最终结果和历史记录保持一致。
 - 每个 LLM 请求的输入、输出、延迟、Token 数、模型名。
 - 每个 Agent 步骤的执行链路（哪个 Agent -> 调用了什么工具 -> 结果如何）。
 - Token 消耗分布（按 Agent、按工具分类）。
 
+Langfuse 可直接在服务端 `.env` 配置，也可通过“系统配置 → 可观测”页面保存。
+页面保存最终写入同一个 `.env`，重新读取时公钥和私钥只返回掩码。
+
 #### 3.8.2 本地 JSONL 追踪
 
-除了 LangFuse，MindForge 还将 Agent 执行日志写入本地 JSONL 文件。JSONL 格式（每行一个 JSON 对象）适合流式追加和逐行解析。
+除了 Langfuse，MindForge 还将 Agent 执行日志写入本地 JSONL 文件，并为完成的
+根 Trace 写入小型摘要文件。只读 Repository 负责有界扫描、Trace ID 校验和详情
+读取，API 与前端不直接依赖 Langfuse SDK。
 
-两者互为备份：LangFuse 提供在线分析和可视化能力，本地 JSONL 提供完全的离线可访问性和数据所有权。
+两者互为补充：Langfuse 提供在线分析和可视化能力，本地文件为应用内“可观测”
+页面和离线审计提供数据。内容默认不写入，仅记录类型、大小和受控元数据；前端
+接口不返回 Langfuse 凭证、服务端目录或未脱敏内容。Trace 默认永久保留，支持
+删除单条或清空本地 Trace。失败节点记录阶段、错误码、异常类型、Agent、模型、
+尝试次数和超时值；详情页展示完整因果链，顶部汇总主因，不把上层超时导致的
+LLM 取消误报成独立根因。
 
 ---
 
@@ -429,15 +440,15 @@ LangFuse 是开源的 LLM 可观测性平台。MindForge 将其用于跟踪：
 | LLMConfig | `LLM_` | 供应商、API Key、模型参数 |
 | VectorStoreConfig | `VECTOR_` | Qdrant 连接、Collection 参数 |
 | RetrievalConfig | `RETRIEVAL_` | Top-K、RRF 参数、策略选择 |
-| ChunkingConfig | `CHUNK_` | Chunk 大小、重叠和语义分块 |
+| ChunkingConfig | `CHUNK_` | Chunk 大小和重叠；具体分块策略由索引请求选择 |
 | ParserConfig | `PARSER_` | OCR、表格、资产、解析版本与边界 |
 | VisualRetrievalConfig | `VISUAL_` | 默认关闭的视觉描述检索 |
 | RAPTORConfig | `RAPTOR_` | 层级、摘要模型、节点上限和摘要并发 |
 | GraphRAGConfig | `GRAPH_` | 图谱开关、模型、取样预算、存储、实体和社区上限 |
 | AgentConfig | `AGENT_` | 迭代、请求/子任务/工具并发、排队、心跳和超时 |
-| CacheConfig | `CACHE_` | Redis、TTL 和 Embedding 缓存 |
-| MemoryConfig | `MEMORY_` | 记忆容量、检索参数 |
-| ObservabilityConfig | `OBSERVABILITY_` | LangFuse、本地追踪和保留策略 |
+| CacheConfig | `CACHE_` | Redis 连接 |
+| MemoryConfig | `MEMORY_` | 工作、情节和语义记忆容量与保留时间 |
+| ObservabilityConfig | `OBSERVABILITY_` | Langfuse、本地追踪、脱敏和保留策略 |
 | SandboxConfig | `SANDBOX_` | 代码长度、输出、内存和模块白名单 |
 | QAGenerationConfig | `QA_` | QA 数据生成模型、批量和重试 |
 
@@ -453,7 +464,7 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 
 #### 3.10.1 REST 路由（routes.py）
 
-所有路由挂载在 `/api/v1` 前缀下，当前共 22 个路由方法：
+所有路由挂载在 `/api/v1` 前缀下，当前共 26 个路由方法：
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
@@ -474,12 +485,16 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 | `/history` | GET/POST/DELETE | 历史分页、保存和清空 |
 | `/history/{history_id}` | GET | 按需获取完整报告 |
 | `/history/{entry_id}` | DELETE | 删除单条历史 |
+| `/observability/status` | GET | 返回脱敏后的本地/远程追踪状态 |
+| `/observability/traces` | GET | 分页、搜索和筛选本地 Trace 摘要 |
+| `/observability/traces/{trace_id}` | GET | 获取单个 Trace 的有界观察链 |
 
 #### 3.10.2 SSE 流式端点
 
 研究任务的提交使用 SSE（Server-Sent Events）实现流式推送。前端 POST 研究请求后，后端返回 `StreamingResponse`，通过 SSE 事件序列逐步推送 Agent 的执行进度：
 
 ```
+trace_started    →  { type, trace_id }
 plan_ready       →  { type, plan: ResearchPlan }
 subtask_start    →  { type, task_id, description }
 subtask_result   →  { type, task_id, result: AgentResult }
@@ -490,6 +505,9 @@ refining         →  { type, round }
 done             →  { type, result: AgentResult }
 [DONE]           →  终止标记
 ```
+
+`trace_id` 同时附加到后续 SSE 事件和最终 `AgentResult`。同步 `/query` 响应也返回
+同一字段，前端保存历史时将其写入 `research_history.trace_id`。
 
 **⚠️ 曾踩过的坑**：早期版本中 `[DONE]` 终止帧比 `done` 事件先到达时，前端在没有 `finalResult` 的情况下将状态置为已完成的"白屏"问题。修复：在 `onComplete` 回调中加守卫，确认 `finalResult` 存在后再更新状态。
 
@@ -562,12 +580,30 @@ done             →  { type, result: AgentResult }
 自动保存成功完成的研究任务：
 - 任务列表（问题摘要、时间、执行时间、是否成功）。
 - 可展开预览（使用与研究结果相同的 Markdown、GFM、代码高亮和可点击引用渲染）。
-- 删除 / 清空管理（历史上限由 `API_MAX_HISTORY_ENTRIES` 配置，默认 1000 条）。
+- 删除 / 清空管理（`API_MAX_HISTORY_ENTRIES=0` 表示默认永久保留）。
 
-#### 4.2.5 系统配置页面
+#### 4.2.5 可观测页面
+
+独立的运维视图，不与研究报告渲染耦合：
+- 左侧按状态、Trace ID 或研究问题搜索，列表和详情以实际研究问题为标题。
+- 观察链按父子层级展示 Orchestrator、四个 Agent、LLM 和工具调用，并使用耗时
+  条显示相对执行位置。
+- 失败节点展开后直接显示原因、阶段、错误码、异常类型、Agent、模型和尝试次数；
+  顶部自动汇总主要原因，已恢复的重试显示为链路异常而不是整次研究失败。
+- 只要存在未完成子任务，顶层结果和 Trace 就标记为 `degraded`，结果页显示成功/失败
+  子任务数量及原因；该报告不会进入长期记忆缓存。
+- 具备加载、空、错误、降级、截断和移动端状态；配置 Langfuse 后可跳转到远端 Trace。
+- 支持删除当前 Trace 或清空本地 Trace，不影响研究历史与 Langfuse 远端数据。
+- 研究结果和历史详情通过 `traceId` URL 参数直接定位，前端不调用 Langfuse API。
+
+#### 4.2.6 系统配置页面
 
 允许用户动态调整配置，无需重启服务：
 - 四种 LLM Provider 切换；独立配置 Base URL、API Key、默认/角色模型与能力开关。
+- 快速、均衡、深度三种研究模式，以及知识库/联网来源策略和失败回退开关。
+- 语义相关性阈值、关键词覆盖阈值、Top-K 和 Embedding Provider。
+- 单次模型、子任务、研究总超时采用包含关系校验，避免内部超时预算互相冲突。
+- Langfuse Host/凭证、内容采集开关、Trace 与历史保留策略。
 - 按当前尚未保存的 Base URL 和凭证调用 `/settings/models`，从 Provider 的
   `/models` 返回值生成角色模型下拉框；未枚举模型保留自定义 ID 输入。
 - 向量召回 Top-K 与重排 Top-K。
@@ -600,10 +636,11 @@ Orchestrator、Retriever 或 Embedder，不再为普通检索参数修改关闭 
 2. `subtask_start`：更新对应节点状态为"执行中"（蓝色脉冲动画）。
 3. `subtask_result`：更新节点状态为"已完成"（绿色勾），追加内容。
 4. `critic_feedback`：更新雷达图显示 5 维评分。
-5. `done`：渲染最终报告，更新历史记录。
+5. `trace_started`：保存本次研究的 Trace ID。
+6. `done`：渲染最终报告，连同 Trace ID 更新历史记录。
 
 `done` 事件还携带归一化后的 `token_usage`、`cost_usd`、`cost_status` 和
-`data.sources`。历史记录保存 Token、费用状态与裁剪后的来源元数据，研究页与
+`data.sources`。历史记录保存 Token、费用状态、Trace ID 与裁剪后的来源元数据，研究页与
 历史页复用同一 Markdown 渲染器。来源 URL 在前后端都限制为 `http/https`；
 历史列表不返回来源，展开详情时再加载，避免分页响应随来源数量膨胀。
 
@@ -682,7 +719,7 @@ README 的“服务器完整操作流程”是面向使用者的主入口。
 
 GitHub Actions 自动运行：
 - **ruff check**：固定检查 Python 语法、未定义名称和致命静态错误，避免 Ruff 版本升级改变 CI 规则集。
-- **pytest + coverage**：186 项单元与回归测试。
+- **pytest + coverage**：运行完整单元与回归测试。
 - **前端门禁**：Vitest、ESLint、TypeScript 和 Vite 生产构建。
 - Qdrant + Redis + PostgreSQL 作为 Service Container。
 - Docker Compose 展开配置校验。
@@ -709,14 +746,14 @@ GitHub Actions 自动运行：
 
 ---
 
-## 七、当前可验证基线
+## 七、验证与维护
 
 | 指标 | 当前结果 | 验证方式 |
 |------|----------|----------|
 | Python 致命错误检查 | 通过 | `python -m ruff check src tests --select E9,F63,F7,F82` |
-| Python 测试 | 188 项通过 | `python -m pytest -q` |
+| Python 测试 | 全量通过 | `python -m pytest -q` |
 | 前端静态检查 | 通过 | `npm run lint` |
-| 前端回归测试 | 48 项通过 | `npm test` |
+| 前端回归测试 | 全量通过 | `npm test` |
 | 前端生产构建 | 通过 | `npm run build` |
 | 配置完整性 | 根目录 `.env` 为唯一运行时来源 | Pydantic、Vite、Compose 和脚本共用同一套键 |
 | 文档处理 | 页级解析、资产生命周期、取消与进度可追踪 | 回归测试与私有解析基准 |

@@ -86,17 +86,5 @@ class BaseTool(ABC):
                 data={"traceback": traceback.format_exc()},
             )
 
-    def get_schema_summary(self) -> dict[str, str]:
-        """Brief summary for logging / UI display."""
-        required = self.parameters_schema.get("required", [])
-        return {
-            "name": self.name,
-            "description": self.description[:120],
-            "parameters": ", ".join(
-                f"{p}: {self.parameters_schema.get('properties', {}).get(p, {}).get('type', 'any')}"
-                for p in required
-            ),
-        }
-
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r}>"

@@ -124,4 +124,31 @@ describe("history store", () => {
     ]);
     expect(body.sources[0]).not.toHaveProperty("content");
   });
+
+  it("persists the research trace id with history", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: 10 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const traceId = "b".repeat(32);
+
+    await useHistoryStore.getState().addFromResearch(
+      "research",
+      "report",
+      8,
+      "model",
+      undefined,
+      [],
+      traceId,
+    );
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(String(request.body)) as {
+      trace_id: string;
+    };
+    expect(body.trace_id).toBe(traceId);
+    expect(useHistoryStore.getState().entries[0].trace_id).toBe(traceId);
+  });
 });

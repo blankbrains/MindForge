@@ -4983,7 +4983,7 @@ class Orchestrator:
 ### 补充：JSONL 本地日志
 
 ```python
-# src/mindforge/observability/metrics.py（示意）
+# 当前运行时使用 observability/tracer.py + store.py；以下仅说明日志聚合思路
 class MetricsLogger:
     """JSONL 日志——LangFuse 的本地补充"""
 

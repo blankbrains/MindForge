@@ -10,6 +10,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class MemoryEntry:
     """A single entry in working memory."""
@@ -43,9 +44,7 @@ class WorkingMemory:
             else config.working_capacity_tokens
         )
         self._chars_per_token = (
-            chars_per_token
-            if chars_per_token is not None
-            else config.chars_per_token
+            chars_per_token if chars_per_token is not None else config.chars_per_token
         )
         self._entries: dict[str, MemoryEntry] = {}  # key -> entry (dedup key)
         self._last_cleanup: float = time.time()
@@ -184,10 +183,7 @@ class WorkingMemory:
     def _estimate_tokens(self) -> int:
         """Rough token estimate based on character length."""
         total_chars = sum(len(e.content) for e in self._entries.values())
-        return (
-            total_chars // self._chars_per_token
-            + len(self._entries) * 2
-        )
+        return total_chars // self._chars_per_token + len(self._entries) * 2
 
     def _manage_capacity(self) -> None:
         """Evict low-value entries when the token budget is exceeded.
@@ -214,9 +210,13 @@ class WorkingMemory:
         scored.sort(key=lambda x: x[0])
 
         while scored and self._estimate_tokens() > self._capacity_tokens:
-            _, key = scored.pop(0)  # remove worst
+            score, key = scored.pop(0)  # remove worst
             removed = self._entries.pop(key, None)
             if removed:
-                logger.debug("Evicted working memory entry: %s (score=%.3f)", key, scored[0][0] if scored else 0)
+                logger.debug(
+                    "Evicted working memory entry: %s (score=%.3f)",
+                    key,
+                    score,
+                )
 
         self._last_cleanup = now

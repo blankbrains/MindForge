@@ -1,4 +1,12 @@
-import { lazy, Suspense, useCallback, useRef } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useResearchSession } from "@/hooks/use-research-session";
 import { useResearchStore } from "@/store/research-store";
 import { useSettingsStore } from "@/store/settings-store";
@@ -7,7 +15,17 @@ import { QueryInput } from "@/components/research/query-input";
 import { SubtaskProgressList } from "@/components/research/subtask-progress-list";
 import { EmptyState } from "@/components/shared/empty-state";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
-import { Search, Loader2, XCircle, AlertTriangle, KeyRound, FileSearch } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  Clock3,
+  FileSearch,
+  KeyRound,
+  ListChecks,
+  Loader2,
+  Search,
+  XCircle,
+} from "lucide-react";
 
 const PlanDAG = lazy(() =>
   import("@/components/research/plan-dag").then((module) => ({
@@ -36,10 +54,42 @@ export function ResearchPage() {
   const setTask = useResearchStore((s) => s.setTask);
   const hasLLMKey = useSettingsStore((s) => s.hasLLMKey);
   const lastTaskRef = useRef(task);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!session.isStreaming || !session.startedAt) return;
+    const interval = window.setInterval(() => {
+      setElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - session.startedAt!) / 1000)),
+      );
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [session.isStreaming, session.startedAt]);
+
+  const taskStats = useMemo(() => {
+    const subtasks = Object.values(session.subtasks);
+    return {
+      total: subtasks.length,
+      completed: subtasks.filter((item) => item.status === "completed").length,
+      failed: subtasks.filter((item) => item.status === "failed").length,
+    };
+  }, [session.subtasks]);
+  const phaseLabel: Record<string, string> = {
+    connecting: "正在连接",
+    starting: "正在启动",
+    planning: "正在规划",
+    researching: "正在执行子任务",
+    synthesizing: "正在合成报告",
+    reviewing: "正在质量评审",
+    refining: "正在精炼报告",
+    completed: "研究完成",
+    failed: "研究失败",
+  };
 
   const handleSubmit = useCallback(
     (t: string) => {
       lastTaskRef.current = t;
+      setElapsedSeconds(0);
       session.startResearch(t);
     },
     [session],
@@ -65,9 +115,49 @@ export function ResearchPage() {
         value={task}
         onChange={setTask}
         onSubmit={handleSubmit}
-        disabled={session.isStreaming}
+        isRunning={session.isStreaming}
+        onCancel={session.cancelResearch}
         retrievalOnly={!hasLLMKey}
       />
+
+      {session.isStreaming && (
+        <section
+          aria-label="研究执行状态"
+          className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-3"
+        >
+          <div className="flex items-center gap-3 bg-surface px-4 py-3">
+            <Activity className="h-4 w-4 text-primary" />
+            <div>
+              <p className="text-xs text-text-muted">当前阶段</p>
+              <p className="text-sm font-semibold">
+                {phaseLabel[session.phase] ?? "处理中"}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 bg-surface px-4 py-3">
+            <Clock3 className="h-4 w-4 text-text-muted" />
+            <div>
+              <p className="text-xs text-text-muted">已用时间</p>
+              <p className="text-sm font-semibold">
+                {Math.floor(elapsedSeconds / 60)} 分{" "}
+                {elapsedSeconds % 60} 秒
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 bg-surface px-4 py-3">
+            <ListChecks className="h-4 w-4 text-text-muted" />
+            <div>
+              <p className="text-xs text-text-muted">子任务</p>
+              <p className="text-sm font-semibold">
+                {taskStats.total
+                  ? `${taskStats.completed}/${taskStats.total} 完成`
+                  : "等待规划"}
+                {taskStats.failed ? ` · ${taskStats.failed} 失败` : ""}
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
 
       {session.isError && (
         <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
@@ -75,6 +165,16 @@ export function ResearchPage() {
           <div className="space-y-2 flex-1">
             <p>{session.error ?? "未知错误"}</p>
             <div className="flex gap-2">
+              {session.traceId && (
+                <Link
+                  to="/observability"
+                  search={{ traceId: session.traceId }}
+                  className="inline-flex items-center gap-1 rounded-md bg-red-100 px-3 py-1.5 text-xs font-medium hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800"
+                >
+                  <Activity className="h-3 w-3" />
+                  查看失败链路
+                </Link>
+              )}
               <Link to="/settings" search={{}} className="inline-flex items-center gap-1 rounded-md bg-red-100 px-3 py-1.5 text-xs font-medium hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800">
                 <KeyRound className="h-3 w-3" />检查模型配置
               </Link>
@@ -98,7 +198,12 @@ export function ResearchPage() {
               <StreamingAnswerPanel />
             </Suspense>
             <div>
-              <h4 className="mb-2 text-sm font-semibold">任务 DAG</h4>
+              <h4 className="mb-2 text-sm font-semibold">
+                任务 DAG
+                {taskStats.total
+                  ? ` · ${taskStats.total} 个子问题 · ${taskStats.completed}/${taskStats.total} 完成`
+                  : ""}
+              </h4>
               <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
                 <PlanDAG plan={session.plan} />
               </Suspense>
@@ -132,9 +237,24 @@ export function ResearchPage() {
       )}
 
       {session.isCompleted && session.finalResult && (
-        <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
-          <ReportViewer result={session.finalResult} />
-        </Suspense>
+        <>
+          <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
+            <ReportViewer result={session.finalResult} />
+          </Suspense>
+          {session.plan && (
+            <details className="border-t border-border pt-4">
+              <summary className="cursor-pointer text-sm font-semibold text-text">
+                查看执行过程 · {session.plan.subtasks.length} 个子问题
+              </summary>
+              <div className="mt-4 space-y-4">
+                <Suspense fallback={<LoadingSkeleton variant="card" count={1} />}>
+                  <PlanDAG plan={session.plan} />
+                </Suspense>
+                <SubtaskProgressList subtasks={session.subtasks} />
+              </div>
+            </details>
+          )}
+        </>
       )}
     </div>
   );

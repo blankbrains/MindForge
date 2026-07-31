@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_FALLBACK_DIM = 1024  # must match LLMConfig.embedding_dim (BGE-M3)
+_FALLBACK_DIM = 1024  # BGE-M3 native dimension
 
 
 class EmbeddingManager:
@@ -80,7 +80,11 @@ class EmbeddingManager:
                     self._init_openai()
                 elif backend == "fallback":
                     self._init_fallback()
-                if self._model is not None or self._client is not None or self._provider == "fallback":
+                if (
+                    self._model is not None
+                    or self._client is not None
+                    or self._provider == "fallback"
+                ):
                     return
             except Exception as exc:
                 logger.warning("Embedding backend %s unavailable: %s", backend, exc)
@@ -104,9 +108,7 @@ class EmbeddingManager:
 
         settings = get_settings().llm
         os.environ["HF_ENDPOINT"] = settings.hf_endpoint
-        os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(
-            settings.hf_hub_download_timeout
-        )
+        os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(settings.hf_hub_download_timeout)
 
         from sentence_transformers import SentenceTransformer
 
@@ -128,7 +130,9 @@ class EmbeddingManager:
                 device=self._device,
             )
         except Exception:
-            logger.info("Model '%s' not cached — downloading from mirror...", model_name)
+            logger.info(
+                "Model '%s' not cached — downloading from mirror...", model_name
+            )
             self._model = SentenceTransformer(
                 model_name,
                 revision=revision,
@@ -143,8 +147,7 @@ class EmbeddingManager:
             self._dim = self._native_dim
         self._provider = "sentence-transformers"
         logger.info(
-            "Embedding: sentence-transformers/%s "
-            "(dim=%d, device=%s, batch=%d)",
+            "Embedding: sentence-transformers/%s (dim=%d, device=%s, batch=%d)",
             model_name,
             self._dim,
             self._device,
@@ -226,11 +229,6 @@ class EmbeddingManager:
         """Embed a single text and return its vector."""
         return self.embed([text])[0]
 
-    async def embed_async(self, texts: List[str]) -> List[List[float]]:
-        """Async-friendly alias (delegates to sync embed)."""
-        import asyncio
-        return await asyncio.to_thread(self.embed, texts)
-
     # ------------------------------------------------------------------
     # Backend implementations
     # ------------------------------------------------------------------
@@ -256,7 +254,7 @@ class EmbeddingManager:
 
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), max_batch):
-            batch = texts[i:i + max_batch]
+            batch = texts[i : i + max_batch]
             kwargs = {"model": self._model_name, "input": batch}
             if self._model_name.startswith("text-embedding-3"):
                 kwargs["dimensions"] = self.dim
@@ -277,11 +275,7 @@ class EmbeddingManager:
         if len(vector) > target:
             resized = vector[:target]
             norm = math.sqrt(sum(value * value for value in resized))
-            return (
-                [value / norm for value in resized]
-                if norm > 0
-                else resized
-            )
+            return [value / norm for value in resized] if norm > 0 else resized
         return vector + [0.0] * (target - len(vector))
 
     def _embed_fallback(self, texts: List[str]) -> List[List[float]]:
@@ -294,10 +288,11 @@ class EmbeddingManager:
         for text in texts:
             lower = text.lower()
             # 中文文本优先用 jieba 分词
-            has_cjk = any('一' <= c <= '鿿' for c in text)
+            has_cjk = any("一" <= c <= "鿿" for c in text)
             if has_cjk:
                 try:
                     import jieba
+
                     words = list(jieba.cut(lower))
                 except Exception:
                     words = lower.split()
@@ -334,12 +329,10 @@ def get_embedder() -> EmbeddingManager:
     with _embedder_lock:
         if _embedder is None:
             from mindforge.config import get_settings
+
             settings = get_settings()
             _embedder = EmbeddingManager(
-                model_name=(
-                    settings.llm.local_embedding_model
-                    or "BAAI/bge-m3"
-                ),
+                model_name=(settings.llm.local_embedding_model or "BAAI/bge-m3"),
                 provider=settings.llm.embedding_provider or None,
                 dim=settings.vector_store.embedding_dim,
             )

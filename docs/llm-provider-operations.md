@@ -303,6 +303,26 @@ LLM_MODEL_PRICING={"provider:model-id":{"input":0.0,"cached_input":0.0,"output":
 模型切换后必须同步更新 `LLM_MODEL_PRICING`，否则系统会明确显示未配置价格，不会
 用其他模型的价格猜测，也不会显示为 `$0`。
 
+### 超时与重试
+
+模型 SDK 内部重试保持关闭，统一由 Agent 层执行有限重试，避免两层重试叠加导致
+请求耗时不可预测。推荐保持以下关系：
+
+```dotenv
+AGENT_LLM_REQUEST_TIMEOUT=45
+AGENT_SUBTASK_TIMEOUT=60
+AGENT_RESEARCH_TIMEOUT=180
+```
+
+设置页和设置 API 会校验：
+
+```text
+单次模型调用超时 <= 子任务超时 <= 研究总超时
+```
+
+简单问题在“均衡”模式下直接使用单个研究任务，并跳过不必要的 Planner、Critic
+和精炼调用；复杂问题或“深度”模式仍执行完整 DAG。
+
 ## 五、高级索引和脚本模型
 
 以下配置留空时会继承当前 Provider 的 Researcher 模型：
@@ -319,7 +339,7 @@ QA_MODEL=
 辅助脚本也使用统一 Provider：
 
 ```bash
-python scripts/run_research.py
+python scripts/run_research.py "比较 RAPTOR 与 GraphRAG 的适用场景"
 python scripts/gen_test_docs.py
 python scripts/generate_qa_dataset.py --domain computer_science
 ```

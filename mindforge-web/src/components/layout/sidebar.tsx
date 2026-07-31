@@ -5,6 +5,7 @@ import {
   Search,
   Database,
   Clock,
+  Activity,
   Settings,
   Zap,
 } from "lucide-react";
@@ -14,6 +15,7 @@ const navItems = [
   { to: "/research", label: "研究", icon: Search },
   { to: "/knowledge-base", label: "知识库", icon: Database },
   { to: "/history", label: "历史", icon: Clock },
+  { to: "/observability", label: "可观测", icon: Activity },
   { to: "/settings", label: "设置", icon: Settings },
 ];
 

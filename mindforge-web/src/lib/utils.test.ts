@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatCostEstimate,
+  formatDuration,
   formatTokenCount,
 } from "@/lib/utils";
 
@@ -22,5 +23,9 @@ describe("research metric formatting", () => {
 
   it("formats token totals for scanning", () => {
     expect(formatTokenCount(12345)).toBe("12,345");
+  });
+
+  it("does not round sub-millisecond cache hits down to zero", () => {
+    expect(formatDuration(0.4)).toBe("<1ms");
   });
 });

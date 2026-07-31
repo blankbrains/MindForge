@@ -45,6 +45,7 @@ interface ResearchState {
   status: "idle" | "connecting" | "streaming" | "completed" | "error";
   error: string | null;
   task: string;
+  activeTask: string;
   plan: ResearchPlan | null;
   subtasks: SubTaskState;
   planning: boolean;
@@ -53,6 +54,10 @@ interface ResearchState {
   refineRound: number;
   finalResult: AgentResult | null;
   streamingAnswer: string;
+  traceId: string | null;
+  phase: string;
+  startedAt: number | null;
+  lastHeartbeatAt: number | null;
 
   setTask: (task: string) => void;
   reset: () => void;
@@ -64,6 +69,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
   status: "idle",
   error: null,
   task: "",
+  activeTask: "",
   plan: null,
   subtasks: {},
   planning: false,
@@ -72,6 +78,10 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
   refineRound: 0,
   finalResult: null,
   streamingAnswer: "",
+  traceId: null,
+  phase: "idle",
+  startedAt: null,
+  lastHeartbeatAt: null,
 
   setTask: (task) => set({ task }),
 
@@ -80,6 +90,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       status: "idle",
       error: null,
       task: "",
+      activeTask: "",
       plan: null,
       subtasks: {},
       planning: false,
@@ -88,17 +99,35 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       refineRound: 0,
       finalResult: null,
       streamingAnswer: "",
+      traceId: null,
+      phase: "idle",
+      startedAt: null,
+      lastHeartbeatAt: null,
     }),
 
   setStatus: (status, error) => set({ status, error: error ?? null }),
 
   handleEvent: (event) => {
+    if (event.trace_id) {
+      set({ traceId: event.trace_id });
+    }
     switch (event.type) {
+      case "trace_started":
+        set({
+          phase: "starting",
+          startedAt: get().startedAt ?? Date.now(),
+        });
+        break;
+
       case "planning":
-        set({ planning: event.status === "start" });
+        set({
+          planning: event.status === "start",
+          phase: event.status === "start" ? "planning" : "researching",
+        });
         break;
 
       case "heartbeat":
+        set({ lastHeartbeatAt: event.timestamp * 1000 });
         break;
 
       case "plan_ready":
@@ -107,6 +136,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         set({
           plan: event.plan,
           planning: false,
+          phase: "researching",
           subtasks: Object.fromEntries(
             event.plan.subtasks.map((s) => [s.task_id, s]),
           ),
@@ -133,6 +163,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         set((s) => {
           if (!s.subtasks[event.task_id]) return s;
           return {
+            phase: "researching",
             subtasks: {
               ...s.subtasks,
               [event.task_id]: {
@@ -146,15 +177,21 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         break;
 
       case "synthesizing":
-        set({ synthesizing: event.status === "start" });
+        set({
+          synthesizing: event.status === "start",
+          phase: event.status === "start" ? "synthesizing" : "reviewing",
+        });
         break;
 
       case "critic_feedback":
-        set({ criticScore: normalizeCriticScore(event.score) });
+        set({
+          criticScore: normalizeCriticScore(event.score),
+          phase: "reviewing",
+        });
         break;
 
       case "refining":
-        set({ refineRound: event.round });
+        set({ refineRound: event.round, phase: "refining" });
         break;
 
       case "answer_chunk":
@@ -163,7 +200,10 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
 
       case "done":
         set({
-          task: event.result.success ? "" : get().task,
+          task:
+            event.result.success && get().task === get().activeTask
+              ? ""
+              : get().task,
           finalResult: event.result,
           status: event.result.success ? "completed" : "error",
           error: event.result.success
@@ -172,6 +212,8 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
           synthesizing: false,
           planning: false,
           refineRound: 0,
+          traceId: event.result.trace_id ?? event.trace_id ?? get().traceId,
+          phase: event.result.success ? "completed" : "failed",
         });
         break;
 
@@ -181,6 +223,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
           error: event.content || "研究任务执行失败",
           planning: false,
           synthesizing: false,
+          phase: "failed",
         });
         break;
 

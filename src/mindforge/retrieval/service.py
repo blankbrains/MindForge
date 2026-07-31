@@ -105,9 +105,7 @@ def get_graph_engine(
                 try:
                     _graph.load(str(path))
                 except Exception:
-                    logger.exception(
-                        "Failed to load persistent GraphRAG index."
-                    )
+                    logger.exception("Failed to load persistent GraphRAG index.")
         else:
             if llm is not None:
                 _graph.llm_fn = llm
@@ -147,6 +145,22 @@ async def preload_reranker() -> bool:
     return await asyncio.to_thread(reranker.preload)
 
 
+def get_reranker_status() -> dict[str, bool]:
+    settings = get_settings().retrieval
+    configured = bool(settings.reranker_model)
+    with _service_lock:
+        reranker = _reranker
+        return {
+            "configured": configured,
+            "available": bool(
+                reranker is not None and reranker._model is not None
+            ),
+            "load_failed": bool(
+                reranker is not None and reranker._load_failed
+            ),
+        }
+
+
 def get_retriever() -> AdaptiveRetriever:
     global _retriever
     with _service_lock:
@@ -163,12 +177,11 @@ def get_retriever() -> AdaptiveRetriever:
                     bm25_retriever=get_bm25_retriever(),
                     embedding_fn=_async_embed,
                     llm_fn=_llm_text,
+                    bm25_top_k=settings.retrieval.bm25_top_k,
                 ),
                 reranker=get_reranker(),
                 graph_engine=(
-                    get_graph_engine()
-                    if settings.graphrag.graph_enabled
-                    else None
+                    get_graph_engine() if settings.graphrag.graph_enabled else None
                 ),
                 llm_fn=_llm_text,
                 max_request_top_k=settings.retrieval.max_request_top_k,
@@ -212,9 +225,7 @@ async def index_auxiliary_documents(
         else:
             await asyncio.to_thread(bm25.upsert_documents, documents)
         await asyncio.to_thread(bm25.save)
-        stage_timings["bm25"] = (
-            asyncio.get_running_loop().time() - started
-        )
+        stage_timings["bm25"] = asyncio.get_running_loop().time() - started
         bm25_end = 97.0 if use_graphrag else 99.0
         if progress_callback is not None:
             await progress_callback(
@@ -239,9 +250,7 @@ async def index_auxiliary_documents(
             )
             await graph.build_graph(documents)
             await asyncio.to_thread(graph.save, str(_graph_path()))
-            stage_timings["graphrag"] = (
-                asyncio.get_running_loop().time() - started
-            )
+            stage_timings["graphrag"] = asyncio.get_running_loop().time() - started
             if progress_callback is not None:
                 await progress_callback(
                     "graphrag",

@@ -9,21 +9,15 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
+
 def _resolve_project_root() -> Path:
     explicit = os.getenv("MINDFORGE_PROJECT_ROOT", "").strip()
     if explicit:
         path = Path(explicit).expanduser()
-        return (
-            path.resolve()
-            if path.is_absolute()
-            else (Path.cwd() / path).resolve()
-        )
+        return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
 
     cwd = Path.cwd().resolve()
-    if (
-        (cwd / "pyproject.toml").is_file()
-        and (cwd / "src" / "mindforge").is_dir()
-    ):
+    if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "mindforge").is_dir():
         return cwd
 
     source_root = Path(__file__).resolve().parents[2]
@@ -110,9 +104,7 @@ class LLMConfig(BaseSettings):
     compatible_supports_json_schema: bool = Field(default=False)
     compatible_supports_stream_usage: bool = Field(default=False)
     local_api_key: str = Field(default="")
-    local_base_url: str = Field(
-        default="http://host.docker.internal:11434/v1"
-    )
+    local_base_url: str = Field(default="http://host.docker.internal:11434/v1")
     local_api_key_required: bool = Field(default=False)
     local_model: str = Field(default="")
     local_planner_model: str = Field(default="")
@@ -132,15 +124,12 @@ class LLMConfig(BaseSettings):
     deepseek_researcher: str = "deepseek-chat"
     deepseek_critic: str = "deepseek-chat"
     deepseek_synthesizer: str = "deepseek-chat"
-    deepseek_embedding: str = "BAAI/bge-m3"
-    embedding_dim: int = 1024
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_revision: str = Field(
         default="5617a9f61b028005a4858fdac845db406aefb181",
         pattern=r"^[0-9a-fA-F]{40}$",
         description="Immutable Hugging Face commit SHA for local embeddings.",
     )
-    local_embedding_dim: int = 1024
     sentence_transformers_device: str = "cpu"
     embedding_batch_size: int = Field(default=32, ge=1, le=1024)
     torch_num_threads: int = Field(default=0, ge=0, le=256)
@@ -159,15 +148,10 @@ class LLMConfig(BaseSettings):
                 "researcher": self.deepseek_researcher,
                 "critic": self.deepseek_critic,
                 "synthesizer": self.deepseek_synthesizer,
-                "embedding": self.deepseek_embedding,
             }
             return mapping.get(role, self.deepseek_researcher)
         if provider in {"openai_compatible", "local"}:
-            prefix = (
-                "compatible"
-                if provider == "openai_compatible"
-                else "local"
-            )
+            prefix = "compatible" if provider == "openai_compatible" else "local"
             default_model = getattr(self, f"{prefix}_model")
             role_model = getattr(self, f"{prefix}_{role}_model", "")
             return role_model or default_model
@@ -256,13 +240,11 @@ class LLMConfig(BaseSettings):
         if not normalized_model:
             return None
         normalized_pricing = {
-            key.strip().lower(): value
-            for key, value in self.model_pricing.items()
+            key.strip().lower(): value for key, value in self.model_pricing.items()
         }
-        return (
-            normalized_pricing.get(f"{selected}:{normalized_model}")
-            or normalized_pricing.get(normalized_model)
-        )
+        return normalized_pricing.get(
+            f"{selected}:{normalized_model}"
+        ) or normalized_pricing.get(normalized_model)
 
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 
@@ -293,7 +275,12 @@ class APIConfig(BaseSettings):
     pdf_parallel_page_threshold: int = Field(default=10, ge=1, le=1000)
     pdf_parse_batch_pages: int = Field(default=8, ge=1, le=128)
     health_refresh_seconds: int = Field(default=15, ge=5, le=300)
-    max_history_entries: int = Field(default=1000, ge=1, le=100_000)
+    max_history_entries: int = Field(
+        default=0,
+        ge=0,
+        le=100_000,
+        description="Maximum research history entries. 0 keeps records indefinitely.",
+    )
     allow_local_file_index: bool = Field(default=False)
     model_discovery_timeout_seconds: float = Field(
         default=15.0,
@@ -314,9 +301,7 @@ class APIConfig(BaseSettings):
 
     def get_cors_origins(self) -> list[str]:
         values = [
-            origin.strip()
-            for origin in self.cors_origins.split(",")
-            if origin.strip()
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
         ]
         return values or ["http://localhost:5173"]
 
@@ -329,14 +314,14 @@ class VectorStoreConfig(BaseSettings):
     embedding_dim: int = Field(
         default=1536,
         description="Must match the embedding model dimension. "
-                    "OpenAI text-embedding-3-small = 1536, BGE-M3 = 1024."
+        "OpenAI text-embedding-3-small = 1536, BGE-M3 = 1024.",
     )
     model_config = SettingsConfigDict(env_prefix="VECTOR_", extra="ignore")
 
 
 class RetrievalConfig(BaseSettings):
     vector_top_k: int = Field(default=20)
-    bm25_top_k: int = Field(default=20)
+    bm25_top_k: int = Field(default=20, ge=1, le=500)
     rerank_top_k: int = Field(default=6)
     max_request_top_k: int = Field(default=50, ge=1, le=500)
     reranker_max_candidates: int = Field(default=100, ge=1, le=1000)
@@ -358,13 +343,13 @@ class RetrievalConfig(BaseSettings):
         description="Persistent BM25 corpus directory.",
     )
     min_score: float = Field(default=0.60, ge=0.0, le=1.0)
+    keyword_min_coverage: float = Field(default=0.60, ge=0.0, le=1.0)
     model_config = SettingsConfigDict(env_prefix="RETRIEVAL_", extra="ignore")
 
 
 class ChunkingConfig(BaseSettings):
     chunk_size: int = Field(default=512, ge=128, le=2048)
     chunk_overlap: int = Field(default=64)
-    use_semantic_chunking: bool = Field(default=False)
     model_config = SettingsConfigDict(env_prefix="CHUNK_", extra="ignore")
 
 
@@ -373,7 +358,6 @@ class ParserConfig(BaseSettings):
 
     mode: Literal["auto", "native", "ocr"] = "auto"
     ocr_enabled: bool = True
-    ocr_provider: Literal["paddle"] = "paddle"
     ocr_language: str = Field(default="ch", min_length=1, max_length=32)
     ocr_device: str = Field(default="cpu", min_length=1, max_length=64)
     ocr_model_source: Literal["BOS", "HUGGINGFACE"] = "BOS"
@@ -395,8 +379,6 @@ class ParserConfig(BaseSettings):
     asset_max_total_mb: int = Field(default=512, ge=1, le=10_240)
     asset_render_ocr_pages: bool = True
     ocr_handwriting_confidence: float = Field(default=0.62, ge=0.0, le=1.0)
-    ocr_model_version: str = Field(default="PP-OCRv5", max_length=128)
-    table_model_version: str = Field(default="PP-StructureV3", max_length=128)
     pipeline_version: int = Field(default=5, ge=1, le=1000)
     model_config = SettingsConfigDict(env_prefix="PARSER_", extra="ignore")
 
@@ -460,7 +442,6 @@ class GraphRAGConfig(BaseSettings):
         ge=1_000,
         le=100_000,
     )
-    graph_embedding_dim: int = Field(default=1536)
     graph_store_path: Optional[str] = Field(
         default=None,
         description="Persistent GraphRAG JSON file path.",
@@ -472,18 +453,31 @@ class GraphRAGConfig(BaseSettings):
 
 
 class AgentConfig(BaseSettings):
-    max_iterations: int = Field(default=3, ge=1, le=20,
-        description="Researcher Agent ReAct 最大轮次。设为 3 可显著提速，复杂任务可调高。")
-    max_search_steps: int = Field(default=3,
-        description="单次研究中 search_knowledge_base 的最大调用次数")
+    research_mode: Literal["fast", "balanced", "deep"] = "balanced"
+    source_policy: Literal["auto", "knowledge_base", "web"] = "auto"
+    fallback_enabled: bool = True
+    max_iterations: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Researcher Agent ReAct 最大轮次。设为 3 可显著提速，复杂任务可调高。",
+    )
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
-    max_refine_rounds: int = Field(default=1,
-        description="Critic 精炼最大轮次。设为 1 可减少一轮评估+重写，显著提速。")
-    subtask_timeout: int = Field(default=30, ge=10,
-        description="单个子任务超时（秒）")
+    max_refine_rounds: int = Field(
+        default=1,
+        description="Critic 精炼最大轮次。设为 1 可减少一轮评估+重写，显著提速。",
+    )
+    subtask_timeout: int = Field(default=60, ge=10, description="单个子任务超时（秒）")
     research_timeout: int = Field(
-        default=180, ge=30,
-        description="研究全流程超时（秒）。Set via AGENT_RESEARCH_TIMEOUT env var."
+        default=180,
+        ge=30,
+        description="研究全流程超时（秒）。Set via AGENT_RESEARCH_TIMEOUT env var.",
+    )
+    llm_request_timeout: int = Field(
+        default=45,
+        ge=5,
+        le=600,
+        description="Maximum duration of one non-streaming LLM request.",
     )
     max_subtasks: int = Field(default=5, ge=1, le=20)
     max_tool_calls_per_round: int = Field(default=4, ge=1, le=20)
@@ -499,8 +493,6 @@ class AgentConfig(BaseSettings):
 
 class CacheConfig(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6377")
-    cache_ttl: int = Field(default=3600, ge=60)
-    embedding_cache_size: int = Field(default=1000)
     model_config = SettingsConfigDict(env_prefix="CACHE_", extra="ignore")
 
 
@@ -511,7 +503,6 @@ class MemoryConfig(BaseSettings):
     episodic_ttl_seconds: int = Field(default=2592000, ge=60)
     max_episode_chars: int = Field(default=100_000, ge=1000)
     max_semantic_facts: int = Field(default=500, ge=1)
-    max_semantic_patterns: int = Field(default=1000, ge=1)
     max_semantic_fact_chars: int = Field(default=50_000, ge=1000)
     semantic_retention_days: int = Field(default=30, ge=1, le=3650)
     semantic_max_file_bytes: int = Field(
@@ -533,7 +524,14 @@ class ObservabilityConfig(BaseSettings):
         ge=64 * 1024,
         le=1024 * 1024 * 1024,
     )
-    trace_retention_days: int = Field(default=7, ge=1, le=3650)
+    trace_retention_days: int = Field(
+        default=0,
+        ge=0,
+        le=3650,
+        description="Local trace retention in days. 0 keeps traces indefinitely.",
+    )
+    trace_list_scan_limit: int = Field(default=1000, ge=100, le=100_000)
+    trace_detail_span_limit: int = Field(default=2000, ge=100, le=100_000)
     model_config = SettingsConfigDict(env_prefix="OBSERVABILITY_", extra="ignore")
 
 
@@ -544,11 +542,21 @@ class SandboxConfig(BaseSettings):
     max_code_length: int = Field(default=50_000, ge=100, le=1_000_000)
     max_vars_bytes: int = Field(default=100_000, ge=1024, le=10_000_000)
     memory_mb: int = Field(default=512, ge=64, le=4096)
-    allowed_modules: list[str] = Field(default=[
-        "numpy", "pandas", "scipy", "sklearn",
-        "math", "json", "collections", "itertools",
-        "datetime", "typing", "re",
-    ])
+    allowed_modules: list[str] = Field(
+        default=[
+            "numpy",
+            "pandas",
+            "scipy",
+            "sklearn",
+            "math",
+            "json",
+            "collections",
+            "itertools",
+            "datetime",
+            "typing",
+            "re",
+        ]
+    )
     model_config = SettingsConfigDict(env_prefix="SANDBOX_", extra="ignore")
 
 
@@ -589,9 +597,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
-    qa_generation: QAGenerationConfig = Field(
-        default_factory=QAGenerationConfig
-    )
+    qa_generation: QAGenerationConfig = Field(default_factory=QAGenerationConfig)
 
     model_config = SettingsConfigDict(extra="ignore")
 

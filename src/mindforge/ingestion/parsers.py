@@ -127,19 +127,15 @@ def _as_bbox(value: object) -> tuple[float, float, float, float] | None:
     coordinates: list[tuple[float, float]] = []
     for point in points:
         pair = _as_list(point)
-        if (
-            len(pair) >= 4
-            and all(isinstance(item, (int, float)) for item in pair[:4])
-        ):
+        if len(pair) >= 4 and all(isinstance(item, (int, float)) for item in pair[:4]):
             coordinates.extend(
                 [
                     (float(pair[0]), float(pair[1])),
                     (float(pair[2]), float(pair[3])),
                 ]
             )
-        elif (
-            len(pair) >= 2
-            and all(isinstance(item, (int, float)) for item in pair[:2])
+        elif len(pair) >= 2 and all(
+            isinstance(item, (int, float)) for item in pair[:2]
         ):
             coordinates.append((float(pair[0]), float(pair[1])))
     if not coordinates:
@@ -182,8 +178,7 @@ def _table_to_structured(
     column_count = max(len(row) for row in rows)
     normalized = [row + [""] * (column_count - len(row)) for row in rows]
     normalized_merged = [
-        row + [False] * (column_count - len(row))
-        for row in merged_cells
+        row + [False] * (column_count - len(row)) for row in merged_cells
     ]
     header = normalized[0]
     separator = ["---"] * column_count
@@ -212,9 +207,9 @@ def _table_to_structured(
             "<tr>"
             + "".join(
                 (
-                    f"<{tag} data-merged=\""
+                    f'<{tag} data-merged="'
                     f"{'true' if normalized_merged[row_index][column_index] else 'false'}"
-                    f"\">{html.escape(value)}</{tag}>"
+                    f'">{html.escape(value)}</{tag}>'
                 )
                 for column_index, value in enumerate(row)
             )
@@ -281,9 +276,7 @@ def _looks_like_native_table(text: str) -> bool:
     if len(lines) < 3:
         return False
     aligned_rows = sum(
-        1
-        for line in lines
-        if len(re.findall(r"\S(?:\s{2,}|\t)\S", line)) >= 1
+        1 for line in lines if len(re.findall(r"\S(?:\s{2,}|\t)\S", line)) >= 1
     )
     return aligned_rows >= 2
 
@@ -316,10 +309,7 @@ def _point_in_any_bbox(
     y: float,
     bboxes: list[tuple[float, float, float, float]],
 ) -> bool:
-    return any(
-        x0 <= x <= x1 and top <= y <= bottom
-        for x0, top, x1, bottom in bboxes
-    )
+    return any(x0 <= x <= x1 and top <= y <= bottom for x0, top, x1, bottom in bboxes)
 
 
 def _group_native_lines(words: list[dict[str, float | str]]) -> list[dict]:
@@ -335,9 +325,7 @@ def _group_native_lines(words: list[dict[str, float | str]]) -> list[dict]:
             continue
         current = lines[-1]
         current_top = sum(float(item["top"]) for item in current) / len(current)
-        height = max(
-            float(item["bottom"]) - float(item["top"]) for item in current
-        )
+        height = max(float(item["bottom"]) - float(item["top"]) for item in current)
         if abs(float(word["top"]) - current_top) <= max(2.5, height * 0.45):
             current.append(word)
         else:
@@ -360,9 +348,7 @@ def _group_native_lines(words: list[dict[str, float | str]]) -> list[dict]:
         for segment in segments:
             output.append(
                 {
-                    "content": " ".join(
-                        str(word["text"]) for word in segment
-                    ).strip(),
+                    "content": " ".join(str(word["text"]) for word in segment).strip(),
                     "bbox": (
                         min(float(word["x0"]) for word in segment),
                         min(float(word["top"]) for word in segment),
@@ -394,9 +380,8 @@ def _group_native_blocks(lines: list[dict]) -> list[dict]:
             vertical_gap = bbox[1] - previous[3]
             horizontal_shift = abs(bbox[0] - previous[0])
             previous_width = max(previous[2] - previous[0], 1.0)
-            if (
-                vertical_gap <= 18.0
-                and horizontal_shift <= max(72.0, previous_width * 0.45)
+            if vertical_gap <= 18.0 and horizontal_shift <= max(
+                72.0, previous_width * 0.45
             ):
                 current_blocks[-1].append(line)
             else:
@@ -407,9 +392,7 @@ def _group_native_blocks(lines: list[dict]) -> list[dict]:
         bboxes = [line["bbox"] for line in block]
         output.append(
             {
-                "content": "\n".join(
-                    str(line["content"]) for line in block
-                ).strip(),
+                "content": "\n".join(str(line["content"]) for line in block).strip(),
                 "bbox": (
                     min(bbox[0] for bbox in bboxes),
                     min(bbox[1] for bbox in bboxes),
@@ -428,8 +411,7 @@ def _order_lines_by_column(lines: list[dict]) -> list[list[dict]]:
         return [lines]
     starts = sorted(line["bbox"][0] for line in lines)
     gaps = [
-        (right - left, (left + right) / 2)
-        for left, right in zip(starts, starts[1:])
+        (right - left, (left + right) / 2) for left, right in zip(starts, starts[1:])
     ]
     if not gaps:
         return [lines]
@@ -438,20 +420,10 @@ def _order_lines_by_column(lines: list[dict]) -> list[list[dict]]:
         return [lines]
 
     left = [
-        line
-        for line in lines
-        if line["bbox"][0] < split and line["bbox"][2] <= split
+        line for line in lines if line["bbox"][0] < split and line["bbox"][2] <= split
     ]
-    right = [
-        line
-        for line in lines
-        if line["bbox"][0] >= split
-    ]
-    full_width = [
-        line
-        for line in lines
-        if line not in left and line not in right
-    ]
+    right = [line for line in lines if line["bbox"][0] >= split]
+    full_width = [line for line in lines if line not in left and line not in right]
     if len(left) < 2 or len(right) < 2:
         return [lines]
     return [
@@ -543,9 +515,7 @@ class _PaddleOCRAdapter:
         except DocumentParserError:
             raise
         except Exception as exc:
-            raise DocumentParserError(
-                f"OCR processing failed on page {page}."
-            ) from exc
+            raise DocumentParserError(f"OCR processing failed on page {page}.") from exc
         if not result:
             return []
 
@@ -560,9 +530,7 @@ class _PaddleOCRAdapter:
                 continue
             raw_score = scores[index] if index < len(scores) else None
             confidence = (
-                float(raw_score)
-                if isinstance(raw_score, (int, float))
-                else None
+                float(raw_score) if isinstance(raw_score, (int, float)) else None
             )
             polygon = polygons[index] if index < len(polygons) else None
             elements.append(
@@ -838,9 +806,7 @@ class DocumentParser:
                     try:
                         results.append((index, page.extract_text() or "", None))
                     except Exception as exc:
-                        results.append(
-                            (index, "", f"{type(exc).__name__}: {exc}")
-                        )
+                        results.append((index, "", f"{type(exc).__name__}: {exc}"))
                     self._emit_progress("detecting", index + 1, total)
                 return results, total
 
@@ -866,7 +832,9 @@ class DocumentParser:
             for start in range(0, total, pages_per_worker)
         ]
 
-        def run_parallel(executor_type: type[ProcessPoolExecutor] | type[ThreadPoolExecutor]):
+        def run_parallel(
+            executor_type: type[ProcessPoolExecutor] | type[ThreadPoolExecutor],
+        ):
             executor_kwargs: dict[str, object] = {"max_workers": workers}
             if executor_type is ProcessPoolExecutor:
                 executor_kwargs["mp_context"] = multiprocessing.get_context("spawn")
@@ -906,11 +874,7 @@ class DocumentParser:
             logger.exception("PDF process parsing failed; retrying with threads.")
             range_results = run_parallel(ThreadPoolExecutor)
 
-        results = [
-            item
-            for range_result in range_results
-            for item in range_result
-        ]
+        results = [item for range_result in range_results for item in range_result]
         results.sort(key=lambda item: item[0])
         self._emit_progress("detecting", total, total)
         return results, total
@@ -930,9 +894,7 @@ class DocumentParser:
                     "PDF text exceeds the configured character limit."
                 )
             content_parts.append(text)
-            sections.append(
-                {"title": f"Page {index + 1}", "content": text, "level": 0}
-            )
+            sections.append({"title": f"Page {index + 1}", "content": text, "level": 0})
         return "\n".join(content_parts), sections, {"pages": total}
 
     def _parse_pdf_structured(
@@ -945,15 +907,9 @@ class DocumentParser:
         config = self._parser_config
         native_char_count = sum(len(text) for _, text, _ in results)
         if native_char_count > self._limits.max_parsed_chars:
-            raise DocumentLimitError(
-                "PDF text exceeds the configured character limit."
-            )
+            raise DocumentLimitError("PDF text exceeds the configured character limit.")
         native_text = {index: text for index, text, _ in results}
-        ocr_pages = [
-            index
-            for index, text, _ in results
-            if self._page_needs_ocr(text)
-        ]
+        ocr_pages = [index for index, text, _ in results if self._page_needs_ocr(text)]
         if config.mode == "ocr":
             ocr_pages = list(range(total))
         elif config.mode == "native" or not config.ocr_enabled:
@@ -1048,9 +1004,7 @@ class DocumentParser:
                 if index in ocr_pages:
                     try:
                         self._raise_if_cancelled()
-                        rendered = page.to_image(
-                            resolution=config.ocr_dpi
-                        ).original
+                        rendered = page.to_image(resolution=config.ocr_dpi).original
                         if ocr_adapter is None:
                             ocr_adapter = _PaddleOCRAdapter(
                                 language=config.ocr_language,
@@ -1204,11 +1158,7 @@ class DocumentParser:
                 "page_metrics": page_metrics,
             },
             elements,
-            [
-                dict(element.metadata)
-                for element in elements
-                if element.kind == "image"
-            ],
+            [dict(element.metadata) for element in elements if element.kind == "image"],
         )
 
     def _page_needs_ocr(self, text: str) -> bool:
@@ -1407,8 +1357,7 @@ class DocumentParser:
                 ]
             else:
                 tables = [
-                    (table, None)
-                    for table in getattr(pdf_page, "extract_tables")()
+                    (table, None) for table in getattr(pdf_page, "extract_tables")()
                 ]
         except Exception:
             logger.warning(
@@ -1459,12 +1408,8 @@ class DocumentParser:
             ordered_elements = sorted(
                 page_elements.get(index, []),
                 key=lambda element: (
-                    element.bbox[1]
-                    if element.bbox is not None
-                    else float("inf"),
-                    element.bbox[0]
-                    if element.bbox is not None
-                    else float("inf"),
+                    element.bbox[1] if element.bbox is not None else float("inf"),
+                    element.bbox[0] if element.bbox is not None else float("inf"),
                     int(element.metadata.get("reading_order", 0)),
                     element.kind,
                 ),
@@ -1514,10 +1459,7 @@ class DocumentParser:
                         "DOCX package exceeds the configured part limit."
                     )
                 expanded_size = sum(info.file_size for info in infos)
-                if (
-                    expanded_size
-                    > self._limits.max_docx_uncompressed_mb * 1024 * 1024
-                ):
+                if expanded_size > self._limits.max_docx_uncompressed_mb * 1024 * 1024:
                     raise DocumentLimitError(
                         "DOCX package exceeds the configured expanded-size limit."
                     )
@@ -1551,9 +1493,7 @@ class DocumentParser:
         for table in doc.tables:
             for row in table.rows:
                 row_text = " | ".join(
-                    cell.text.strip()
-                    for cell in row.cells
-                    if cell.text.strip()
+                    cell.text.strip() for cell in row.cells if cell.text.strip()
                 )
                 if row_text:
                     total_chars += len(row_text)
@@ -1592,26 +1532,3 @@ class DocumentParser:
     @staticmethod
     def _parse_text(path: Path):
         return _read_text_with_fallback(path), [], {}
-
-
-class DirectoryParser:
-    def __init__(self, parser: DocumentParser | None = None):
-        self.parser = parser or DocumentParser()
-
-    def parse_directory(
-        self,
-        dir_path: str | Path,
-        recursive: bool = True,
-    ) -> list[ParsedDocument]:
-        documents = []
-        base = Path(dir_path)
-        pattern = "**/*" if recursive else "*"
-        for file_path in sorted(base.glob(pattern)):
-            if file_path.suffix.lower() not in self.parser.SUPPORTED_EXTENSIONS:
-                continue
-            try:
-                documents.append(self.parser.parse(file_path))
-            except Exception as exc:
-                logger.warning("Failed to parse %s: %s", file_path.name, exc)
-        logger.info("Parsed %d documents from %s.", len(documents), base)
-        return documents

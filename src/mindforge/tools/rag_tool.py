@@ -87,6 +87,39 @@ class RAGTool(BaseTool):
             "你叫什么",
         }
     )
+    _QUERY_STOPWORDS = frozenset(
+        {
+            "and",
+            "or",
+            "the",
+            "is",
+            "are",
+            "what",
+            "how",
+            "why",
+            "vs",
+            "versus",
+            "和",
+            "与",
+            "及",
+            "或",
+            "的",
+            "了",
+            "是",
+            "什么",
+            "哪些",
+            "怎么",
+            "如何",
+            "为什么",
+            "有什么",
+            "区别",
+            "差异",
+            "比较",
+            "对比",
+            "请",
+            "一下",
+        }
+    )
 
     def __init__(
         self,
@@ -230,23 +263,31 @@ class RAGTool(BaseTool):
             if threshold > 0
             else float(settings.retrieval.min_score)
         )
+        keyword_min_coverage = float(
+            getattr(settings.retrieval, "keyword_min_coverage", 0.60)
+        )
         qualified = [
             result
             for result in results
-            if self._is_relevant_result(result, min_score)
+            if self._is_relevant_result(
+                result,
+                min_score,
+                query=query,
+                keyword_min_coverage=keyword_min_coverage,
+            )
         ]
 
         total_score = sum(
             max(
                 self._relevance_score(result),
-                min_score
+                min_score * self._term_coverage(query, result)
                 if self._has_keyword_evidence(result)
                 else 0.0,
             )
             for result in qualified
         )
         avg = total_score / max(len(qualified), 1)
-        quality = round(min(avg * 16, 10.0), 1)
+        retrieval_quality = round(min(avg * 10, 10.0), 1)
 
         if not qualified:
             return ToolResult(
@@ -255,7 +296,13 @@ class RAGTool(BaseTool):
                     f"关于「{query}」，当前知识库中暂无高度相关的资料。\n\n"
                     "建议尝试更换关键词，或上传更多相关文档到知识库。"
                 ),
-                data={"results": [], "total": 0, "quality": 0.0, "filtered_out": len(results)},
+                data={
+                    "results": [],
+                    "sources": [],
+                    "total": 0,
+                    "retrieval_quality": 0.0,
+                    "filtered_out": len(results),
+                },
                 execution_time_ms=elapsed,
             )
 
@@ -268,7 +315,7 @@ class RAGTool(BaseTool):
                 "results": qualified,
                 "sources": sources,
                 "total": len(qualified),
-                "quality": quality,
+                "retrieval_quality": retrieval_quality,
             },
             execution_time_ms=elapsed,
         )
@@ -433,14 +480,104 @@ class RAGTool(BaseTool):
         return 0.0
 
     @classmethod
+    def _result_text(cls, result: Any) -> str:
+        if not isinstance(result, dict):
+            return str(
+                getattr(result, "page_content", None)
+                or getattr(result, "text", None)
+                or result
+            ).casefold()
+        metadata = result.get("metadata") or {}
+        values = [
+            result.get("text"),
+            result.get("content"),
+            result.get("page_content"),
+            result.get("title"),
+            result.get("document_source"),
+            result.get("source"),
+        ]
+        if isinstance(metadata, dict):
+            values.extend(
+                [
+                    metadata.get("title"),
+                    metadata.get("filename"),
+                    metadata.get("source"),
+                ]
+            )
+        return " ".join(str(value) for value in values if value).casefold()
+
+    @classmethod
+    def _explicit_identifiers(cls, query: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_+#.\-]{1,63}", query)
+            if token.casefold() not in cls._QUERY_STOPWORDS
+        }
+
+    @classmethod
+    def _query_terms(cls, query: str) -> set[str]:
+        terms = set(cls._explicit_identifiers(query))
+        try:
+            import jieba
+
+            candidates = jieba.lcut(query, cut_all=False)
+        except ImportError:
+            candidates = re.findall(r"[\u4e00-\u9fff]{2,}", query)
+        for candidate in candidates:
+            normalized = re.sub(
+                r"[^\w+#.\-]+",
+                "",
+                str(candidate),
+                flags=re.UNICODE,
+            ).casefold()
+            if (
+                len(normalized) >= 2
+                and normalized not in cls._QUERY_STOPWORDS
+                and not normalized.isdigit()
+            ):
+                terms.add(normalized)
+        return terms
+
+    @classmethod
+    def _term_coverage(cls, query: str, result: Any) -> float:
+        terms = cls._query_terms(query)
+        if not terms:
+            return 1.0
+        text = cls._result_text(result)
+        matched = sum(term in text for term in terms)
+        return matched / len(terms)
+
+    @classmethod
+    def _covers_explicit_identifiers(cls, query: str, result: Any) -> bool:
+        identifiers = cls._explicit_identifiers(query)
+        if len(identifiers) < 2:
+            return True
+        text = cls._result_text(result)
+        return all(identifier in text for identifier in identifiers)
+
+    @classmethod
+    def _has_minimum_query_evidence(cls, query: str, result: Any) -> bool:
+        terms = cls._query_terms(query)
+        if len(terms) < 2:
+            return True
+        return cls._term_coverage(query, result) >= (1.0 / len(terms))
+
+    @classmethod
     def _is_relevant_result(
         cls,
         result: Any,
         min_score: float,
+        *,
+        query: str = "",
+        keyword_min_coverage: float = 0.60,
     ) -> bool:
-        return (
+        if query and not cls._covers_explicit_identifiers(query, result):
+            return False
+        if cls._relevance_score(result) >= min_score:
+            return cls._has_minimum_query_evidence(query, result)
+        return bool(
             cls._has_keyword_evidence(result)
-            or cls._relevance_score(result) >= min_score
+            and cls._term_coverage(query, result) >= keyword_min_coverage
         )
 
     @classmethod

@@ -21,11 +21,13 @@ class HybridRetriever:
         bm25_retriever: Optional[BM25Retriever] = None,
         embedding_fn=None,
         llm_fn=None,
+        bm25_top_k: int | None = None,
     ):
         self.vector_store = vector_store
         self.bm25_retriever = bm25_retriever
         self.embedding_fn = embedding_fn
         self.llm_fn = llm_fn
+        self.bm25_top_k = bm25_top_k
 
     # ------------------------------------------------------------------
     # Main retrieval entry point
@@ -46,6 +48,7 @@ class HybridRetriever:
         and ``source`` (one of ``vector``, ``hyde``, ``multi_query``).
         """
         rankings: Dict[str, List[Dict[str, Any]]] = {}
+        bm25_candidate_k = max(top_k, self.bm25_top_k or top_k)
 
         async def direct_vector() -> tuple[str, List[Dict[str, Any]]]:
             try:
@@ -77,7 +80,7 @@ class HybridRetriever:
                 bm25_hits = await asyncio.to_thread(
                     self.bm25_retriever.search,
                     query=query,
-                    top_k=top_k,
+                    top_k=bm25_candidate_k,
                 )
                 return (
                     "bm25",
@@ -88,8 +91,7 @@ class HybridRetriever:
                             "source": "bm25",
                         }
                         for hit in bm25_hits
-                        if hit.get("id")
-                        and float(hit.get("score", 0.0)) > 0.0
+                        if hit.get("id") and float(hit.get("score", 0.0)) > 0.0
                     ],
                 )
             except Exception:
@@ -138,7 +140,7 @@ class HybridRetriever:
                         return await asyncio.to_thread(
                             self.bm25_retriever.search,
                             query=expanded_query,
-                            top_k=top_k,
+                            top_k=bm25_candidate_k,
                         )
 
                 search_results = await asyncio.gather(
@@ -190,7 +192,8 @@ class HybridRetriever:
 
         # --- Fuse with weighted RRF ---
         fused = self._rrf_fuse(
-            rankings, top_k,
+            rankings,
+            top_k,
             vector_weight=vector_weight,
             bm25_weight=bm25_weight,
         )
@@ -245,9 +248,7 @@ class HybridRetriever:
         try:
             result = await self.llm_fn(prompt)
             lines = [
-                line.strip()
-                for line in result.strip().split("\n")
-                if line.strip()
+                line.strip() for line in result.strip().split("\n") if line.strip()
             ]
             queries = []
             for line in lines:
@@ -325,9 +326,7 @@ class HybridRetriever:
             for d in fused.values():
                 d["score"] = d["score"] / max_score
 
-        sorted_docs = sorted(
-            fused.values(), key=lambda x: x["score"], reverse=True
-        )
+        sorted_docs = sorted(fused.values(), key=lambda x: x["score"], reverse=True)
         for doc in sorted_docs:
             retrieval_sources = sorted(sources_by_doc.get(doc["id"], set()))
             retrieval_scores = scores_by_doc.get(doc["id"], {})

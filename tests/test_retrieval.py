@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,22 +63,46 @@ def test_provider_update_validates_base_url_and_duplicates() -> None:
         )
 
 
+def test_settings_reject_contradictory_timeout_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(
+                llm_request_timeout=45,
+                subtask_timeout=60,
+                research_timeout=180,
+            )
+        ),
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        routes._update_settings_locked(
+            SettingsUpdateRequest(
+                llm_request_timeout=90,
+                subtask_timeout=60,
+                research_timeout=180,
+            )
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    assert "LLM request timeout" in str(getattr(exc_info.value, "detail", ""))
+
+
 def test_env_sync_quotes_values_and_prevents_entry_injection(
     tmp_path,
     monkeypatch,
 ):
     monkeypatch.setattr(routes, "get_project_root", lambda: tmp_path)
 
-    routes._sync_env_file(
-        {"LLM_DEEPSEEK_API_KEY": "key with spaces and # punctuation"}
-    )
+    routes._sync_env_file({"LLM_DEEPSEEK_API_KEY": "key with spaces and # punctuation"})
 
     from dotenv import dotenv_values
 
     values = dotenv_values(tmp_path / ".env")
-    assert values == {
-        "LLM_DEEPSEEK_API_KEY": "key with spaces and # punctuation"
-    }
+    assert values == {"LLM_DEEPSEEK_API_KEY": "key with spaces and # punctuation"}
 
 
 def test_env_sync_does_not_replace_bind_mount_target(tmp_path, monkeypatch):
@@ -150,9 +175,12 @@ def test_history_save_request_enforces_body_bounds():
 
 
 def test_public_service_url_removes_credentials_and_query():
-    assert routes._public_service_url(
-        "redis://user:password@cache.internal:6379/0?token=secret"
-    ) == "redis://cache.internal:6379/0"
+    assert (
+        routes._public_service_url(
+            "redis://user:password@cache.internal:6379/0?token=secret"
+        )
+        == "redis://cache.internal:6379/0"
+    )
 
 
 def test_critic_score_normalizes_untrusted_model_values():
@@ -261,7 +289,9 @@ class TestAdaptiveRetrieverRouting:
         # Check specific intent patterns first, broad patterns last
         if any(w in q for w in ["concept", "theory", "idea", "概念"]):
             return "conceptual"
-        if any(w in q for w in ["compare", "difference", "vs", "versus", "区别", "比较"]):
+        if any(
+            w in q for w in ["compare", "difference", "vs", "versus", "区别", "比较"]
+        ):
             return "comparative"
         if any(w in q for w in ["how to", "steps", "process", "how do", "如何"]):
             return "procedural"
@@ -288,7 +318,10 @@ class TestAdaptiveRetrieverRouting:
         assert self.classify_query("How to implement a vector database") == "procedural"
 
     def test_classify_analytical(self):
-        assert self.classify_query("Analyze the impact of attention mechanisms") == "analytical"
+        assert (
+            self.classify_query("Analyze the impact of attention mechanisms")
+            == "analytical"
+        )
 
     def test_classify_graph(self):
         assert self.classify_query("Relation between transformers and LSTMs") == "graph"
@@ -330,8 +363,13 @@ class TestGraphRAGLogic:
         assert entities["Cupertino"]["type"] == "location"
 
     def test_relationship_extraction(self):
-        relations = [("OpenAI", "developed", "GPT-4"), ("Microsoft", "invested", "OpenAI")]
-        openai_relations = [r for r in relations if r[0] == "OpenAI" or r[2] == "OpenAI"]
+        relations = [
+            ("OpenAI", "developed", "GPT-4"),
+            ("Microsoft", "invested", "OpenAI"),
+        ]
+        openai_relations = [
+            r for r in relations if r[0] == "OpenAI" or r[2] == "OpenAI"
+        ]
         assert len(openai_relations) == 2
         assert ("Microsoft", "invested", "OpenAI") in relations
 
@@ -345,7 +383,10 @@ class TestGraphRAGLogic:
 
     def test_summary_generation_format(self):
         community_data = {
-            "comm_0": {"nodes": ["Transformer", "Self-Attention"], "relations": [("Transformer", "uses", "Self-Attention")]},
+            "comm_0": {
+                "nodes": ["Transformer", "Self-Attention"],
+                "relations": [("Transformer", "uses", "Self-Attention")],
+            },
         }
         summary = f"Community comm_0 contains entities: {', '.join(community_data['comm_0']['nodes'])}"
         assert "Transformer" in summary
@@ -595,6 +636,135 @@ async def test_orchestrator_passes_dependency_context_and_cost() -> None:
     assert "cost_usd" not in result.token_usage
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_adds_semantic_memory_to_working_context() -> None:
+    class SemanticMemoryStub:
+        async def recall(self, task: str, top_k: int = 5):
+            assert task == "task"
+            assert top_k == 3
+            return [
+                SimpleNamespace(
+                    fact_id="fact-1",
+                    content="Prior verified research.",
+                    confidence=0.8,
+                    sources=["https://example.com"],
+                )
+            ]
+
+    orchestrator = Orchestrator(
+        planner=_FakePlanner(),
+        researcher=_ContextResearcher(),
+        synthesizer=_NoopSynthesizer(),
+        critic=_NoopCritic(),
+        semantic_memory=SemanticMemoryStub(),
+    )
+
+    memory = await orchestrator._create_working_memory("task")
+
+    assert "Prior verified research." in memory.get_context_string()
+
+
+@pytest.mark.asyncio
+async def test_sync_and_stream_cache_restore_the_same_result() -> None:
+    cached = AgentResult(
+        agent_name="orchestrator",
+        output="Cached report [1].",
+        data={
+            "sources": [
+                {
+                    "index": 1,
+                    "title": "Cached source",
+                    "url": "https://example.com/cached",
+                }
+            ]
+        },
+        metadata={"quality": 9.0, "cost": 0.01},
+        token_usage={"prompt_tokens": 5},
+        cost_usd=0.01,
+        cost_status="estimated",
+    )
+
+    class MemoryStub:
+        async def recall(self, task: str):
+            assert task == "cached task"
+            return cached.to_dict()
+
+    orchestrator = Orchestrator(
+        planner=SimpleNamespace(),
+        researcher=SimpleNamespace(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+        episodic_memory=MemoryStub(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            queue_timeout=5,
+            sse_heartbeat_seconds=1,
+            research_timeout=30,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+    )
+
+    sync_result = await orchestrator.run("cached task")
+    events = [event async for event in orchestrator.stream_run("cached task")]
+    stream_result = next(event["result"] for event in events if event["type"] == "done")
+
+    assert sync_result.output == stream_result.output
+    assert sync_result.data["sources"] == stream_result.data["sources"]
+    assert sync_result.metadata == stream_result.metadata
+    assert sync_result.token_usage == stream_result.token_usage == {}
+    assert sync_result.cost_usd is stream_result.cost_usd is None
+    assert sync_result.cost_status == stream_result.cost_status == "not_applicable"
+    assert sync_result.metadata["cached_generation_token_usage"] == {
+        "prompt_tokens": 5
+    }
+    assert sync_result.metadata["cached_generation_cost_usd"] == 0.01
+    assert sync_result.metadata["cached_generation_cost_status"] == "estimated"
+    assert sync_result.data["from_cache"] is True
+    assert stream_result.data["from_cache"] is True
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_rejects_legacy_partial_cache_entries() -> None:
+    class MemoryStub:
+        async def recall(self, task: str):
+            assert task == "partial cache"
+            return AgentResult(
+                agent_name="orchestrator",
+                success=True,
+                output="Incomplete cached report.",
+                data={
+                    "subtask_outputs": [
+                        {
+                            "task_id": "one",
+                            "success": True,
+                            "output": "finding",
+                        },
+                        {
+                            "task_id": "two",
+                            "success": False,
+                            "output": "timed out",
+                        },
+                    ]
+                },
+            ).to_dict()
+
+    orchestrator = Orchestrator(
+        planner=SimpleNamespace(),
+        researcher=SimpleNamespace(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+        episodic_memory=MemoryStub(),
+    )
+
+    result = await orchestrator._recall_cached_result(
+        "partial cache",
+        start_time=time.perf_counter(),
+    )
+
+    assert result is None
+
+
 def _empty_synthesis_orchestrator() -> Orchestrator:
     orchestrator = Orchestrator(
         planner=_FakePlanner(),
@@ -616,6 +786,71 @@ def _empty_synthesis_orchestrator() -> Orchestrator:
 
 
 @pytest.mark.asyncio
+async def test_partial_subtask_failure_is_degraded_and_not_cached() -> None:
+    stored: list[AgentResult] = []
+
+    class MemoryStub:
+        async def store(self, task: str, result: AgentResult) -> None:
+            del task
+            stored.append(result)
+
+    orchestrator = Orchestrator(
+        planner=SimpleNamespace(),
+        researcher=SimpleNamespace(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+        episodic_memory=MemoryStub(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        llm=SimpleNamespace(llm_provider="test"),
+    )
+    plan = ResearchPlan(
+        plan_id="partial",
+        original_task="compare",
+        subtasks=[
+            SubTask(task_id="one", description="completed"),
+            SubTask(task_id="two", description="timed out"),
+        ],
+    )
+    result = orchestrator._build_success_result(
+        output="Partial report.",
+        plan=plan,
+        subtask_outputs=[
+            {
+                "task_id": "one",
+                "description": "completed",
+                "success": True,
+                "output": "finding",
+                "sources": [],
+            },
+            {
+                "task_id": "two",
+                "description": "timed out",
+                "success": False,
+                "output": "Subtask 'two' timed out after 60s.",
+                "sources": [],
+            },
+        ],
+        sources=[],
+        final_critic=CriticScore(overall=8.0, should_refine=False),
+        refine_count=0,
+        total_usage={"total_tokens": 10},
+        elapsed_ms=1000,
+        total_cost_usd=0.01,
+        cost_status="estimated",
+    )
+
+    await orchestrator._store_memories("compare", result)
+
+    assert result.success is True
+    assert result.metadata["outcome"] == "degraded"
+    assert result.metadata["completed_subtask_count"] == 1
+    assert result.metadata["failed_subtask_count"] == 1
+    assert "two" in result.metadata["failure_reason"]
+    assert stored == []
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_rejects_empty_synthesis() -> None:
     result = await _empty_synthesis_orchestrator().run("task")
 
@@ -626,8 +861,7 @@ async def test_orchestrator_rejects_empty_synthesis() -> None:
 @pytest.mark.asyncio
 async def test_streaming_orchestrator_rejects_empty_synthesis() -> None:
     events = [
-        event
-        async for event in _empty_synthesis_orchestrator().stream_run("task")
+        event async for event in _empty_synthesis_orchestrator().stream_run("task")
     ]
 
     done = [event for event in events if event["type"] == "done"]
@@ -653,9 +887,7 @@ class _FailedResearcher:
 class _UnexpectedSynthesizer:
     async def synthesize(self, **kwargs):
         del kwargs
-        raise AssertionError(
-            "synthesizer must not run when all subtasks fail"
-        )
+        raise AssertionError("synthesizer must not run when all subtasks fail")
 
     async def synthesize_stream(self, **kwargs):
         del kwargs
@@ -691,26 +923,17 @@ async def test_orchestrator_does_not_report_all_failed_tasks_as_success() -> Non
     assert result.success is False
     assert "all subtasks failed" in result.output
     assert result.data["subtask_outputs"]
-    assert all(
-        not item["success"]
-        for item in result.data["subtask_outputs"]
-    )
+    assert all(not item["success"] for item in result.data["subtask_outputs"])
 
 
 @pytest.mark.asyncio
 async def test_streaming_orchestrator_emits_failed_done_result() -> None:
-    events = [
-        event
-        async for event in _failed_orchestrator().stream_run("task")
-    ]
+    events = [event async for event in _failed_orchestrator().stream_run("task")]
 
     done = [event for event in events if event["type"] == "done"]
     assert len(done) == 1
     assert done[0]["result"].success is False
-    assert not any(
-        event["type"] == "synthesizing"
-        for event in events
-    )
+    assert not any(event["type"] == "synthesizing" for event in events)
 
 
 def test_collect_sources_deduplicates_and_reindexes() -> None:
@@ -768,9 +991,7 @@ def test_code_executor_uses_isolated_subprocess() -> None:
 
 
 def test_code_executor_rejects_non_whitelisted_import() -> None:
-    result = CodeExecutor().execute(
-        "import os\nprint(os.getcwd())"
-    )
+    result = CodeExecutor().execute("import os\nprint(os.getcwd())")
 
     assert result.success is False
     assert "Module not allowed" in (result.error or "")
@@ -784,8 +1005,7 @@ def test_code_executor_rejects_non_whitelisted_import() -> None:
             "6",
         ),
         (
-            "import pandas as pd\n"
-            "print(int(pd.Series([1, 2, 3]).sum()))",
+            "import pandas as pd\nprint(int(pd.Series([1, 2, 3]).sum()))",
             "6",
         ),
     ],
@@ -805,8 +1025,7 @@ def test_code_executor_runs_whitelisted_scientific_modules(
 
 def test_code_executor_blocks_scientific_library_file_access() -> None:
     result = CodeExecutor().execute(
-        "import numpy as np\n"
-        "print(np.fromfile(target, dtype=np.uint8, count=8))",
+        "import numpy as np\nprint(np.fromfile(target, dtype=np.uint8, count=8))",
         vars={"target": str(Path("pyproject.toml").resolve())},
         timeout=5,
     )
@@ -1028,9 +1247,7 @@ async def test_rag_tool_does_not_retrieve_for_greeting() -> None:
             del kwargs
             raise AssertionError("greetings must not query the knowledge base")
 
-    result = await RAGTool(
-        retriever=UnexpectedRetriever()
-    ).execute_async("你好")
+    result = await RAGTool(retriever=UnexpectedRetriever()).execute_async("你好")
 
     assert result.success is True
     assert result.data["intent"] == "conversation"
@@ -1098,19 +1315,127 @@ async def test_rag_tool_accepts_positive_keyword_evidence() -> None:
     assert "rag.md" in result.output
 
 
+@pytest.mark.asyncio
+async def test_rag_tool_requires_all_explicit_technical_concepts() -> None:
+    class Retriever:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            return {
+                "results": [
+                    {
+                        "id": "python-only",
+                        "text": "Python 虚拟环境、解释器和第三方库管理。",
+                        "document_source": "python.md",
+                        "score": 1.0,
+                        "rrf_score": 1.0,
+                        "semantic_score": 0.42,
+                        "keyword_score": 8.0,
+                        "retrieval_sources": ["bm25", "vector"],
+                    }
+                ]
+            }
+
+    result = await RAGTool(retriever=Retriever()).execute_async(
+        "Python 和 Java 有什么区别",
+        threshold=0.6,
+    )
+
+    assert result.success is True
+    assert result.data["total"] == 0
+    assert result.data["retrieval_quality"] == 0.0
+    assert "暂无高度相关的资料" in result.output
+
+
+@pytest.mark.asyncio
+async def test_rag_tool_rejects_high_semantic_score_without_query_evidence() -> None:
+    class Retriever:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            return {
+                "results": [
+                    {
+                        "id": "false-positive",
+                        "text": "这份材料讨论餐饮门店排班和库存管理。",
+                        "document_source": "operations.md",
+                        "semantic_score": 0.98,
+                        "keyword_score": 0.0,
+                        "retrieval_sources": ["vector"],
+                    }
+                ]
+            }
+
+    result = await RAGTool(retriever=Retriever()).execute_async(
+        "量子计算在药物研发中的应用",
+        threshold=0.6,
+    )
+
+    assert result.success is True
+    assert result.data["total"] == 0
+    assert result.data["retrieval_quality"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_rag_tool_reports_retrieval_quality_not_answer_quality() -> None:
+    class Retriever:
+        async def retrieve(self, **kwargs):
+            del kwargs
+            return {
+                "results": [
+                    {
+                        "id": "comparison",
+                        "text": "Python 是动态类型语言，Java 是静态类型语言。",
+                        "document_source": "comparison.md",
+                        "semantic_score": 0.75,
+                        "keyword_score": 3.0,
+                        "retrieval_sources": ["bm25", "vector"],
+                    }
+                ]
+            }
+
+    result = await RAGTool(retriever=Retriever()).execute_async(
+        "Python 和 Java 有什么区别",
+        threshold=0.6,
+    )
+
+    assert result.data["total"] == 1
+    assert "quality" not in result.data
+    assert result.data["retrieval_quality"] == pytest.approx(7.5)
+
+
+def test_reranker_normalizes_unbounded_logits() -> None:
+    class Model:
+        @staticmethod
+        def predict(pairs):
+            assert len(pairs) == 2
+            return [-2.0, 3.0]
+
+    reranker = CrossEncoderReranker("test-model")
+    reranker._model = Model()
+
+    results = reranker.rerank(
+        "query",
+        [
+            {"id": "low", "text": "low"},
+            {"id": "high", "text": "high"},
+        ],
+        top_k=2,
+    )
+
+    assert [item["id"] for item in results] == ["high", "low"]
+    assert 0.0 < results[0]["rerank_score"] < 1.0
+    assert results[0]["rerank_score_raw"] == 3.0
+
+
 def test_rag_tool_formats_code_evidence_as_fenced_markdown() -> None:
     output = RAGTool()._format_results(
         [
             {
-                "text": (
-                    "from llama_cpp import Llama\n"
-                    "MODEL_KWARGS = {\"n_ctx\": 2048}"
-                ),
+                "text": ('from llama_cpp import Llama\nMODEL_KWARGS = {"n_ctx": 2048}'),
                 "document_source": "example.pdf",
                 "metadata": {"page": 12},
             },
             {
-                "text": "<label>问题</label>\n<input type=\"text\">",
+                "text": '<label>问题</label>\n<input type="text">',
                 "document_source": "web.pdf",
             },
         ],
@@ -1126,8 +1451,11 @@ def test_rag_tool_formats_code_evidence_as_fenced_markdown() -> None:
 @pytest.mark.parametrize(
     ("snippet", "language"),
     [
-        ("from pathlib import Path\ndef load_file(path):\n    return Path(path).read_text()", "python"),
-        ("<main>\n  <button type=\"button\">Run</button>\n</main>", "html"),
+        (
+            "from pathlib import Path\ndef load_file(path):\n    return Path(path).read_text()",
+            "python",
+        ),
+        ('<main>\n  <button type="button">Run</button>\n</main>', "html"),
         ("const greet = (name) => console.log(`Hello ${name}`);", "javascript"),
         ("interface User { id: number }\nconst user: User = { id: 1 };", "typescript"),
         (
@@ -1137,20 +1465,20 @@ def test_rag_tool_formats_code_evidence_as_fenced_markdown() -> None:
             "}",
             "java",
         ),
-        ("using System;\nConsole.WriteLine(\"hello\");", "csharp"),
-        ("#include <iostream>\nint main() { std::cout << \"hi\"; }", "cpp"),
-        ("#include <stdio.h>\nint main(void) { printf(\"hi\"); }", "c"),
-        ("package main\nfunc main() { fmt.Println(\"hi\") }", "go"),
-        ("fn main() {\n    println!(\"hi\");\n}", "rust"),
-        ("fun main() {\n    println(\"hi\")\n}", "kotlin"),
-        ("import Foundation\nprint(\"hello\")", "swift"),
-        ("<?php\n$name = \"MindForge\";\necho $name;", "php"),
-        ("require \"json\"\ndef load_data\n  puts \"ready\"\nend", "ruby"),
+        ('using System;\nConsole.WriteLine("hello");', "csharp"),
+        ('#include <iostream>\nint main() { std::cout << "hi"; }', "cpp"),
+        ('#include <stdio.h>\nint main(void) { printf("hi"); }', "c"),
+        ('package main\nfunc main() { fmt.Println("hi") }', "go"),
+        ('fn main() {\n    println!("hi");\n}', "rust"),
+        ('fun main() {\n    println("hi")\n}', "kotlin"),
+        ('import Foundation\nprint("hello")', "swift"),
+        ('<?php\n$name = "MindForge";\necho $name;', "php"),
+        ('require "json"\ndef load_data\n  puts "ready"\nend', "ruby"),
         ("SELECT id, name\nFROM users\nWHERE active = true;", "sql"),
         ("query Research($id: ID!) {\n  document(id: $id) { title }\n}", "graphql"),
         ('{"provider": "local", "enabled": true}', "json"),
         ("services:\n  api:\n    image: mindforge", "yaml"),
-        ("[server]\nhost = \"127.0.0.1\"\nport = 8000", "toml"),
+        ('[server]\nhost = "127.0.0.1"\nport = 8000', "toml"),
         (".panel {\n  display: flex;\n}", "css"),
         ("FROM python:3.11-slim\nRUN pip install mindforge", "dockerfile"),
         ("Get-ChildItem | Where-Object { $_.Length -gt 0 }", "powershell"),
@@ -1231,10 +1559,7 @@ def test_embedding_manager_pins_configured_model_revision(
 
     assert calls[0][1]["revision"]
     assert calls[0][1]["local_files_only"] is True
-    assert (
-        calls[0][1]["device"]
-        == get_settings().llm.sentence_transformers_device
-    )
+    assert calls[0][1]["device"] == get_settings().llm.sentence_transformers_device
 
 
 def test_embedding_dimension_adapter_preserves_geometry() -> None:
@@ -1264,9 +1589,7 @@ def test_research_plan_rejects_invalid_dependencies() -> None:
     unknown = ResearchPlan(
         plan_id="unknown",
         original_task="task",
-        subtasks=[
-            SubTask("t1", "one", dependencies=["missing"])
-        ],
+        subtasks=[SubTask("t1", "one", dependencies=["missing"])],
     )
     with pytest.raises(ValueError, match="unknown task"):
         unknown.validate()
@@ -1274,10 +1597,7 @@ def test_research_plan_rejects_invalid_dependencies() -> None:
     oversized = ResearchPlan(
         plan_id="oversized",
         original_task="task",
-        subtasks=[
-            SubTask(f"t{index}", f"task {index}")
-            for index in range(6)
-        ],
+        subtasks=[SubTask(f"t{index}", f"task {index}") for index in range(6)],
     )
     with pytest.raises(ValueError, match="allowed range"):
         oversized.validate(max_subtasks=5)
@@ -1417,9 +1737,7 @@ async def test_readiness_uses_http_status_for_core_health(
 @pytest.mark.asyncio
 async def test_history_pagination_validation_happens_before_database() -> None:
     invalid_page = await _api_get("/api/v1/history?page=0")
-    oversized_page = await _api_get(
-        "/api/v1/history?page_size=101"
-    )
+    oversized_page = await _api_get("/api/v1/history?page_size=101")
 
     assert invalid_page.status_code == 422
     assert oversized_page.status_code == 422
@@ -1502,12 +1820,11 @@ def test_frontend_path_rejects_sibling_prefix_traversal(
     frontend.mkdir()
     monkeypatch.setattr(server, "_FRONTEND_PATH", frontend.resolve())
 
-    assert server._safe_frontend_candidate("assets/app.js") == (
-        frontend / "assets" / "app.js"
-    ).resolve()
-    assert server._safe_frontend_candidate(
-        "../dist-private/secret.txt"
-    ) is None
+    assert (
+        server._safe_frontend_candidate("assets/app.js")
+        == (frontend / "assets" / "app.js").resolve()
+    )
+    assert server._safe_frontend_candidate("../dist-private/secret.txt") is None
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,18 @@
 # MindForge — 自适应研究助理系统（完整实现）
 
 > **文档同步说明（2026-07-30）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
+> **历史代码说明：** 本文后半部分的长代码块用于记录设计演进，其中出现的
+> `AgentMessage`、`DirectoryParser`、旧 Langfuse API 和语义
+> 策略统计并非当前运行时代码，不应复制回项目。
 > **当前研究结果行为：** 普通与流式 LLM usage 统一归一化，模型价格通过
 > `LLM_MODEL_PRICING` 配置并仅展示估算费用；未知价格或缺失 usage 不再显示为
 > `$0`。研究页、流式面板和历史页共用 Markdown/GFM 渲染，表格具备边框和窄屏
 > 滚动；最终报告中的 `[N]` 可安全跳转到外部网页或内部来源条目，历史详情保留
 > 来源元数据；成功任务清空输入，失败任务保留问题。
+> **当前可观测行为：** 每次研究创建一个以问题为显示标题的顶层 Trace，内部
+> `orchestrator.research`、四个 Agent、LLM 与工具调用按父子关系挂载；Trace ID
+> 贯穿 REST、SSE、研究结果和历史记录。失败和检索降级保留原始原因，前端不接触
+> Langfuse 凭证。
 > **项目定位：** 一个面向文本研究任务的自适应研究助理。不是简单的"问答机器人"，而是能**主动分解问题、迭代检索、综合推理、生成结构化研究报告**的 Agent 系统。
 >
 > **面试定位：** 2026 年 Agent 开发实习面试项目。集成 **Agentic RAG + Multi-Agent 协作 + 自适应记忆 + 流式可观测性**。MCP 章节仅保留历史学习说明，旧源码、脚本和测试已从当前 `main` 工作树移除。
@@ -109,7 +116,7 @@ MindForge/                                       # main 分支（全栈 Web 平�
 ├── scripts/
 │   ├── benchmark_parser.py                      # 私有解析基准运行器
 │   ├── generate_qa_dataset.py                   # 私有 QA 语料生成器
-│   └── run_research.py                          # 快速启动演示
+│   └── run_research.py                          # 命令行执行完整研究任务
 │
 ├── src/mindforge/                               # Python 后端核心
 │   ├── __init__.py
@@ -176,12 +183,12 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   ├── observability/                           # 可观测性
 │   │   ├── __init__.py
 │   │   ├── tracer.py                            # LangFuse + JSONL 追踪
-│   │   └── metrics.py                           # Token/工具调用统计（真实时间戳）
+│   │   └── store.py                             # Trace 摘要、列表与详情读取
 │   │
 │   └── api/                                     # FastAPI 服务层
 │       ├── __init__.py
 │       ├── server.py                            # 应用入口（生命周期 + 静态文件托管）
-│       ├── routes.py                            # REST + SSE 路由（22 个方法）
+│       ├── routes.py                            # REST + SSE 路由（26 个方法）
 │       └── schemas.py                           # Pydantic v2 请求/响应模型
 │
 ├── tests/                                       # 测试
@@ -200,7 +207,7 @@ MindForge/                                       # main 分支（全栈 Web 平�
 Qdrant             向量检索与 payload 过滤              "自托管向量存储"
 FastAPI + SSE      原生异步，流式输出零配置           "生产级 API 标准"
 Redis              情节记忆持久化与 TTL                 "跨重启缓存"
-LangFuse           开源可观测性，全链路追踪            "生产环境必备"
+Langfuse 3         可选远程分析，本地 JSONL 始终保留    "可观测性不阻断主流程"
 pytest/Vitest      回归测试锁定失败语义和交互竞态       "可重复验证"
 统一 LLM Registry  云端与本地模型共用 Agent 接口          "供应商解耦"
 GraphRAG           微软 2024 提出的图增强检索          "前沿技术敏感度"
@@ -479,7 +486,6 @@ LLM_EMBEDDING_PROVIDER=bge          # openai | bge
 # LLM_CRITIC_MODEL=gpt-4o
 # LLM_SYNTHESIZER_MODEL=gpt-4o
 # LLM_EMBEDDING_MODEL=text-embedding-3-small
-# LLM_EMBEDDING_DIM=1024             # BGE-M3=1024, OpenAI=1536
 
 # ── 向量数据库 ──
 VECTOR_QDRANT_URL=http://localhost:6333
@@ -488,6 +494,7 @@ VECTOR_COLLECTION_NAME=mindforge_docs
 
 # ── 检索参数 ──
 # RETRIEVAL_VECTOR_TOP_K=20
+# RETRIEVAL_BM25_TOP_K=20
 # RETRIEVAL_RERANK_TOP_K=6
 
 # ── RAPTOR ──
@@ -499,9 +506,12 @@ VECTOR_COLLECTION_NAME=mindforge_docs
 
 # ── Agent（性能优化默认值）──
 # AGENT_MAX_ITERATIONS=3              # ReAct 最大轮次（默认3，提升速度）
-# AGENT_MAX_SEARCH_STEPS=3            # 搜索最大调用次数
 # AGENT_MAX_REFINE_ROUNDS=1           # Critic 精炼轮次（默认1，减少API调用）
-# AGENT_SUBTASK_TIMEOUT=30            # 子任务超时（秒）
+# AGENT_RESEARCH_MODE=balanced        # fast | balanced | deep
+# AGENT_SOURCE_POLICY=auto            # auto | knowledge_base | web
+# AGENT_FALLBACK_ENABLED=true
+# AGENT_LLM_REQUEST_TIMEOUT=45        # 单次模型调用超时（秒）
+# AGENT_SUBTASK_TIMEOUT=60            # 子任务超时（秒）
 # AGENT_RESEARCH_TIMEOUT=180          # 全流程超时（秒）
 # AGENT_CRITIC_THRESHOLD=7.0
 
@@ -5862,6 +5872,12 @@ class SemanticMemory:
 
 ### 10.1 链路追踪
 
+> **当前实现说明：** 以下长代码块用于解释早期设计，不是当前源码副本。当前
+> `Tracer` 使用 32 位 Trace ID 和 `ContextVar` 传播上下文；根观察显式传入
+> Langfuse v3 `trace_context`，并将 `agent.*`、`llm.chat` 和 `tool.execute`
+> 组织为同一研究 Trace。完成后写入 JSONL 与摘要侧车文件，`TraceRepository`
+> 为 `/api/v1/observability/*` 提供只读、有界、脱敏的数据。
+
 ```python
 # src/mindforge/observability/tracer.py
 """链路追踪 — LangFuse + 本地文件双写模式"""
@@ -5998,130 +6014,19 @@ def get_tracer() -> Tracer:
     return Tracer()
 ```
 
-### 10.2 指标收集
+### 10.2 Trace 摘要、Token 与费用
 
-```python
-# src/mindforge/observability/metrics.py
-"""指标收集 — Token 用量、延迟、工具调用统计"""
+当前运行时不再维护独立的 `metrics.py` 或 `MetricsCollector`。每个 `llm.chat` Span
+记录标准化 usage，顶层研究 Trace 汇总 Token、耗时、费用状态和失败原因：
 
-from __future__ import annotations
-from typing import Dict, List
-from dataclasses import dataclass, field
-import time
-import json
-from collections import defaultdict
-from pathlib import Path
-
-
-@dataclass
-class MetricPoint:
-    """指标数据点"""
-    name: str
-    value: float
-    timestamp: float = field(default_factory=time.time)
-    labels: dict = field(default_factory=dict)
-
-
-class MetricsCollector:
-    """
-    指标收集器。
-
-    收集指标：
-    - Token 用量（输入/输出/总计）
-    - 各 Agent 延迟
-    - 工具调用次数和成功率
-    - 检索延迟
-    - 成本估算
-    """
-
-    def __init__(self):
-        self.points: List[MetricPoint] = []
-        self._reset_session()
-
-    def _reset_session(self):
-        self.session_stats = {
-            "total_tokens": 0,
-            "total_cost": 0.0,
-            "tool_calls": 0,
-            "total_latency": 0.0,
-            "agent_calls": defaultdict(int),
-        }
-
-    def record_token_usage(
-        self,
-        prompt_tokens: int,
-        completion_tokens: int,
-        model: str = "gpt-4o",
-    ):
-        """记录 Token 用量"""
-        total = prompt_tokens + completion_tokens
-        cost = self._estimate_cost(prompt_tokens, completion_tokens, model)
-
-        self.points.append(MetricPoint("prompt_tokens", prompt_tokens))
-        self.points.append(MetricPoint("completion_tokens", completion_tokens))
-        self.points.append(MetricPoint("total_tokens", total))
-        self.points.append(MetricPoint("cost_usd", cost))
-
-        self.session_stats["total_tokens"] += total
-        self.session_stats["total_cost"] += cost
-
-    def record_tool_call(self, tool_name: str, success: bool, latency_ms: float):
-        """记录工具调用"""
-        self.points.append(MetricPoint("tool_call", 1, labels={
-            "tool": tool_name, "success": str(success),
-        }))
-        self.points.append(MetricPoint("tool_latency_ms", latency_ms, labels={
-            "tool": tool_name,
-        }))
-        self.session_stats["tool_calls"] += 1
-
-    def record_agent_latency(self, agent_name: str, latency_ms: float):
-        """记录 Agent 延迟"""
-        self.points.append(MetricPoint("agent_latency_ms", latency_ms, labels={
-            "agent": agent_name,
-        }))
-        self.session_stats["total_latency"] += latency_ms
-        self.session_stats["agent_calls"][agent_name] += 1
-
-    def get_session_summary(self) -> Dict:
-        """获取会话统计摘要"""
-        return dict(self.session_stats)
-
-    def _estimate_cost(
-        self,
-        prompt_tokens: int,
-        completion_tokens: int,
-        model: str,
-    ) -> float:
-        """估算 API 成本"""
-        pricing = {
-            "gpt-4o": (0.01, 0.03),        # $/1K tokens: input, output
-            "gpt-4o-mini": (0.0015, 0.006),
-            "deepseek-chat": (0.0005, 0.001),
-            "deepseek-reasoner": (0.002, 0.008),
-        }
-
-        input_price, output_price = pricing.get(model, (0.003, 0.015))
-        return (
-            prompt_tokens / 1000 * input_price
-            + completion_tokens / 1000 * output_price
-        )
-
-    def export(self, path: str = ".metrics/session.json"):
-        """导出指标到 JSON"""
-        Path(path).parent.mkdir(exist_ok=True)
-        with open(path, "w") as f:
-            json.dump({
-                "points": [
-                    {"name": p.name, "value": p.value, "timestamp": p.timestamp, "labels": p.labels}
-                    for p in self.points
-                ],
-                "summary": self.session_stats,
-            }, f, ensure_ascii=False, default=str)
-```
+- API 返回 usage 且 `.env` 中 `LLM_MODEL_PRICING` 包含对应 Provider/模型时，费用状态为 `estimated`。
+- API 未返回 usage 时显示“API 未返回用量”，未知模型价格时显示“未配置模型价格”，不会把未知费用显示成 `$0`。
+- 情节记忆命中时不重复归属原生成费用；页面显示“缓存命中”和“不涉及 API 费用”，原生成用量仅保留在内部元数据中供追溯。
+- 本地模型标记为 `not_applicable`；部分调用可估算时标记为 `partial`。
+- Trace 列表和详情以研究问题为显示标题，内部观察链仍保留 Orchestrator、Agent、LLM 和工具节点。
+- `OBSERVABILITY_TRACE_RETENTION_DAYS=0` 表示永久保留，本地 Trace 支持删除单条或清空。
 
 ---
-
 ## 第十一章：API 服务层
 
 ### 11.1 数据模型
@@ -6614,9 +6519,8 @@ npm run build
 cp .env.example .env && docker compose config --quiet
 ```
 
-2026-07-30 验证基线：186 项 pytest 通过、35 项
-Vitest 回归测试通过、ESLint 通过、Vite 生产构建通过。完整质量门禁状态以
-GitHub Actions 的实际运行结果为准。
+验证命令包括完整 pytest、Vitest、ESLint 和 Vite 生产构建。具体用例数量会随
+功能演进变化，完整质量门禁状态以仓库命令和 GitHub Actions 的实际输出为准。
 
 ### 13.7 长文档处理
 
@@ -6653,6 +6557,7 @@ mindforge-web/
     ├── types/                    # TypeScript 类型定义
     │   ├── api.ts                # API 响应/错误类型
     │   ├── research.ts           # Agent/SSE/研究类型
+    │   ├── observability.ts      # Trace 状态、摘要、观察链类型
     │   └── document.ts           # 文档类型
     │
     ├── lib/                      # 工具函数
@@ -6673,13 +6578,14 @@ mindforge-web/
     │   ├── use-documents.ts      # 文档 CRUD
     │   ├── use-health.ts         # /health 轮询
     │   ├── use-stats.ts          # /stats 轮询
+    │   ├── use-observability.ts  # Trace 状态、列表与详情
     │   └── use-media-query.ts    # 响应式断点
     │
     ├── components/
     │   ├── layout/               # AppShell / Sidebar / Header
     │   ├── dashboard/            # StatusCardsGrid
     │   ├── research/             # QueryInput / PlanDAG / ReportViewer / ...
-    │   ├── pages/                # 5 个页面组件
+    │   ├── pages/                # 6 个页面组件（含可观测）
     │   └── shared/               # EmptyState / ErrorBoundary / LoadingSkeleton
     │
     └── routes/                   # 路由定义 (薄壳)
@@ -7427,8 +7333,8 @@ A:  设置 `LLM_LLM_PROVIDER`，或在设置页选择 Provider。兼容云 API �
 Q13: 怎么控制 LLM 调用成本？
 A:  四层成本控制：① per-role 模型分配（弱 Agent 用便宜模型）
     ② BaseAgent._chat() 内置指数退避重试（最多 3 次，避免失败时无限烧钱）
-    ③ MetricsCollector 记录每次调用的 Token 用量和美元成本
-    ④ Orchestrator 的 total_usage 字典累积整次研究的成本。
+    ③ llm.chat Span 与 AgentResult 记录标准化 Token usage 和费用状态
+    ④ Orchestrator 汇总整次研究；未知价格或缺失 usage 不显示为 $0。
     面试时可以说"我为每个 API 调用都算了账，不是盲目调用"。
 ```
 
@@ -7503,9 +7409,7 @@ A:  use-research-session.ts 优先读取设置接口中的运行时研究超时�
 ```
 Q22: 这个项目你实际开发中遇到了哪些坑？怎么解决的？
 A:  最大的坑有五个：
-    ① Qdrant 数据卷不能跨多个小版本直接升级——生产镜像升级前必须先备份，
-       按支持路径逐级启动并验证。当前镜像固定为 1.18.3，Python 客户端按
-       项目与 Qdrant 1.18.3 服务端对齐，锁定 qdrant-client>=1.18.0,<1.19.0。
+    ① Qdrant 升级前备份数据，并按官方支持路径完成兼容性验证。
     ② MCP subprocess npx 启动污染 stdout——npx 第一次运行下载包时
        输出进度条到 stdout，破坏了 JSON-RPC 协议的纯净性。
        解决：_send_request() 改为循环读取，跳过非 JSON 行和 notification 消息。
@@ -7772,7 +7676,7 @@ interface HistoryResponse {
 
 | 组件 | 版本 | 说明 |
 |------|------|------|
-| Qdrant (Docker) | v1.18.3 | 镜像 digest 固定，旧卷需逐级升级 |
+| Qdrant (Docker) | v1.18.3 | 镜像 digest 固定，升级前备份并验证兼容性 |
 | qdrant-client (pip) | >=1.18,<1.19 | 与 Qdrant Server 1.18.x 对齐 |
 | Redis (Docker) | redis:7-alpine | 对外端口 6377 |
 | PostgreSQL (Docker) | postgres:16-alpine | 唯一支持的数据库 |

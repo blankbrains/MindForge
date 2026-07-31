@@ -23,20 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AgentMessage:
-    """A message within an agent's conversation context.
-
-    Mirrors ChatMessage but is owned by the agent layer so we can add
-    agent-specific fields without coupling to the LLM layer.
-    """
-
-    role: str  # "system" | "user" | "assistant" | "tool"
-    content: str = ""
-    tool_calls: Optional[list[dict]] = None
-    tool_call_id: Optional[str] = None
-
-
-@dataclass
 class AgentResult:
     """Standard result wrapper for all agent execution."""
 
@@ -49,9 +35,61 @@ class AgentResult:
     latency_ms: float = 0.0
     cost_usd: float | None = None
     cost_status: str = "usage_unavailable"
+    trace_id: str | None = None
 
     def __str__(self) -> str:
         return self.output
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible representation."""
+        return {
+            "agent_name": self.agent_name,
+            "success": self.success,
+            "output": self.output,
+            "data": self.data,
+            "metadata": self.metadata,
+            "token_usage": self.token_usage,
+            "latency_ms": self.latency_ms,
+            "cost_usd": self.cost_usd,
+            "cost_status": self.cost_status,
+            "trace_id": self.trace_id,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> AgentResult:
+        """Restore a result from trusted application cache data."""
+        return cls(
+            agent_name=str(value.get("agent_name") or ""),
+            success=bool(value.get("success", True)),
+            output=str(value.get("output") or ""),
+            data=(
+                dict(value.get("data") or {})
+                if isinstance(value.get("data"), dict)
+                else {}
+            ),
+            metadata=(
+                dict(value.get("metadata") or {})
+                if isinstance(value.get("metadata"), dict)
+                else {}
+            ),
+            token_usage={
+                str(key): int(amount)
+                for key, amount in dict(value.get("token_usage") or {}).items()
+                if isinstance(amount, (int, float))
+            },
+            latency_ms=float(value.get("latency_ms") or 0.0),
+            cost_usd=(
+                float(value["cost_usd"])
+                if isinstance(value.get("cost_usd"), (int, float))
+                else None
+            ),
+            cost_status=str(value.get("cost_status") or "usage_unavailable"),
+            trace_id=(
+                str(value["trace_id"])
+                if isinstance(value.get("trace_id"), str)
+                else None
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -71,14 +109,10 @@ def _estimate_cost_details(
         return CostEstimate(None, "not_applicable")
 
     prompt_tokens = int(
-        usage.get("prompt_tokens", 0)
-        or usage.get("input_tokens", 0)
-        or 0
+        usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0) or 0
     )
     completion_tokens = int(
-        usage.get("completion_tokens", 0)
-        or usage.get("output_tokens", 0)
-        or 0
+        usage.get("completion_tokens", 0) or usage.get("output_tokens", 0) or 0
     )
     if prompt_tokens <= 0 and completion_tokens <= 0:
         return CostEstimate(None, "usage_unavailable")
@@ -204,17 +238,26 @@ class BaseAgent(ABC):
         temp = temperature if temperature is not None else self._temperature
         llm = _llm_override if _llm_override is not None else self._llm
         last_exc: Optional[Exception] = None
+        request_timeout = float(
+            getattr(self._settings.agent, "llm_request_timeout", 45)
+        )
+
+        async def call_llm() -> ChatResult:
+            return await asyncio.wait_for(
+                llm.chat(
+                    messages=messages,
+                    tools=tools,
+                    response_format=response_format,
+                    temperature=temp,
+                ),
+                timeout=request_timeout,
+            )
 
         for attempt in range(3):
             try:
                 tracer = self._get_tracer()
                 if tracer is None:
-                    return await llm.chat(
-                        messages=messages,
-                        tools=tools,
-                        response_format=response_format,
-                        temperature=temp,
-                    )
+                    return await call_llm()
                 model_name = getattr(
                     llm,
                     "_model",
@@ -225,7 +268,10 @@ class BaseAgent(ABC):
                     metadata={
                         "agent": self.name,
                         "model": model_name,
+                        "provider": self._provider_name,
                         "attempt": attempt + 1,
+                        "stage": "llm_request",
+                        "timeout_seconds": request_timeout,
                     },
                 ) as span:
                     span.input = {
@@ -241,12 +287,47 @@ class BaseAgent(ABC):
                             for tool in (tools or [])
                         ],
                     }
-                    result = await llm.chat(
-                        messages=messages,
-                        tools=tools,
-                        response_format=response_format,
-                        temperature=temp,
-                    )
+                    try:
+                        result = await call_llm()
+                    except asyncio.TimeoutError:
+                        span.metadata.update(
+                            {
+                                "status": "error",
+                                "error_code": "llm_request_timeout",
+                                "error_type": "TimeoutError",
+                            }
+                        )
+                        span.error = (
+                            "LLM request timed out after "
+                            f"{request_timeout:g} seconds."
+                        )
+                        raise
+                    except asyncio.CancelledError:
+                        span.metadata.update(
+                            {
+                                "status": "cancelled",
+                                "error_code": "llm_request_cancelled",
+                                "error_type": "CancelledError",
+                            }
+                        )
+                        span.error = "LLM request was cancelled before completion."
+                        raise
+                    except Exception as exc:
+                        status_code = getattr(exc, "status_code", None)
+                        span.metadata.update(
+                            {
+                                "status": "error",
+                                "error_code": "llm_request_failed",
+                                "error_type": type(exc).__name__,
+                            }
+                        )
+                        if isinstance(status_code, int):
+                            span.metadata["http_status"] = status_code
+                        span.error = (
+                            "LLM request failed: "
+                            f"{tracer.describe_exception(exc)}"
+                        )
+                        raise
                     span.output = {
                         "content": result.content[:4000],
                         "tool_call_count": len(result.tool_calls or []),
@@ -260,7 +341,7 @@ class BaseAgent(ABC):
                 if status is not None and 400 <= status < 500:
                     raise
                 if attempt < 2:
-                    wait = 2.0 ** attempt * 1.0
+                    wait = 2.0**attempt * 1.0
                     await asyncio.sleep(wait)
 
         raise RuntimeError(
@@ -351,9 +432,7 @@ class BaseAgent(ABC):
                         ),
                         "success": False,
                         "error": "Tool execution queue timeout",
-                        "execution_time_ms": (
-                            time.perf_counter() - started
-                        ) * 1000,
+                        "execution_time_ms": (time.perf_counter() - started) * 1000,
                     }
             tracer = self._get_tracer()
             if tracer is None:
@@ -380,9 +459,7 @@ class BaseAgent(ABC):
                 "output": f"Tool {tool_name} failed internally.",
                 "success": False,
                 "error": f"{type(exc).__name__}",
-                "execution_time_ms": (
-                    time.perf_counter() - started
-                ) * 1000,
+                "execution_time_ms": (time.perf_counter() - started) * 1000,
             }
         finally:
             if acquired_tool_slot and self._tool_semaphore is not None:
@@ -398,9 +475,8 @@ class BaseAgent(ABC):
             "success": result.success,
             "error": result.error,
             "data": result.data if result.data else None,
-            "execution_time_ms": result.execution_time_ms or (
-                time.perf_counter() - started
-            ) * 1000,
+            "execution_time_ms": result.execution_time_ms
+            or (time.perf_counter() - started) * 1000,
         }
 
     # -- Tool-calling loop --------------------------------------------------
@@ -457,7 +533,9 @@ class BaseAgent(ABC):
         final_content = ""
         tool_calls_made = 0
         tool_calls_rejected = 0
-        collected_sources: list[dict[str, Any]] = []  # aggregate source metadata from tool calls
+        collected_sources: list[
+            dict[str, Any]
+        ] = []  # aggregate source metadata from tool calls
         tool_call_details: list[dict[str, Any]] = []
 
         for round_idx in range(max_rounds):
@@ -466,8 +544,7 @@ class BaseAgent(ABC):
                 tools=(
                     tool_schemas
                     if use_tools
-                    and tool_calls_made
-                    < self._settings.agent.max_tool_calls_total
+                    and tool_calls_made < self._settings.agent.max_tool_calls_total
                     else None
                 ),
                 _llm_override=_llm_override,
@@ -488,8 +565,7 @@ class BaseAgent(ABC):
             # --- Has tool calls → execute in parallel ---
             remaining = max(
                 0,
-                self._settings.agent.max_tool_calls_total
-                - tool_calls_made,
+                self._settings.agent.max_tool_calls_total - tool_calls_made,
             )
             allowed_count = min(
                 len(result.tool_calls),
@@ -549,7 +625,11 @@ class BaseAgent(ABC):
                         )
                     )
                     # Collect source metadata from tool results (e.g. RAGTool returns sources in data)
-                    tool_data = exec_result.get("data") if isinstance(exec_result, dict) else None
+                    tool_data = (
+                        exec_result.get("data")
+                        if isinstance(exec_result, dict)
+                        else None
+                    )
                     if isinstance(tool_data, dict) and "sources" in tool_data:
                         for src in tool_data["sources"]:
                             if isinstance(src, dict):
@@ -577,9 +657,7 @@ class BaseAgent(ABC):
                 )
                 final_content = final_result.content or ""
                 if final_content:
-                    conv.append(
-                        ChatMessage(role="assistant", content=final_content)
-                    )
+                    conv.append(ChatMessage(role="assistant", content=final_content))
                 if final_result.usage:
                     for k, v in final_result.usage.items():
                         aggregated_usage[k] = aggregated_usage.get(k, 0) + (v or 0)
@@ -594,7 +672,11 @@ class BaseAgent(ABC):
                     break
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        model_used = getattr(_llm_override, "_model", self._model_name) if _llm_override else self._model_name
+        model_used = (
+            getattr(_llm_override, "_model", self._model_name)
+            if _llm_override
+            else self._model_name
+        )
         cost_estimate = _estimate_cost_details(
             model_used,
             aggregated_usage,
@@ -615,9 +697,7 @@ class BaseAgent(ABC):
                 "messages": len(conv),
                 "sources": collected_sources,
                 "tool_call_details": tool_call_details,
-                "failure_reason": (
-                    None if success else "empty_llm_response"
-                ),
+                "failure_reason": (None if success else "empty_llm_response"),
             },
             metadata={
                 "model": model_used,

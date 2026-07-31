@@ -99,6 +99,7 @@ def test_local_provider_initializes_without_api_key() -> None:
 
     assert isinstance(llm, OpenAICompatibleAdapter)
     assert llm.model == "qwen3"
+    assert llm.client.max_retries == 0
 
 
 def test_compatible_provider_rejects_missing_required_key() -> None:

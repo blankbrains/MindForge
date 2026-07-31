@@ -11,13 +11,6 @@ export interface DocumentItem {
   indexed_at?: string;
 }
 
-export interface IndexResponse {
-  doc_id: string;
-  filename: string;
-  chunk_count: number;
-  status: string;
-}
-
 export type IndexJobStatus =
   | "queued"
   | "running"

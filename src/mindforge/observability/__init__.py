@@ -1,9 +1,9 @@
-"""可观测性 — 链路追踪 / 指标收集"""
+"""可观测性 — 链路追踪与本地只读查询。"""
 
+from mindforge.observability.store import TraceRepository
 from mindforge.observability.tracer import Tracer
-from mindforge.observability.metrics import MetricsCollector
 
 __all__ = [
     "Tracer",
-    "MetricsCollector",
+    "TraceRepository",
 ]

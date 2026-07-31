@@ -1,4 +1,5 @@
 """Qdrant vector-store adapter for the configured 1.18.x deployment."""
+
 from __future__ import annotations
 import asyncio
 from typing import List, Optional, Dict
@@ -6,8 +7,13 @@ import logging
 
 from qdrant_client import QdrantClient, AsyncQdrantClient
 from qdrant_client.models import (
-    VectorParams, Distance, PointStruct, Filter,
-    FieldCondition, MatchValue, FilterSelector,
+    VectorParams,
+    Distance,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+    FilterSelector,
 )
 from mindforge.config import get_settings
 
@@ -34,7 +40,9 @@ class QdrantStore:
         if self.collection_name not in collections:
             self._sync_client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=self.embedding_dim, distance=Distance.COSINE),
+                vectors_config=VectorParams(
+                    size=self.embedding_dim, distance=Distance.COSINE
+                ),
             )
             logger.info(f"Collection created: {self.collection_name}")
             return
@@ -52,7 +60,9 @@ class QdrantStore:
 
     async def upsert(self, points: List[PointStruct]):
         result = await self._async_client.upsert(
-            collection_name=self.collection_name, points=points, wait=True,
+            collection_name=self.collection_name,
+            points=points,
+            wait=True,
         )
         return result
 
@@ -78,7 +88,9 @@ class QdrantStore:
         conditions = []
         for key, value in filters.items():
             if isinstance(value, (str, int, float, bool)):
-                conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
+                conditions.append(
+                    FieldCondition(key=key, match=MatchValue(value=value))
+                )
         return Filter(must=conditions) if conditions else None
 
     async def delete(self, doc_id: str):
@@ -96,10 +108,6 @@ class QdrantStore:
             ),
             wait=True,
         )
-
-    async def get_stats(self) -> Dict:
-        info = await self._async_client.get_collection(self.collection_name)
-        return {"name": self.collection_name, "points": info.points_count, "status": info.status}
 
     async def count(self, filters: Optional[Dict] = None) -> int:
         result = await self._async_client.count(
@@ -161,20 +169,14 @@ class QdrantStore:
                 scroll_filter=self._build_filter(filters),
                 limit=request_limit,
                 offset=offset,
-                with_payload=(
-                    payload_fields
-                    if payload_fields is not None
-                    else True
-                ),
+                with_payload=(payload_fields if payload_fields is not None else True),
                 with_vectors=with_vectors,
             )
             records.extend(page)
             if offset is None:
                 return records
             if len(records) >= limit_records:
-                raise RuntimeError(
-                    "Qdrant scan exceeded the configured record limit."
-                )
+                raise RuntimeError("Qdrant scan exceeded the configured record limit.")
 
 
 _store: Optional[QdrantStore] = None

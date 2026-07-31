@@ -34,7 +34,7 @@ class OpenAICompatibleAdapter(BaseLLM):
         supports_json_schema: bool = False,
         supports_stream_usage: bool = False,
         embed_model: str | None = None,
-        max_retries: int = 3,
+        max_retries: int = 0,
         default_headers: dict[str, str] | None = None,
         **request_kwargs: Any,
     ) -> None:

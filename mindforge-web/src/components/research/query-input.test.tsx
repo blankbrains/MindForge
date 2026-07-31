@@ -1,7 +1,14 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { QueryInput } from "@/components/research/query-input";
+
+afterEach(cleanup);
 
 describe("QueryInput", () => {
   it("labels retrieval-only submissions accurately", () => {
@@ -10,7 +17,8 @@ describe("QueryInput", () => {
         value="MindForge"
         onChange={vi.fn()}
         onSubmit={vi.fn()}
-        disabled={false}
+        isRunning={false}
+        onCancel={vi.fn()}
         retrievalOnly
       />,
     );
@@ -27,12 +35,35 @@ describe("QueryInput", () => {
         value="  MindForge  "
         onChange={vi.fn()}
         onSubmit={onSubmit}
-        disabled={false}
+        isRunning={false}
+        onCancel={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "开始研究" }));
 
     expect(onSubmit).toHaveBeenCalledWith("MindForge");
+  });
+
+  it("keeps the editor available and cancels an active research task", () => {
+    const onCancel = vi.fn();
+    const onChange = vi.fn();
+    render(
+      <QueryInput
+        value="下一条问题"
+        onChange={onChange}
+        onSubmit={vi.fn()}
+        isRunning
+        onCancel={onCancel}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    expect(input).not.toHaveProperty("disabled", true);
+    fireEvent.change(input, { target: { value: "新的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "停止研究" }));
+
+    expect(onChange).toHaveBeenCalledWith("新的草稿");
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 });

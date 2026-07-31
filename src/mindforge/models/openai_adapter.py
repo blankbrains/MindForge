@@ -16,7 +16,7 @@ from mindforge.models.base import (
 
 class OpenAIAdapter(BaseLLM):
     def __init__(self, model: str = "gpt-4o", api_key: Optional[str] = None,
-                 base_url: Optional[str] = None, max_retries: int = 3,
+                 base_url: Optional[str] = None, max_retries: int = 0,
                  embed_model: str = "text-embedding-3-small", **kwargs):
         normalized_model = model.strip()
         if not normalized_model:

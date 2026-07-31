@@ -10,6 +10,9 @@ export const LLM_PROVIDERS = [
 ] as const;
 
 export type LLMProvider = (typeof LLM_PROVIDERS)[number];
+export type ResearchMode = "fast" | "balanced" | "deep";
+export type SourcePolicy = "auto" | "knowledge_base" | "web";
+export type EmbeddingProvider = "openai" | "bge";
 
 export interface LLMProviderConfig {
   provider: LLMProvider;
@@ -75,30 +78,66 @@ interface SettingsPayload {
   compatible_api_key?: string;
   local_api_key?: string;
   llm_provider_configs?: ProviderUpdatePayload[];
-  embedding_provider?: "openai" | "bge";
+  embedding_provider?: EmbeddingProvider;
+  research_mode?: ResearchMode;
+  source_policy?: SourcePolicy;
+  fallback_enabled?: boolean;
   retrieval_top_k?: number;
   rerank_top_k?: number;
+  retrieval_min_score?: number;
+  keyword_min_coverage?: number;
   max_iterations?: number;
   max_refine_rounds?: number;
   critic_threshold?: number;
   subtask_timeout?: number;
   research_timeout?: number;
+  llm_request_timeout?: number;
+  max_subtasks?: number;
+  max_tool_calls_total?: number;
+  max_history_entries?: number;
+  langfuse_public_key?: string;
+  langfuse_secret_key?: string;
+  langfuse_host?: string;
+  observability_capture_content?: boolean;
+  trace_retention_days?: number;
+  tavily_configured?: boolean;
+  reranker_configured?: boolean;
+  reranker_available?: boolean;
+  reranker_load_failed?: boolean;
 }
 
 export interface SettingsState {
   llmProvider: LLMProvider;
-  llmConfigured: boolean;
   hasLLMKey: boolean;
   providerConfigs: ProviderConfigs;
   savedProviderConfigs: ProviderConfigs;
   dirtyProviders: LLMProvider[];
+  embeddingProvider: EmbeddingProvider;
+  researchMode: ResearchMode;
+  sourcePolicy: SourcePolicy;
+  fallbackEnabled: boolean;
   retrievalTopK: number;
   rerankTopK: number;
+  retrievalMinScore: number;
+  keywordMinCoverage: number;
   maxIterations: number;
   maxRefineRounds: number;
   criticThreshold: number;
   subtaskTimeout: number;
   researchTimeout: number;
+  llmRequestTimeout: number;
+  maxSubtasks: number;
+  maxToolCallsTotal: number;
+  maxHistoryEntries: number;
+  langfusePublicKey: string;
+  langfuseSecretKey: string;
+  langfuseHost: string;
+  observabilityCaptureContent: boolean;
+  traceRetentionDays: number;
+  tavilyConfigured: boolean;
+  rerankerConfigured: boolean;
+  rerankerAvailable: boolean;
+  rerankerLoadFailed: boolean;
   loaded: boolean;
   loadError: string | null;
   saveError: string | null;
@@ -109,13 +148,28 @@ export interface SettingsState {
     update: Partial<EditableProviderConfig>,
   ) => void;
   restoreLLMProviderConfig: (provider: LLMProvider) => void;
+  setEmbeddingProvider: (value: EmbeddingProvider) => void;
+  setResearchMode: (value: ResearchMode) => void;
+  setSourcePolicy: (value: SourcePolicy) => void;
+  setFallbackEnabled: (value: boolean) => void;
   setRetrievalTopK: (value: number) => void;
   setRerankTopK: (value: number) => void;
+  setRetrievalMinScore: (value: number) => void;
+  setKeywordMinCoverage: (value: number) => void;
   setMaxIterations: (value: number) => void;
   setMaxRefineRounds: (value: number) => void;
   setCriticThreshold: (value: number) => void;
   setSubtaskTimeout: (value: number) => void;
   setResearchTimeout: (value: number) => void;
+  setLLMRequestTimeout: (value: number) => void;
+  setMaxSubtasks: (value: number) => void;
+  setMaxToolCallsTotal: (value: number) => void;
+  setMaxHistoryEntries: (value: number) => void;
+  setLangfusePublicKey: (value: string) => void;
+  setLangfuseSecretKey: (value: string) => void;
+  setLangfuseHost: (value: string) => void;
+  setObservabilityCaptureContent: (value: boolean) => void;
+  setTraceRetentionDays: (value: number) => void;
   resetConfigDefaults: () => void;
   loadSettings: () => Promise<boolean>;
   saveSettings: () => Promise<boolean>;
@@ -257,16 +311,29 @@ function validateSettings(state: SettingsState): string | null {
   const checks: Array<[number, number, number, string]> = [
     [state.retrievalTopK, 1, 100, "向量检索 Top-K"],
     [state.rerankTopK, 1, 50, "重排序 Top-K"],
+    [state.retrievalMinScore, 0, 1, "语义相关性阈值"],
+    [state.keywordMinCoverage, 0, 1, "关键词覆盖阈值"],
     [state.maxIterations, 1, 20, "最大迭代次数"],
     [state.maxRefineRounds, 0, 5, "最大精炼轮次"],
     [state.criticThreshold, 0, 10, "评判阈值"],
     [state.subtaskTimeout, 10, 600, "子任务超时"],
     [state.researchTimeout, 30, 3600, "研究总超时"],
+    [state.llmRequestTimeout, 5, 600, "单次模型调用超时"],
+    [state.maxSubtasks, 1, 20, "最大子任务数"],
+    [state.maxToolCallsTotal, 1, 100, "工具调用总预算"],
+    [state.maxHistoryEntries, 0, 100_000, "历史记录上限"],
+    [state.traceRetentionDays, 0, 3650, "Trace 保留天数"],
   ];
   for (const [value, minimum, maximum, label] of checks) {
     if (!Number.isFinite(value) || value < minimum || value > maximum) {
       return `${label}必须在 ${minimum} 到 ${maximum} 之间。`;
     }
+  }
+  if (state.llmRequestTimeout > state.subtaskTimeout) {
+    return "单次模型调用超时不能大于子任务超时。";
+  }
+  if (state.subtaskTimeout > state.researchTimeout) {
+    return "子任务超时不能大于研究总超时。";
   }
   return null;
 }
@@ -275,18 +342,36 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       llmProvider: "deepseek",
-      llmConfigured: false,
       hasLLMKey: false,
       providerConfigs: cloneProviderConfigs(DEFAULT_PROVIDER_CONFIGS),
       savedProviderConfigs: cloneProviderConfigs(DEFAULT_PROVIDER_CONFIGS),
       dirtyProviders: [],
+      embeddingProvider: "bge",
+      researchMode: "balanced",
+      sourcePolicy: "auto",
+      fallbackEnabled: true,
       retrievalTopK: 20,
       rerankTopK: 6,
+      retrievalMinScore: 0.6,
+      keywordMinCoverage: 0.6,
       maxIterations: 3,
       maxRefineRounds: 1,
       criticThreshold: 7,
-      subtaskTimeout: 30,
+      subtaskTimeout: 60,
       researchTimeout: 180,
+      llmRequestTimeout: 45,
+      maxSubtasks: 5,
+      maxToolCallsTotal: 12,
+      maxHistoryEntries: 0,
+      langfusePublicKey: "",
+      langfuseSecretKey: "",
+      langfuseHost: "https://cloud.langfuse.com",
+      observabilityCaptureContent: false,
+      traceRetentionDays: 0,
+      tavilyConfigured: false,
+      rerankerConfigured: false,
+      rerankerAvailable: false,
+      rerankerLoadFailed: false,
       loaded: false,
       loadError: null,
       saveError: null,
@@ -295,7 +380,6 @@ export const useSettingsStore = create<SettingsState>()(
         const configured = get().providerConfigs[provider].configured;
         set({
           llmProvider: provider,
-          llmConfigured: configured,
           hasLLMKey: configured,
         });
       },
@@ -338,36 +422,60 @@ export const useSettingsStore = create<SettingsState>()(
             dirtyProviders: state.dirtyProviders.filter(
               (item) => item !== provider,
             ),
-            llmConfigured: selectedChanged
-              ? restored.configured
-              : state.llmConfigured,
             hasLLMKey: selectedChanged
               ? restored.configured
               : state.hasLLMKey,
           };
         }),
 
+      setEmbeddingProvider: (value) => set({ embeddingProvider: value }),
+      setResearchMode: (value) => set({ researchMode: value }),
+      setSourcePolicy: (value) => set({ sourcePolicy: value }),
+      setFallbackEnabled: (value) => set({ fallbackEnabled: value }),
       setRetrievalTopK: (value) => set({ retrievalTopK: value }),
       setRerankTopK: (value) => set({ rerankTopK: value }),
+      setRetrievalMinScore: (value) => set({ retrievalMinScore: value }),
+      setKeywordMinCoverage: (value) => set({ keywordMinCoverage: value }),
       setMaxIterations: (value) => set({ maxIterations: value }),
       setMaxRefineRounds: (value) => set({ maxRefineRounds: value }),
       setCriticThreshold: (value) => set({ criticThreshold: value }),
       setSubtaskTimeout: (value) => set({ subtaskTimeout: value }),
       setResearchTimeout: (value) => set({ researchTimeout: value }),
+      setLLMRequestTimeout: (value) => set({ llmRequestTimeout: value }),
+      setMaxSubtasks: (value) => set({ maxSubtasks: value }),
+      setMaxToolCallsTotal: (value) => set({ maxToolCallsTotal: value }),
+      setMaxHistoryEntries: (value) => set({ maxHistoryEntries: value }),
+      setLangfusePublicKey: (value) => set({ langfusePublicKey: value }),
+      setLangfuseSecretKey: (value) => set({ langfuseSecretKey: value }),
+      setLangfuseHost: (value) => set({ langfuseHost: value }),
+      setObservabilityCaptureContent: (value) =>
+        set({ observabilityCaptureContent: value }),
+      setTraceRetentionDays: (value) => set({ traceRetentionDays: value }),
       resetConfigDefaults: () =>
         set((state) => {
           const configured = state.providerConfigs.deepseek.configured;
           return {
             llmProvider: "deepseek",
-            llmConfigured: configured,
             hasLLMKey: configured,
+            embeddingProvider: "bge",
+            researchMode: "balanced",
+            sourcePolicy: "auto",
+            fallbackEnabled: true,
             retrievalTopK: 20,
             rerankTopK: 6,
+            retrievalMinScore: 0.6,
+            keywordMinCoverage: 0.6,
             maxIterations: 3,
             maxRefineRounds: 1,
             criticThreshold: 7,
-            subtaskTimeout: 30,
+            subtaskTimeout: 60,
             researchTimeout: 180,
+            llmRequestTimeout: 45,
+            maxSubtasks: 5,
+            maxToolCallsTotal: 12,
+            maxHistoryEntries: 0,
+            observabilityCaptureContent: false,
+            traceRetentionDays: 0,
             saveError: null,
           };
         }),
@@ -411,18 +519,38 @@ export const useSettingsStore = create<SettingsState>()(
           const savedProviderConfigs = cloneProviderConfigs(providerConfigs);
           set({
             llmProvider: provider,
-            llmConfigured: configured,
             hasLLMKey: configured,
             providerConfigs,
             savedProviderConfigs,
             dirtyProviders: [],
+            embeddingProvider: data.embedding_provider ?? "bge",
+            researchMode: data.research_mode ?? "balanced",
+            sourcePolicy: data.source_policy ?? "auto",
+            fallbackEnabled: data.fallback_enabled ?? true,
             retrievalTopK: data.retrieval_top_k ?? 20,
             rerankTopK: data.rerank_top_k ?? 6,
+            retrievalMinScore: data.retrieval_min_score ?? 0.6,
+            keywordMinCoverage: data.keyword_min_coverage ?? 0.6,
             maxIterations: data.max_iterations ?? 3,
             maxRefineRounds: data.max_refine_rounds ?? 1,
             criticThreshold: data.critic_threshold ?? 7,
-            subtaskTimeout: data.subtask_timeout ?? 30,
+            subtaskTimeout: data.subtask_timeout ?? 60,
             researchTimeout: data.research_timeout ?? 180,
+            llmRequestTimeout: data.llm_request_timeout ?? 45,
+            maxSubtasks: data.max_subtasks ?? 5,
+            maxToolCallsTotal: data.max_tool_calls_total ?? 12,
+            maxHistoryEntries: data.max_history_entries ?? 0,
+            langfusePublicKey: data.langfuse_public_key ?? "",
+            langfuseSecretKey: data.langfuse_secret_key ?? "",
+            langfuseHost:
+              data.langfuse_host ?? "https://cloud.langfuse.com",
+            observabilityCaptureContent:
+              data.observability_capture_content ?? false,
+            traceRetentionDays: data.trace_retention_days ?? 0,
+            tavilyConfigured: data.tavily_configured ?? false,
+            rerankerConfigured: data.reranker_configured ?? false,
+            rerankerAvailable: data.reranker_available ?? false,
+            rerankerLoadFailed: data.reranker_load_failed ?? false,
             loaded: true,
             loadError: null,
           });
@@ -452,13 +580,29 @@ export const useSettingsStore = create<SettingsState>()(
           llm_provider_configs: state.dirtyProviders.map((provider) =>
             providerToPayload(state.providerConfigs[provider]),
           ),
+          embedding_provider: state.embeddingProvider,
+          research_mode: state.researchMode,
+          source_policy: state.sourcePolicy,
+          fallback_enabled: state.fallbackEnabled,
           retrieval_top_k: state.retrievalTopK,
           rerank_top_k: state.rerankTopK,
+          retrieval_min_score: state.retrievalMinScore,
+          keyword_min_coverage: state.keywordMinCoverage,
           max_iterations: state.maxIterations,
           max_refine_rounds: state.maxRefineRounds,
           critic_threshold: state.criticThreshold,
           subtask_timeout: state.subtaskTimeout,
           research_timeout: state.researchTimeout,
+          llm_request_timeout: state.llmRequestTimeout,
+          max_subtasks: state.maxSubtasks,
+          max_tool_calls_total: state.maxToolCallsTotal,
+          max_history_entries: state.maxHistoryEntries,
+          langfuse_public_key: state.langfusePublicKey,
+          langfuse_secret_key: state.langfuseSecretKey,
+          langfuse_host: state.langfuseHost,
+          observability_capture_content:
+            state.observabilityCaptureContent,
+          trace_retention_days: state.traceRetentionDays,
         };
 
         try {
@@ -515,13 +659,26 @@ export const useSettingsStore = create<SettingsState>()(
       name: "mindforge-settings-v3",
       partialize: (state) => ({
         llmProvider: state.llmProvider,
+        embeddingProvider: state.embeddingProvider,
+        researchMode: state.researchMode,
+        sourcePolicy: state.sourcePolicy,
+        fallbackEnabled: state.fallbackEnabled,
         retrievalTopK: state.retrievalTopK,
         rerankTopK: state.rerankTopK,
+        retrievalMinScore: state.retrievalMinScore,
+        keywordMinCoverage: state.keywordMinCoverage,
         maxIterations: state.maxIterations,
         maxRefineRounds: state.maxRefineRounds,
         criticThreshold: state.criticThreshold,
         subtaskTimeout: state.subtaskTimeout,
         researchTimeout: state.researchTimeout,
+        llmRequestTimeout: state.llmRequestTimeout,
+        maxSubtasks: state.maxSubtasks,
+        maxToolCallsTotal: state.maxToolCallsTotal,
+        maxHistoryEntries: state.maxHistoryEntries,
+        langfuseHost: state.langfuseHost,
+        observabilityCaptureContent: state.observabilityCaptureContent,
+        traceRetentionDays: state.traceRetentionDays,
       }),
     },
   ),

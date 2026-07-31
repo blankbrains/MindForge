@@ -51,6 +51,10 @@ export function useResearchSession() {
       criticScore: state.criticScore,
       refineRound: state.refineRound,
       finalResult: state.finalResult,
+      traceId: state.traceId,
+      phase: state.phase,
+      startedAt: state.startedAt,
+      lastHeartbeatAt: state.lastHeartbeatAt,
     })),
   );
   const addFromResearch = useHistoryStore((s) => s.addFromResearch);
@@ -100,7 +104,9 @@ export function useResearchSession() {
       useResearchStore.setState({
         status: "streaming", error: null, plan: null, subtasks: {},
         planning: false, synthesizing: false, criticScore: null, refineRound: 0,
-        finalResult: null, streamingAnswer: "",
+        finalResult: null, streamingAnswer: "", traceId: null,
+        activeTask: task, phase: "connecting", startedAt: Date.now(),
+        lastHeartbeatAt: null,
       });
       useResearchStore.getState().setTask(task);
 
@@ -173,11 +179,36 @@ export function useResearchSession() {
               | Record<string, unknown>
               | undefined;
             const sources = normalizeCitationSources(resultData?.sources);
-            void addFromResearch(task, report, quality, model, {
+            const traceId =
+              (result?.trace_id as string | undefined)
+              ?? event.trace_id
+              ?? useResearchStore.getState().traceId
+              ?? undefined;
+            const usageSummary = {
               tokenUsage,
               costUsd,
               costStatus,
-            }, sources);
+            };
+            if (traceId) {
+              void addFromResearch(
+                task,
+                report,
+                quality,
+                model,
+                usageSummary,
+                sources,
+                traceId,
+              );
+            } else {
+              void addFromResearch(
+                task,
+                report,
+                quality,
+                model,
+                usageSummary,
+                sources,
+              );
+            }
           }
         },
         () => {
@@ -246,6 +277,12 @@ export function useResearchSession() {
     pendingAnswerRef.current = "";
     if (researchTimeoutRef.current) { clearTimeout(researchTimeoutRef.current); researchTimeoutRef.current = null; }
     useResearchStore.getState().setStatus("idle");
+    useResearchStore.setState({
+      phase: "idle",
+      activeTask: "",
+      startedAt: null,
+      lastHeartbeatAt: null,
+    });
   }, []);
 
   return {

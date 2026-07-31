@@ -1,11 +1,12 @@
 import { type FormEvent } from "react";
-import { Send, Loader2 } from "lucide-react";
+import { Send, Square } from "lucide-react";
 
 interface QueryInputProps {
   value: string;
   onChange: (v: string) => void;
   onSubmit: (task: string) => void;
-  disabled: boolean;
+  isRunning: boolean;
+  onCancel: () => void;
   retrievalOnly?: boolean;
 }
 
@@ -13,12 +14,13 @@ export function QueryInput({
   value,
   onChange,
   onSubmit,
-  disabled,
+  isRunning,
+  onCancel,
   retrievalOnly = false,
 }: QueryInputProps) {
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (value.trim() && !disabled) {
+    if (value.trim() && !isRunning) {
       onSubmit(value.trim());
     }
   };
@@ -31,8 +33,7 @@ export function QueryInput({
           onChange={(e) => onChange(e.target.value)}
           placeholder="输入你的研究问题… 例如：量子计算在药物研发中的应用前景如何？"
           rows={3}
-          disabled={disabled}
-          className="w-full resize-none rounded-xl border-0 bg-transparent px-5 py-4 text-base text-text placeholder:text-text-muted/60 focus:ring-0 focus:outline-none disabled:opacity-50"
+          className="w-full resize-none rounded-xl border-0 bg-transparent px-5 py-4 text-base text-text placeholder:text-text-muted/60 focus:ring-0 focus:outline-none"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -45,14 +46,22 @@ export function QueryInput({
             按 Enter 提交 · Shift+Enter 换行
           </span>
           <button
-            type="submit"
-            disabled={!value.trim() || disabled}
-            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-50"
+            type={isRunning ? "button" : "submit"}
+            onClick={isRunning ? onCancel : undefined}
+            disabled={!isRunning && !value.trim()}
+            className={
+              "inline-flex min-w-28 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 "
+              + (
+                isRunning
+                  ? "bg-red-500 hover:bg-red-600"
+                  : "bg-primary hover:bg-primary-dark"
+              )
+            }
           >
-            {disabled ? (
+            {isRunning ? (
               <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                处理中…
+                <Square className="h-4 w-4 fill-current" />
+                停止研究
               </>
             ) : (
               <>

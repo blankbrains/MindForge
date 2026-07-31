@@ -37,6 +37,7 @@ async def lifespan(_: FastAPI):
     finally:
         await shutdown()
 
+
 # ── 统一 UTF-8 日志输出（防止控制台中文乱码）──
 logging.basicConfig(
     level=getattr(logging, _settings.app.log_level.upper(), logging.INFO),
@@ -62,13 +63,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/assets/"):
-            response.headers["Cache-Control"] = (
-                "public, max-age=31536000, immutable"
-            )
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         elif not request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = (
-                "no-store, no-cache, must-revalidate"
-            )
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -112,6 +109,7 @@ app.include_router(router, prefix="/api/v1")
 # ------------------------------------------------------------------
 # Background helpers
 # ------------------------------------------------------------------
+
 
 async def _preload_embedder() -> None:
     """Preload the embedding model in background so first upload is instant."""
@@ -159,6 +157,7 @@ async def _preload_models(
 # Lifecycle
 # ------------------------------------------------------------------
 
+
 async def startup():
     """Probe core services on boot and preload the embedding model."""
     settings = get_settings()
@@ -194,12 +193,8 @@ async def startup():
     snapshot = await get_health_monitor().start()
     logger.info(
         "Core services — PostgreSQL=%s Qdrant=%s Redis=%s",
-        "ready"
-        if database_ok and snapshot.postgres_connected
-        else "unavailable",
-        "ready"
-        if qdrant_ok and snapshot.qdrant_connected
-        else "unavailable",
+        "ready" if database_ok and snapshot.postgres_connected else "unavailable",
+        "ready" if qdrant_ok and snapshot.qdrant_connected else "unavailable",
         "ready" if snapshot.redis_connected else "unavailable",
     )
 
@@ -228,8 +223,7 @@ async def startup():
         "sentence-transformers",
     )
     preload_reranker = bool(
-        settings.retrieval.reranker_model
-        and settings.retrieval.reranker_preload
+        settings.retrieval.reranker_model and settings.retrieval.reranker_preload
     )
     if preload_embedder or preload_reranker:
         task = asyncio.create_task(
@@ -246,6 +240,7 @@ async def startup():
 
 async def shutdown() -> None:
     """Release background tasks during application shutdown."""
+    from mindforge.observability.tracer import close_tracer
     from mindforge.services.health import get_health_monitor
     from mindforge.services.index_jobs import get_index_job_service
 
@@ -257,11 +252,13 @@ async def shutdown() -> None:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _background_tasks.clear()
+    await asyncio.to_thread(close_tracer)
 
 
 # ------------------------------------------------------------------
 # Root endpoint
 # ------------------------------------------------------------------
+
 
 @app.get("/")
 async def root():
@@ -283,9 +280,7 @@ async def root():
 # Static file serving (production frontend)
 # ------------------------------------------------------------------
 
-_FRONTEND_DIR = os.path.normpath(
-    str(get_project_root() / "mindforge-web" / "dist")
-)
+_FRONTEND_DIR = os.path.normpath(str(get_project_root() / "mindforge-web" / "dist"))
 _FRONTEND_PATH = Path(_FRONTEND_DIR).resolve()
 
 

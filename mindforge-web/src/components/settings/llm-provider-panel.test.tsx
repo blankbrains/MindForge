@@ -40,7 +40,6 @@ describe("LLMProviderPanel", () => {
     };
     useSettingsStore.setState({
       llmProvider: "openai",
-      llmConfigured: true,
       hasLLMKey: true,
       providerConfigs,
       savedProviderConfigs: structuredClone(providerConfigs),

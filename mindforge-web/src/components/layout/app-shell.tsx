@@ -59,6 +59,7 @@ export function AppShell() {
             { label: "研究", to: "/research" as const },
             { label: "知识库", to: "/knowledge-base" as const },
             { label: "历史", to: "/history" as const },
+            { label: "可观测", to: "/observability" as const },
             { label: "设置", to: "/settings" as const },
           ].map(({ label, to }) => (
             <Link

@@ -16,7 +16,8 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 | 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告、可点击来源、Token 与估算费用 |
 | 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
 | 🕐 **研究历史** | 自动捕获研究结果、保留可点击引用、Markdown/代码高亮预览、删除 / 清空管理 |
-| ⚙️ **系统配置** | LLM 供应商切换、检索参数、Agent 参数管理 |
+| 📈 **可观测** | 以研究问题为标题查看完整 Trace、Agent/LLM/工具层级、耗时、费用与失败原因 |
+| ⚙️ **系统配置** | 模型、检索相关性、研究模式、超时预算、历史保留与 Langfuse 配置 |
 
 ### 🎯 核心能力
 
@@ -87,7 +88,7 @@ flowchart TD
 | 📄 **文档解析** | pdfplumber + PaddleOCR 3；混合 PDF 按页处理，表格保留 Markdown + HTML + 单元格 JSON，图片与源文件具备生命周期管理 |
 | 🗄️ **数据库** | PostgreSQL 16 · SQLAlchemy ORM |
 | ⚡ **API** | FastAPI + SSE 流式 + Pydantic v2 + streaming answer_chunk |
-| 📊 **可观测** | LangFuse + 本地 JSONL 追踪 |
+| 📊 **可观测** | 每次研究一个以问题命名的顶层 Trace；本地 JSONL + Langfuse 3 双写，内容默认脱敏 |
 | 🐳 **部署** | Docker Compose（Qdrant + Redis + PostgreSQL）· 前端构建后 FastAPI 托管 |
 | 🔧 **一键启动** | `bash start.sh`（关旧→基础设施→依赖→前端→后端→健康检查） |
 
@@ -117,6 +118,7 @@ MindForge/
 │       ├── types/                  # TypeScript 类型定义
 │       │   ├── api.ts              # API 响应类型
 │       │   ├── research.ts         # Agent / SSE / 研究类型
+│       │   ├── observability.ts    # Trace 列表、详情与观察类型
 │       │   └── document.ts         # 文档类型
 │       ├── lib/                    # 工具函数
 │       │   ├── api.ts              # HTTP 客户端（统一错误处理）
@@ -132,13 +134,14 @@ MindForge/
 │       │   ├── use-research-session.ts  # 研究会话生命周期（SSE + 历史）
 │       │   ├── use-health.ts       # /health 轮询
 │       │   ├── use-stats.ts        # /stats 轮询
+│       │   ├── use-observability.ts # Trace 状态、列表与详情查询
 │       │   ├── use-documents.ts    # 文档 CRUD
 │       │   └── use-media-query.ts  # 响应式断点
 │       ├── components/
 │       │   ├── layout/             # AppShell / Sidebar / Header
 │       │   ├── research/           # QueryInput / PlanDAG / ReportViewer / CriticPanel
 │       │   ├── dashboard/          # StatusCardsGrid
-│       │   ├── pages/              # 页面组件（5 个）
+│       │   ├── pages/              # 页面组件（6 个）
 │       │   └── shared/             # EmptyState / ErrorBoundary / LoadingSkeleton
 │       └── routes/                 # 路由定义（薄壳，每个文件只 export Route）
 │
@@ -170,7 +173,7 @@ MindForge/
 │   ├── repositories/               # PostgreSQL 文档目录、任务与资产 Repository
 │   ├── services/                   # 健康监视、索引并发控制与资产生命周期
 │   ├── models/                     # 统一 LLM 接口、Provider 注册表与兼容适配器
-│   ├── observability/              # 追踪 & 指标（LangFuse + JSONL）
+│   ├── observability/              # Trace 写入、摘要索引与只读查询
 │   └── api/                        # FastAPI 路由 + 静态文件托管
 │       ├── schemas.py              # Pydantic 请求/响应模型
 │       ├── routes.py               # REST + SSE 路由
@@ -179,6 +182,7 @@ MindForge/
 ├── tests/                          # Python 测试（pytest + pytest-cov）
 │   ├── test_retrieval.py           # 检索、Agent 与真实 API 回归测试
 │   ├── test_regressions.py         # 已确认生产问题的回归测试
+│   ├── test_observability.py       # Trace 层级、脱敏与本地查询测试
 │   └── test_models.py              # 模型适配器测试
 │
 ├── scripts/                        # CLI 辅助脚本
@@ -216,6 +220,31 @@ docker compose up -d qdrant redis postgres
 # 启动 API 服务
 python -m uvicorn mindforge.api.server:app --app-dir src --reload --port 8000
 ```
+
+需要远程追踪时，可以直接编辑 `.env`，也可以在“系统配置 → 可观测”中填写并保存：
+`OBSERVABILITY_LANGFUSE_PUBLIC_KEY`、`OBSERVABILITY_LANGFUSE_SECRET_KEY`
+和 `OBSERVABILITY_LANGFUSE_HOST`。未配置时仍保留本地 JSONL；配置不完整或
+Langfuse 初始化失败时会记录明确告警，不影响研究主流程。
+
+每次研究都会建立一个 32 位 Trace ID，并形成
+`Orchestrator -> Planner/Researcher/Synthesizer/Critic -> LLM/Tool`
+父子链。列表与详情标题显示实际研究问题，内部根节点仍保留 Orchestrator 语义。
+研究结果和历史详情中的“查看 Trace”会直接定位到对应链路；失败和检索降级会
+保留原始原因。失败节点会记录阶段、错误码、异常类型、Agent、模型、尝试次数和
+超时值，顶部只汇总主因；被上层超时连带取消的调用仍保留在具体链路中。
+凭证通过设置 API 写入服务端 `.env`，重新读取时只返回掩码。
+
+```bash
+# 查看可观测状态
+curl http://127.0.0.1:8000/api/v1/observability/status
+
+# 查看最近 Trace
+curl "http://127.0.0.1:8000/api/v1/observability/traces?limit=20"
+```
+
+默认 `OBSERVABILITY_CAPTURE_CONTENT=false`，任务、Prompt 和模型输出只记录类型与
+大小。只有明确接受内容进入本地 Trace 和 Langfuse 后，才应将该项改为 `true`。
+Trace 与研究历史默认永久保留，可在对应页面手动删除或清空。
 
 ### 🟢 2. 启动前端
 
@@ -404,7 +433,17 @@ docker compose down
 7. 点击“保存配置”。右上角显示“可用”后，进入研究页提交一个简单问题。
    如果仍显示“未就绪”，检查 Base URL、模型 ID，以及当前 Key 要求是否满足。
 
-8. 通过 API 验证：
+8. 按需要配置其余页签：
+   - “检索”：设置 Top-K、语义相关性阈值和关键词覆盖阈值。重排序状态会区分
+     正常、等待加载和加载失败；Tavily 是可选联网搜索后端，只有配置
+     `TAVILY_API_KEY` 后才会启用。
+   - “研究流程”：选择快速/均衡/深度模式、来源策略和回退开关；超时需满足
+     `单次模型调用 <= 子任务 <= 研究总超时`。
+   - “可观测”：可填写 Langfuse Host/公钥/私钥，并设置内容采集、Trace 和历史
+     保留策略；`0` 表示永久保留。
+   - 所有保存结果都写入服务端 `.env`，密钥重新读取时只返回掩码。
+
+9. 通过 API 验证：
 
    ```bash
    curl -s http://127.0.0.1:8000/api/v1/settings
@@ -609,8 +648,8 @@ Server，Researcher Agent 也不注册 MCP 工具。旧 MCP 源码、脚本和�
 GitHub Actions 自动运行：
 
 - **ruff check** — Python 语法、未定义名称和致命静态错误
-- **pytest + coverage** — 188 个单元与真实 API 回归测试
-- **前端质量门禁** — 48 个 Vitest 测试 + ESLint + TypeScript/Vite 生产构建
+- **pytest + coverage** — 单元、链路与真实 API 回归测试
+- **前端质量门禁** — Vitest + ESLint + TypeScript/Vite 生产构建
 - Qdrant + Redis + PostgreSQL 作为 Service Container
 - Docker Compose 配置展开校验
 
@@ -641,7 +680,8 @@ GitHub Actions 自动运行：
 - **资产生命周期** — 源文件、图片裁剪与表格结构有受限路径、数据库记录和回滚/删除清理
 - **可取消解析** — 分页、OCR、表格和资产阶段协作取消，不留下部分向量或资产
 - **Embedding 隔离** — LLM 供应商与 Embedding 后端解耦，已有索引时拒绝直接切换向量空间
-- **缓存安全** — 情节记忆只复用完全相同且未过期的任务，不用模糊关键词跳过新研究
+- **缓存安全** — 情节记忆只复用完全相同且未过期的任务；来源和质量可复用，原生成用量保留在内部元数据中，当前缓存命中明确标记为不产生新的 API 费用
+- **三层记忆接通** — 工作记忆汇总当前任务的历史研究、规划、中间结果与来源；语义记忆会检索相关的成功研究作为后续任务上下文
 - **引用检查** — 除编号存在性外，还保守检查声明与来源文本是否有词汇支持
 
 ### 🔍 自适应混合检索
@@ -658,12 +698,21 @@ GitHub Actions 自动运行：
 - **SSE 流式渲染** — 后端事件逐条推送；旧会话回调不会污染新任务，超时读取运行时设置
 - **响应式布局** — 桌面侧边栏 + 移动端底部导航，Tailwind CSS 断点适配
 - **可靠设置交互** — 保存后重新读取服务端状态再报告成功；普通参数修改只重置受影响的运行时组件
+- **研究模式与预算** — 快速、均衡、深度三种模式；简单问题跳过不必要的规划与评审，
+  单次模型、子任务和研究总超时按包含关系校验
+- **检索误命中控制** — 语义阈值、关键词覆盖率、技术实体覆盖与归一化重排分数共同
+  阻止“高分但不相关”的知识库片段进入回答
 - **接口模型发现** — 按当前 Base URL 和凭证安全拉取 `/models`，四个 Agent
   可从真实模型列表选择，同时保留自定义模型 ID
 - **可读报告渲染** — 标题、段落、列表、引用、代码与 GFM 表格共用稳定样式；
   `[N]` 可安全跳转到外部网页或内部来源条目，历史详情保持相同行为
 - **透明用量状态** — 展示 Token 与估算费用；未知价格、缺失 usage、本地模型和
   部分估算不会被混同为零费用
+- **部分失败可追溯** — 任一子任务失败时结果标记为降级，显示完成/失败数量与原因，
+  并禁止不完整报告进入长期记忆缓存
+- **研究链路视图** — 独立“可观测”页面按研究问题展示顶层 Trace、Agent 层级、
+  LLM/工具调用、耗时瀑布、费用状态和结构化失败因果链；支持按 Trace ID 深链跳转
+  与手动删除
 
 ### 🔧 工程化
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
+import math
 import threading
 import logging
 
@@ -124,7 +125,21 @@ class CrossEncoderReranker:
         # Attach scores and re-sort
         reranked = []
         for candidate, score in zip(bounded_candidates, scores):
-            reranked.append({**candidate, "rerank_score": float(score)})
+            raw_score = float(score)
+            if not math.isfinite(raw_score):
+                normalized_score = 0.0
+            elif 0.0 <= raw_score <= 1.0:
+                normalized_score = raw_score
+            else:
+                bounded_score = max(-60.0, min(60.0, raw_score))
+                normalized_score = 1.0 / (1.0 + math.exp(-bounded_score))
+            reranked.append(
+                {
+                    **candidate,
+                    "rerank_score": normalized_score,
+                    "rerank_score_raw": raw_score,
+                }
+            )
 
         reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
         return reranked[:top_k]

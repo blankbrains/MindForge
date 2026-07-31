@@ -1,14 +1,14 @@
-"""Semantic memory - persistent facts and query patterns."""
+"""Semantic memory - persistent, reusable research facts."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,8 @@ STORAGE_DIR = ".semantic_memory"
 VALID_CATEGORIES = frozenset(
     {"code", "api", "concept", "workflow", "preference", "general"}
 )
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+")
+
 
 @dataclass
 class Fact:
@@ -33,21 +35,10 @@ class Fact:
     category: str = "general"
 
 
-@dataclass
-class QueryPattern:
-    """A logged query-processing pattern."""
-
-    query_type: str
-    strategy: str
-    success: bool
-    quality_score: float
-    timestamp: float = field(default_factory=time.time)
-
-
 class SemanticMemory:
-    """Persistent semantic memory that stores facts and query-processing patterns.
+    """Persistent semantic memory for successful prior research.
 
-    Data is persisted as JSON files under ``.semantic_memory/`` inside the
+    Facts are persisted as JSON under ``.semantic_memory/`` inside the
     directory specified at init (defaults to current working directory).
     """
 
@@ -58,13 +49,11 @@ class SemanticMemory:
         self._base = Path(storage_dir or Path.cwd())
         self._store_path = self._base / STORAGE_DIR
         self._max_facts = config.max_semantic_facts
-        self._max_patterns = config.max_semantic_patterns
         self._max_fact_chars = config.max_semantic_fact_chars
         self._retention_seconds = config.semantic_retention_days * 86400
         self._max_file_bytes = config.semantic_max_file_bytes
 
         self._facts: dict[str, Fact] = {}
-        self._patterns: list[QueryPattern] = []
         self._lock = asyncio.Lock()
 
         self._ensure_store()
@@ -85,6 +74,7 @@ class SemanticMemory:
         Returns the fact_id.
         """
         import hashlib as _hashlib
+
         content = content[: self._max_fact_chars]
         sources = [str(source)[:1000] for source in sources[:100]]
         fact_id = _hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -111,80 +101,36 @@ class SemanticMemory:
         self._save()
         return fact_id
 
-    def add_pattern(
+    async def store(
         self,
-        query_type: str,
-        strategy: str,
-        success: bool,
-        quality_score: float,
+        task: str,
+        output: str,
+        sources: list[dict] | None = None,
+        confidence: float = 0.5,
     ) -> None:
-        """Log a query-processing pattern."""
-        pattern = QueryPattern(
-            query_type=query_type,
-            strategy=strategy,
-            success=success,
-            quality_score=quality_score,
-        )
-        self._patterns.append(pattern)
-        self._prune()
-        self._save()
-
-    def get_strategy_stats(self) -> dict[str, dict[str, Any]]:
-        """Analyze which strategies work best per query type.
-
-        Returns
-        -------
-        dict[str, dict[str, Any]]
-            Nested mapping::
-
-                {
-                    "<query_type>": {
-                        "<strategy>": {
-                            "count": ...,
-                            "success_rate": ...,
-                            "avg_quality": ...,
-                        },
-                        ...
-                    },
-                    ...
-                }
-        """
-        stats: dict[str, dict[str, dict[str, Any]]] = {}
-
-        for p in self._patterns:
-            qt = stats.setdefault(p.query_type, {})
-            strat = qt.setdefault(p.strategy, {"count": 0, "success_count": 0, "quality_total": 0.0})
-
-            strat["count"] += 1
-            if p.success:
-                strat["success_count"] += 1
-            strat["quality_total"] += p.quality_score
-
-        # Convert raw counts to rates / averages
-        result: dict[str, dict[str, Any]] = {}
-        for query_type, strategies in stats.items():
-            result[query_type] = {}
-            for strategy, data in strategies.items():
-                result[query_type][strategy] = {
-                    "count": data["count"],
-                    "success_rate": data["success_count"] / data["count"],
-                    "avg_quality": data["quality_total"] / data["count"],
-                }
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Alias used by Orchestrator
-    # ------------------------------------------------------------------
-
-    async def store(self, task: str, output: str) -> None:
-        """Async alias for ``add_fact`` — used by Orchestrator."""
+        """Store a successful research result for later task grounding."""
+        source_labels = []
+        for source in sources or []:
+            label = source.get("url") or source.get("title") or source.get("source")
+            if label:
+                source_labels.append(str(label))
+        if not source_labels:
+            source_labels = [f"task: {task[:100]}"]
         async with self._lock:
             await asyncio.to_thread(
                 self.add_fact,
                 content=output,
-                sources=[f"task: {task[:100]}"],
-                confidence=0.8,
+                sources=source_labels,
+                confidence=max(0.0, min(1.0, confidence)),
+            )
+
+    async def recall(self, query: str, top_k: int = 5) -> list[Fact]:
+        """Return relevant prior research without blocking the event loop."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self.search_facts,
+                query,
+                top_k,
             )
 
     def search_facts(self, query: str, top_k: int = 5) -> list[Fact]:
@@ -194,14 +140,16 @@ class SemanticMemory:
         ranked by a combination of keyword overlap and confidence.
         """
         top_k = min(max(1, top_k), 50)
-        query_words = set(query.lower().split())
+        query_words = self._tokenize(query)
+        if not query_words:
+            return []
         scored: list[tuple[Fact, float]] = []
 
         for fact in self._facts.values():
-            fact_words = set(fact.content.lower().split())
+            fact_words = self._tokenize(fact.content)
             overlap = len(query_words & fact_words)
             if overlap > 0:
-                score = overlap * fact.confidence
+                score = (overlap / len(query_words)) * fact.confidence
                 # Small recency bonus
                 age_days = (time.time() - fact.timestamp) / 86400
                 recency_boost = max(1.0, 2.0 - age_days / 30.0)  # decays over ~30 days
@@ -220,45 +168,39 @@ class SemanticMemory:
         self._store_path.mkdir(parents=True, exist_ok=True)
 
     def _save(self) -> None:
-        """Atomically write facts and patterns to disk (tmp + rename).
+        """Atomically write facts to disk.
 
         Uses unique temp filenames per call to avoid races when two saves
         overlap (e.g. from concurrent ``add_fact`` / ``add_pattern``).
         """
         import uuid as _uuid
+
         try:
             self._prune()
             facts_data = {
                 fid: {
-                    "fact_id": f.fact_id, "content": f.content,
-                    "sources": f.sources, "confidence": f.confidence,
-                    "timestamp": f.timestamp, "category": f.category,
+                    "fact_id": f.fact_id,
+                    "content": f.content,
+                    "sources": f.sources,
+                    "confidence": f.confidence,
+                    "timestamp": f.timestamp,
+                    "category": f.category,
                 }
                 for fid, f in self._facts.items()
             }
             tmp_facts = self._store_path / f".facts.json.{_uuid.uuid4().hex[:8]}.tmp"
-            tmp_facts.write_text(json.dumps(facts_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_facts.write_text(
+                json.dumps(facts_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             os.replace(tmp_facts, self._store_path / "facts.json")
 
-            patterns_data = [
-                {"query_type": p.query_type, "strategy": p.strategy,
-                 "success": p.success, "quality_score": p.quality_score,
-                 "timestamp": p.timestamp}
-                for p in self._patterns
-            ]
-            tmp_patterns = self._store_path / f".patterns.json.{_uuid.uuid4().hex[:8]}.tmp"
-            tmp_patterns.write_text(json.dumps(patterns_data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp_patterns, self._store_path / "patterns.json")
         except Exception:
             logger.exception("Failed to save semantic memory to disk")
 
     def _load(self) -> None:
-        """Load facts and patterns from disk JSON files."""
+        """Load persisted facts from disk."""
         facts_file = self._store_path / "facts.json"
-        if (
-            facts_file.exists()
-            and facts_file.stat().st_size <= self._max_file_bytes
-        ):
+        if facts_file.exists() and facts_file.stat().st_size <= self._max_file_bytes:
             try:
                 data = json.loads(facts_file.read_text(encoding="utf-8"))
                 for fid, d in data.items():
@@ -266,8 +208,7 @@ class SemanticMemory:
                         fact_id=d["fact_id"],
                         content=str(d["content"])[: self._max_fact_chars],
                         sources=[
-                            str(source)[:1000]
-                            for source in d.get("sources", [])[:100]
+                            str(source)[:1000] for source in d.get("sources", [])[:100]
                         ],
                         confidence=d.get("confidence", 0.5),
                         timestamp=d.get("timestamp", 0.0),
@@ -276,25 +217,6 @@ class SemanticMemory:
             except Exception:
                 logger.exception("Failed to load facts from %s", facts_file)
 
-        patterns_file = self._store_path / "patterns.json"
-        if (
-            patterns_file.exists()
-            and patterns_file.stat().st_size <= self._max_file_bytes
-        ):
-            try:
-                data = json.loads(patterns_file.read_text(encoding="utf-8"))
-                for d in data:
-                    self._patterns.append(
-                        QueryPattern(
-                            query_type=d["query_type"],
-                            strategy=d["strategy"],
-                            success=d["success"],
-                            quality_score=d.get("quality_score", 0.0),
-                            timestamp=d.get("timestamp", 0.0),
-                        )
-                    )
-            except Exception:
-                logger.exception("Failed to load patterns from %s", patterns_file)
         self._prune()
 
     # ------------------------------------------------------------------
@@ -315,24 +237,41 @@ class SemanticMemory:
                 reverse=True,
             )[: self._max_facts]
             self._facts = {fact.fact_id: fact for fact in newest}
-        self._patterns = [
-            pattern
-            for pattern in self._patterns
-            if pattern.timestamp >= cutoff
-        ][-self._max_patterns :]
 
     @staticmethod
     def _infer_category(content: str) -> str:
         """Rough category inference based on keywords in the fact content."""
         lower = content.lower()
-        if any(kw in lower for kw in ("function", "class", "import", "def ", "return", "api")):
+        if any(
+            kw in lower
+            for kw in ("function", "class", "import", "def ", "return", "api")
+        ):
             return "code"
-        if any(kw in lower for kw in ("http", "endpoint", "request", "response", "route")):
+        if any(
+            kw in lower for kw in ("http", "endpoint", "request", "response", "route")
+        ):
             return "api"
         if any(kw in lower for kw in ("is a", "refers to", "defined as", "meaning")):
             return "concept"
-        if any(kw in lower for kw in ("step", "workflow", "pipeline", "process", "first")):
+        if any(
+            kw in lower for kw in ("step", "workflow", "pipeline", "process", "first")
+        ):
             return "workflow"
         if any(kw in lower for kw in ("prefer", "like", "always", "never", "favorite")):
             return "preference"
         return "general"
+
+    @staticmethod
+    def _tokenize(value: str) -> set[str]:
+        tokens: set[str] = set()
+        for match in _TOKEN_PATTERN.findall(value.lower()):
+            if re.fullmatch(r"[\u4e00-\u9fff]+", match):
+                if len(match) == 1:
+                    tokens.add(match)
+                else:
+                    tokens.update(
+                        match[index : index + 2] for index in range(len(match) - 1)
+                    )
+            else:
+                tokens.add(match)
+        return tokens
