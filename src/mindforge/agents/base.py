@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -232,6 +235,7 @@ class BaseAgent(ABC):
         tools: Optional[list[dict]] = None,
         response_format: Optional[dict] = None,
         temperature: Optional[float] = None,
+        max_attempts: int = 3,
         _llm_override: Any = None,
     ) -> ChatResult:
         """Call the LLM with 3-attempt retry and exponential backoff."""
@@ -253,7 +257,8 @@ class BaseAgent(ABC):
                 timeout=request_timeout,
             )
 
-        for attempt in range(3):
+        attempts = max(1, min(int(max_attempts), 3))
+        for attempt in range(attempts):
             try:
                 tracer = self._get_tracer()
                 if tracer is None:
@@ -340,12 +345,171 @@ class BaseAgent(ABC):
                 status = getattr(exc, "status_code", None)
                 if status is not None and 400 <= status < 500:
                     raise
-                if attempt < 2:
+                if attempt < attempts - 1:
                     wait = 2.0**attempt * 1.0
                     await asyncio.sleep(wait)
 
+        detail = (
+            str(last_exc).strip()
+            if last_exc is not None
+            else ""
+        ) or (
+            type(last_exc).__name__
+            if last_exc is not None
+            else "unknown error"
+        )
         raise RuntimeError(
-            f"LLM chat failed after 3 attempts: {last_exc}"
+            f"LLM chat failed after {attempts} attempt(s): {detail}"
+        ) from last_exc
+
+    async def _chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: Optional[float] = None,
+        max_attempts: int = 3,
+        _llm_override: Any = None,
+    ) -> AsyncIterator[Any]:
+        """Stream one LLM response with the same timeout, retry, and trace policy."""
+        temp = temperature if temperature is not None else self._temperature
+        llm = _llm_override if _llm_override is not None else self._llm
+        request_timeout = float(
+            getattr(self._settings.agent, "llm_request_timeout", 45)
+        )
+        attempts = max(1, min(int(max_attempts), 3))
+        last_exc: Exception | None = None
+
+        for attempt in range(attempts):
+            emitted_event = False
+            tracer = self._get_tracer()
+            model_name = getattr(
+                llm,
+                "_model",
+                getattr(llm, "model", self._model_name),
+            )
+            span_context = (
+                tracer.span(
+                    "llm.chat",
+                    metadata={
+                        "agent": self.name,
+                        "model": model_name,
+                        "provider": self._provider_name,
+                        "attempt": attempt + 1,
+                        "stage": "llm_stream",
+                        "timeout_seconds": request_timeout,
+                    },
+                )
+                if tracer is not None
+                else nullcontext(None)
+            )
+            span = None
+            stream = None
+            try:
+                with span_context as span:
+                    if span is not None:
+                        span.input = {
+                            "messages": [
+                                {
+                                    "role": message.role,
+                                    "content": message.content[:4000],
+                                }
+                                for message in messages
+                            ],
+                            "stream": True,
+                        }
+                    deadline = asyncio.get_running_loop().time() + request_timeout
+                    stream = await asyncio.wait_for(
+                        llm.chat(
+                            messages=messages,
+                            temperature=temp,
+                            stream=True,
+                        ),
+                        timeout=request_timeout,
+                    )
+                    iterator = stream.__aiter__()
+                    event_count = 0
+                    while True:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        try:
+                            event = await asyncio.wait_for(
+                                anext(iterator),
+                                timeout=remaining,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        event_count += 1
+                        emitted_event = True
+                        yield event
+                    if span is not None:
+                        span.output = {"event_count": event_count}
+                    return
+            except asyncio.CancelledError:
+                if span is not None:
+                    span.metadata.update(
+                        {
+                            "status": "cancelled",
+                            "error_code": "llm_request_cancelled",
+                            "error_type": "CancelledError",
+                        }
+                    )
+                    span.error = "LLM stream was cancelled before completion."
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if span is not None:
+                    is_timeout = isinstance(exc, asyncio.TimeoutError)
+                    span.metadata.update(
+                        {
+                            "status": "error",
+                            "error_code": (
+                                "llm_request_timeout"
+                                if is_timeout
+                                else "llm_request_failed"
+                            ),
+                            "error_type": type(exc).__name__,
+                        }
+                    )
+                    span.error = (
+                        f"LLM stream timed out after {request_timeout:g} seconds."
+                        if is_timeout
+                        else (
+                            "LLM stream failed: "
+                            f"{tracer.describe_exception(exc)}"
+                        )
+                    )
+                status = getattr(exc, "status_code", None)
+                if (
+                    emitted_event
+                    or (status is not None and 400 <= status < 500)
+                    or attempt >= attempts - 1
+                ):
+                    raise
+                await asyncio.sleep(2.0**attempt)
+            finally:
+                close_stream = getattr(stream, "aclose", None)
+                if callable(close_stream):
+                    try:
+                        await close_stream()
+                    except Exception:
+                        logger.warning(
+                            "Failed to close LLM stream for %s.",
+                            self.name,
+                            exc_info=True,
+                        )
+
+        detail = (
+            str(last_exc).strip()
+            if last_exc is not None
+            else ""
+        ) or (
+            type(last_exc).__name__
+            if last_exc is not None
+            else "unknown error"
+        )
+        raise RuntimeError(
+            f"LLM stream failed after {attempts} attempt(s): {detail}"
         ) from last_exc
 
     def _get_tracer(self) -> Any:
@@ -489,6 +653,7 @@ class BaseAgent(ABC):
         max_rounds: Optional[int] = None,
         messages: Optional[list[ChatMessage]] = None,
         _llm_override: Any = None,
+        require_sources: bool = False,
     ) -> AgentResult:
         """Run the LLM tool-calling loop (ReAct / function calling).
 
@@ -533,10 +698,65 @@ class BaseAgent(ABC):
         final_content = ""
         tool_calls_made = 0
         tool_calls_rejected = 0
+        automatic_source_search_attempted = False
+        citation_rewrite_requested = False
         collected_sources: list[
             dict[str, Any]
         ] = []  # aggregate source metadata from tool calls
+        source_indices: dict[str, int] = {}
         tool_call_details: list[dict[str, Any]] = []
+        citation_rewrite_instruction = (
+            "这份草稿没有使用来源编号。请基于已经提供的真实来源重写答案，"
+            "并在对应事实后加入全局 [N] 引用标记；不要编造来源。"
+        )
+
+        def register_tool_result(
+            tool_call: dict[str, Any],
+            exec_result: dict[str, Any],
+        ) -> str:
+            tool_output = str(exec_result["output"])
+            tool_data = exec_result.get("data")
+            if isinstance(tool_data, dict):
+                raw_sources = tool_data.get("sources")
+                if isinstance(raw_sources, list):
+                    mapping_lines: list[str] = []
+                    for position, source in enumerate(raw_sources, 1):
+                        if not isinstance(source, dict):
+                            continue
+                        identity = self._source_identity(source)
+                        if not identity:
+                            continue
+                        global_index = source_indices.get(identity)
+                        if global_index is None:
+                            global_index = len(collected_sources) + 1
+                            source_indices[identity] = global_index
+                            collected_sources.append(
+                                {**source, "index": global_index}
+                            )
+                        local_index = source.get("index", position)
+                        mapping_lines.append(
+                            f"- Local result/source {local_index} "
+                            f"must be cited as [{global_index}]"
+                        )
+                    if mapping_lines:
+                        tool_output = (
+                            "Global citation mapping for this tool result:\n"
+                            + "\n".join(mapping_lines)
+                            + "\nUse these global [N] numbers in the final "
+                            "answer; do not reuse local result numbers.\n\n"
+                            + tool_output
+                        )
+            tool_call_details.append(
+                {
+                    "tool": tool_call.get("function", {}).get("name", ""),
+                    "success": exec_result.get("success", False),
+                    "latency_ms": exec_result.get(
+                        "execution_time_ms",
+                        0.0,
+                    ),
+                }
+            )
+            return tool_output
 
         for round_idx in range(max_rounds):
             result = await self._chat(
@@ -557,7 +777,84 @@ class BaseAgent(ABC):
 
             # --- No tool calls → final answer ---
             if not result.tool_calls:
-                final_content = result.content or ""
+                candidate_content = result.content or ""
+                source_tool_names = [
+                    name
+                    for name in ("search_knowledge_base", "web_search")
+                    if name in self._tool_dict
+                ]
+                if (
+                    require_sources
+                    and not collected_sources
+                    and not automatic_source_search_attempted
+                    and source_tool_names
+                    and tool_calls_made
+                    < self._settings.agent.max_tool_calls_total
+                ):
+                    automatic_source_search_attempted = True
+                    for source_tool_name in source_tool_names:
+                        if (
+                            tool_calls_made
+                            >= self._settings.agent.max_tool_calls_total
+                        ):
+                            break
+                        tool_call = {
+                            "id": (
+                                f"automatic-source-{tool_calls_made + 1}"
+                            ),
+                            "function": {
+                                "name": source_tool_name,
+                                "arguments": json.dumps(
+                                    {"query": task},
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                        tool_calls_made += 1
+                        conv.append(
+                            ChatMessage(
+                                role="assistant",
+                                content="",
+                                tool_calls=[tool_call],
+                            )
+                        )
+                        exec_result = await self._execute_tool(tool_call)
+                        tool_output = register_tool_result(
+                            tool_call,
+                            exec_result,
+                        )
+                        conv.append(
+                            ChatMessage(
+                                role="tool",
+                                content=tool_output,
+                                tool_call_id=exec_result["tool_call_id"],
+                            )
+                        )
+                        if collected_sources:
+                            break
+                    if tool_calls_made > 0:
+                        continue
+                if (
+                    require_sources
+                    and collected_sources
+                    and not self._contains_citation_marker(candidate_content)
+                    and not citation_rewrite_requested
+                ):
+                    citation_rewrite_requested = True
+                    conv.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=candidate_content,
+                        )
+                    )
+                    conv.append(
+                        ChatMessage(
+                            role="user",
+                            content=citation_rewrite_instruction,
+                        )
+                    )
+                    continue
+                final_content = candidate_content
                 # Append the final assistant message
                 conv.append(ChatMessage(role="assistant", content=final_content))
                 break
@@ -617,32 +914,13 @@ class BaseAgent(ABC):
                         )
                     )
                 else:
+                    tool_output = register_tool_result(tc, exec_result)
                     conv.append(
                         ChatMessage(
                             role="tool",
-                            content=exec_result["output"],
+                            content=tool_output,
                             tool_call_id=exec_result["tool_call_id"],
                         )
-                    )
-                    # Collect source metadata from tool results (e.g. RAGTool returns sources in data)
-                    tool_data = (
-                        exec_result.get("data")
-                        if isinstance(exec_result, dict)
-                        else None
-                    )
-                    if isinstance(tool_data, dict) and "sources" in tool_data:
-                        for src in tool_data["sources"]:
-                            if isinstance(src, dict):
-                                collected_sources.append(src)
-                    tool_call_details.append(
-                        {
-                            "tool": tc.get("function", {}).get("name", ""),
-                            "success": exec_result.get("success", False),
-                            "latency_ms": exec_result.get(
-                                "execution_time_ms",
-                                0.0,
-                            ),
-                        }
                     )
 
         # --- Determine final output ---
@@ -664,10 +942,56 @@ class BaseAgent(ABC):
             except Exception:
                 pass  # best-effort; fall through to backward scan
 
-        # Fallback: scan backwards for the last assistant message with content
+        if (
+            final_content
+            and require_sources
+            and collected_sources
+            and not self._contains_citation_marker(final_content)
+            and not citation_rewrite_requested
+        ):
+            citation_rewrite_requested = True
+            conv.append(ChatMessage(role="assistant", content=final_content))
+            conv.append(
+                ChatMessage(
+                    role="user",
+                    content=citation_rewrite_instruction,
+                )
+            )
+            try:
+                citation_result = await self._chat(
+                    conv,
+                    tools=None,
+                    _llm_override=_llm_override,
+                )
+                if citation_result.content.strip():
+                    final_content = citation_result.content
+                    conv.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=final_content,
+                        )
+                    )
+                if citation_result.usage:
+                    for key, value in citation_result.usage.items():
+                        aggregated_usage[key] = (
+                            aggregated_usage.get(key, 0) + (value or 0)
+                        )
+            except Exception:
+                logger.warning(
+                    "Citation rewrite failed for %s.",
+                    self.name,
+                    exc_info=True,
+                )
+
+        # Only a non-tool assistant message is a valid final answer. Returning
+        # tool-call preambles here can leak protocol text such as XML-like tags.
         if not final_content:
             for msg in reversed(conv):
-                if msg.role == "assistant" and msg.content:
+                if (
+                    msg.role == "assistant"
+                    and msg.content
+                    and not msg.tool_calls
+                ):
                     final_content = msg.content
                     break
 
@@ -696,6 +1020,20 @@ class BaseAgent(ABC):
                 "tool_calls_rejected": tool_calls_rejected,
                 "messages": len(conv),
                 "sources": collected_sources,
+                "citation_status": (
+                    "available"
+                    if collected_sources
+                    and self._contains_citation_marker(final_content)
+                    else (
+                        "missing_markers"
+                        if collected_sources
+                        else (
+                            "unavailable"
+                            if require_sources
+                            else "not_required"
+                        )
+                    )
+                ),
                 "tool_call_details": tool_call_details,
                 "failure_reason": (None if success else "empty_llm_response"),
             },
@@ -707,3 +1045,19 @@ class BaseAgent(ABC):
             cost_usd=cost_estimate.amount_usd,
             cost_status=cost_estimate.status,
         )
+
+    @staticmethod
+    def _source_identity(source: dict[str, Any]) -> str:
+        return str(
+            source.get("url")
+            or source.get("chunk_id")
+            or source.get("id")
+            or (
+                f"{source.get('title', source.get('source', ''))}:"
+                f"{str(source.get('content', source.get('text', '')))[:200]}"
+            )
+        ).strip()
+
+    @staticmethod
+    def _contains_citation_marker(text: str) -> bool:
+        return bool(re.search(r"\[[1-9]\d*\]", text))

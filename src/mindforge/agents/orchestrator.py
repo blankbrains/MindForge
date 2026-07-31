@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from contextlib import nullcontext
+from contextlib import aclosing, nullcontext
 from typing import Any, AsyncIterator, Optional
 
 from mindforge.agents.base import AgentResult
@@ -129,9 +129,19 @@ class Orchestrator:
     # Public API
     # ------------------------------------------------------------------
 
-    async def run(self, task: str) -> AgentResult:
+    async def run(
+        self,
+        task: str,
+        *,
+        create_root_trace: bool = True,
+    ) -> AgentResult:
         """Execute one research request inside a top-level trace."""
-        with self._research_trace(task, transport="sync") as root_span:
+        trace_context = (
+            self._research_trace(task, transport="sync")
+            if create_root_trace
+            else nullcontext(None)
+        )
+        with trace_context as root_span:
             if root_span is not None:
                 root_span.input = {"task": task}
             result = await self._run_with_limit(task)
@@ -233,7 +243,8 @@ class Orchestrator:
                     "timeout_seconds": timeout_seconds,
                 },
                 metadata={
-                    "quality": 0.0,
+                    "quality": None,
+                    "quality_status": "not_evaluated",
                     "cost": None,
                     "cost_status": "usage_unavailable",
                     "subtask_count": 0,
@@ -325,6 +336,7 @@ class Orchestrator:
         # Step 3: Synthesize (skip for single-subtask)
         # ------------------------------------------------------------------
         all_sources = self._collect_sources(subtask_outputs)
+        self._attach_citation_maps(subtask_outputs, all_sources)
         skip_syn = len(subtask_outputs) == 1 and subtask_outputs[0].get("success")
 
         if skip_syn:
@@ -385,7 +397,8 @@ class Orchestrator:
                     "stage": "synthesis",
                 },
                 metadata={
-                    "quality": 0.0,
+                    "quality": None,
+                    "quality_status": "not_evaluated",
                     "cost": cost_usd,
                     "cost_status": cost_status,
                     "subtask_count": len(plan.subtasks),
@@ -408,16 +421,17 @@ class Orchestrator:
         current_draft = draft_result.output
         final_critic: Optional[CriticScore] = None
         refine_count = 0
+        refinement_failure: str | None = None
 
         if not self._should_run_critic(task, plan):
             logger.info("简单查询，跳过 Critic 评估（提速）")
             pipeline_log["critic"] = {"skipped": True, "reason": "简单查询"}
         else:
-            max_refine = self._settings.agent.max_refine_rounds
-            for refine_round in range(max_refine):
+            max_refine = self._max_refine_rounds(plan)
+            for evaluation_round in range(max_refine + 1):
                 with self._agent_span(
                     "critic",
-                    metadata={"round": refine_round + 1},
+                    metadata={"round": evaluation_round + 1},
                 ) as critic_span:
                     critic_score = await self._critic.evaluate(
                         task=task,
@@ -439,34 +453,61 @@ class Orchestrator:
                     critic_score,
                     total_cost,
                 )
-
-                if not critic_score.should_refine:
+                if critic_score.evaluation_status == "failed":
                     pipeline_log["critic"] = {
-                        "rounds": refine_round + 1,
+                        "status": "failed",
+                        "reason": critic_score.evaluation_error,
+                    }
+                    break
+
+                if (
+                    not critic_score.should_refine
+                    or refine_count >= max_refine
+                ):
+                    pipeline_log["critic"] = {
+                        "evaluations": evaluation_round + 1,
+                        "refine_rounds": refine_count,
                         "overall_score": critic_score.overall,
-                        "refined": False,
+                        "refined": refine_count > 0,
                     }
                     break
 
                 # Refine: re-synthesize with critic feedback
-                with self._agent_span(
-                    "synthesizer",
-                    metadata={
-                        "phase": "refine",
-                        "round": refine_round + 1,
-                    },
-                ) as synthesizer_span:
-                    refined_result = await self._synthesizer.synthesize(
-                        task=task,
-                        subtask_results=subtask_outputs,
-                        all_sources=all_sources,
-                        critic_feedback=critic_score,
+                try:
+                    with self._agent_span(
+                        "synthesizer",
+                        metadata={
+                            "phase": "refine",
+                            "round": refine_count + 1,
+                        },
+                    ) as synthesizer_span:
+                        refined_result = await self._synthesizer.synthesize(
+                            task=task,
+                            subtask_results=subtask_outputs,
+                            all_sources=all_sources,
+                            critic_feedback=critic_score,
+                            max_attempts=1,
+                        )
+                        if synthesizer_span is not None:
+                            synthesizer_span.output = {
+                                "success": refined_result.success,
+                                "output_chars": len(refined_result.output),
+                            }
+                except Exception as exc:
+                    refinement_failure = self._describe_exception(exc)
+                    pipeline_log["critic"] = {
+                        "evaluations": evaluation_round + 1,
+                        "refine_rounds": refine_count,
+                        "overall_score": critic_score.overall,
+                        "refined": refine_count > 0,
+                        "refinement_failed": True,
+                        "reason": refinement_failure,
+                    }
+                    logger.warning(
+                        "Report refinement failed; keeping the last valid draft: %s",
+                        refinement_failure,
                     )
-                    if synthesizer_span is not None:
-                        synthesizer_span.output = {
-                            "success": refined_result.success,
-                            "output_chars": len(refined_result.output),
-                        }
+                    break
                 self._accumulate_usage(
                     total_usage,
                     refined_result,
@@ -474,48 +515,15 @@ class Orchestrator:
                 )
                 if not refined_result.success or not refined_result.output.strip():
                     pipeline_log["critic"] = {
-                        "rounds": refine_round + 1,
+                        "evaluations": evaluation_round + 1,
+                        "refine_rounds": refine_count,
                         "overall_score": critic_score.overall,
-                        "refined": False,
+                        "refined": refine_count > 0,
                         "refinement_failed": True,
                     }
                     break
                 current_draft = refined_result.output
-                refine_count = refine_round + 1
-
-            # The score shown to users must describe the final refined draft,
-            # not the pre-refinement version that triggered the rewrite.
-            if refine_count > 0:
-                with self._agent_span(
-                    "critic",
-                    metadata={"phase": "final"},
-                ) as critic_span:
-                    final_critic = await self._critic.evaluate(
-                        task=task,
-                        draft=current_draft,
-                        sources=all_sources,
-                    )
-                    if critic_span is not None:
-                        critic_span.input = {
-                            "draft_chars": len(current_draft),
-                            "source_count": len(all_sources),
-                        }
-                        critic_span.output = {
-                            "overall": final_critic.overall,
-                            "should_refine": final_critic.should_refine,
-                        }
-                self._accumulate_usage(
-                    total_usage,
-                    final_critic,
-                    total_cost,
-                )
-
-            if final_critic is not None and refine_count > 0:
-                pipeline_log["critic"] = {
-                    "rounds": refine_count,
-                    "overall_score": final_critic.overall,
-                    "refined": True,
-                }
+                refine_count += 1
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         total_cost_usd, cost_status = self._cost_summary(total_cost)
@@ -531,6 +539,7 @@ class Orchestrator:
             total_cost_usd=total_cost_usd,
             cost_status=cost_status,
             pipeline_log=pipeline_log,
+            refinement_failure=refinement_failure,
         )
         await self._store_memories(task, result)
         return result
@@ -539,26 +548,41 @@ class Orchestrator:
     # Streaming variant
     # ------------------------------------------------------------------
 
-    async def stream_run(self, task: str) -> AsyncIterator[dict[str, Any]]:
+    async def stream_run(
+        self,
+        task: str,
+        *,
+        create_root_trace: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Stream one research request inside a top-level trace."""
         final_result: AgentResult | None = None
         trace_error: str | None = None
-        with self._research_trace(task, transport="sse") as root_span:
+        trace_context = (
+            self._research_trace(task, transport="sse")
+            if create_root_trace
+            else nullcontext(None)
+        )
+        with trace_context as root_span:
             if root_span is not None:
                 root_span.input = {"task": task}
             try:
-                async for event in self._stream_run_with_limit(task):
-                    trace_id = self._current_trace_id()
-                    if trace_id:
-                        event = {**event, "trace_id": trace_id}
-                    if event.get("type") == "done":
-                        result = event.get("result")
-                        if isinstance(result, AgentResult):
-                            self._attach_trace_id(result)
-                            final_result = result
-                    elif event.get("type") == "error":
-                        trace_error = str(event.get("content") or "Research failed.")
-                    yield event
+                async with aclosing(
+                    self._stream_run_with_limit(task)
+                ) as limited_stream:
+                    async for event in limited_stream:
+                        trace_id = self._current_trace_id()
+                        if trace_id:
+                            event = {**event, "trace_id": trace_id}
+                        if event.get("type") == "done":
+                            result = event.get("result")
+                            if isinstance(result, AgentResult):
+                                self._attach_trace_id(result)
+                                final_result = result
+                        elif event.get("type") == "error":
+                            trace_error = str(
+                                event.get("content") or "Research failed."
+                            )
+                        yield event
             except asyncio.CancelledError:
                 if root_span is not None:
                     root_span.metadata["status"] = "cancelled"
@@ -599,23 +623,25 @@ class Orchestrator:
             }
             return
 
-        event_queue: asyncio.Queue[dict[str, Any] | object] = asyncio.Queue()
-        stream_finished = object()
-
-        async def pump_events() -> None:
-            try:
-                async for event in self._stream_pipeline(task):
-                    event_queue.put_nowait(event)
-            finally:
-                event_queue.put_nowait(stream_finished)
-
-        pipeline_task = asyncio.create_task(pump_events())
-        # Let the pipeline enqueue its immediate lifecycle event before the
-        # heartbeat timer starts. The generator must remain owned by the same
-        # task to preserve tracing ContextVar state across streamed chunks.
-        await asyncio.sleep(0)
-        deadline = time.monotonic() + self._settings.agent.research_timeout
+        pipeline_task: asyncio.Task[None] | None = None
         try:
+            event_queue: asyncio.Queue[dict[str, Any] | object] = asyncio.Queue()
+            stream_finished = object()
+
+            async def pump_events() -> None:
+                async with aclosing(self._stream_pipeline(task)) as pipeline:
+                    try:
+                        async for event in pipeline:
+                            event_queue.put_nowait(event)
+                    finally:
+                        event_queue.put_nowait(stream_finished)
+
+            pipeline_task = asyncio.create_task(pump_events())
+            # Let the pipeline enqueue its immediate lifecycle event before the
+            # heartbeat timer starts. This await must remain inside the slot's
+            # try/finally because clients can disconnect during startup.
+            await asyncio.sleep(0)
+            deadline = time.monotonic() + self._settings.agent.research_timeout
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -645,7 +671,7 @@ class Orchestrator:
                 ),
             }
         finally:
-            if not pipeline_task.done():
+            if pipeline_task is not None and not pipeline_task.done():
                 pipeline_task.cancel()
                 await asyncio.gather(
                     pipeline_task,
@@ -751,6 +777,7 @@ class Orchestrator:
 
         # --- Step 3: Synthesize (skip for single-subtask — use Researcher output directly) ---
         all_sources = self._collect_sources(subtask_outputs)
+        self._attach_citation_maps(subtask_outputs, all_sources)
         skip_synthesizer = len(subtask_outputs) == 1 and subtask_outputs[0].get(
             "success"
         )
@@ -834,7 +861,8 @@ class Orchestrator:
                     "stage": "synthesis",
                 },
                 metadata={
-                    "quality": 0.0,
+                    "quality": None,
+                    "quality_status": "not_evaluated",
                     "cost": cost_usd,
                     "cost_status": cost_status,
                     "subtask_count": len(plan.subtasks),
@@ -855,16 +883,17 @@ class Orchestrator:
         current_draft = draft_result.output
         final_critic: Optional[CriticScore] = None
         refine_count = 0
+        refinement_failure: str | None = None
 
         # 用 Researcher 原始输出判断复杂度（Synthesizer 会把简单内容扩写成报告）
         if not self._should_run_critic(task, plan):
             logger.info("简单查询，跳过 Critic 评估（提速）")
         else:
-            max_refine = self._settings.agent.max_refine_rounds
-            for refine_round in range(max_refine):
+            max_refine = self._max_refine_rounds(plan)
+            for evaluation_round in range(max_refine + 1):
                 with self._agent_span(
                     "critic",
-                    metadata={"round": refine_round + 1},
+                    metadata={"round": evaluation_round + 1},
                 ) as critic_span:
                     critic_score = await self._critic.evaluate(
                         task=task,
@@ -890,32 +919,46 @@ class Orchestrator:
                 yield {
                     "type": "critic_feedback",
                     "score": critic_score,
-                    "round": refine_round + 1,
+                    "round": evaluation_round + 1,
                 }
-
-                if not critic_score.should_refine:
+                if critic_score.evaluation_status == "failed":
                     break
 
-                yield {"type": "refining", "round": refine_round + 1}
+                if (
+                    not critic_score.should_refine
+                    or refine_count >= max_refine
+                ):
+                    break
 
-                with self._agent_span(
-                    "synthesizer",
-                    metadata={
-                        "phase": "refine",
-                        "round": refine_round + 1,
-                    },
-                ) as synthesizer_span:
-                    refined_result = await self._synthesizer.synthesize(
-                        task=task,
-                        subtask_results=subtask_outputs,
-                        all_sources=all_sources,
-                        critic_feedback=critic_score,
+                yield {"type": "refining", "round": refine_count + 1}
+
+                try:
+                    with self._agent_span(
+                        "synthesizer",
+                        metadata={
+                            "phase": "refine",
+                            "round": refine_count + 1,
+                        },
+                    ) as synthesizer_span:
+                        refined_result = await self._synthesizer.synthesize(
+                            task=task,
+                            subtask_results=subtask_outputs,
+                            all_sources=all_sources,
+                            critic_feedback=critic_score,
+                            max_attempts=1,
+                        )
+                        if synthesizer_span is not None:
+                            synthesizer_span.output = {
+                                "success": refined_result.success,
+                                "output_chars": len(refined_result.output),
+                            }
+                except Exception as exc:
+                    refinement_failure = self._describe_exception(exc)
+                    logger.warning(
+                        "Report refinement failed; keeping the last valid draft: %s",
+                        refinement_failure,
                     )
-                    if synthesizer_span is not None:
-                        synthesizer_span.output = {
-                            "success": refined_result.success,
-                            "output_chars": len(refined_result.output),
-                        }
+                    break
                 self._accumulate_usage(
                     total_usage,
                     refined_result,
@@ -924,32 +967,7 @@ class Orchestrator:
                 if not refined_result.success or not refined_result.output.strip():
                     break
                 current_draft = refined_result.output
-                refine_count = refine_round + 1
-
-            if refine_count > 0:
-                with self._agent_span(
-                    "critic",
-                    metadata={"phase": "final"},
-                ) as critic_span:
-                    final_critic = await self._critic.evaluate(
-                        task=task,
-                        draft=current_draft,
-                        sources=all_sources,
-                    )
-                    if critic_span is not None:
-                        critic_span.input = {
-                            "draft_chars": len(current_draft),
-                            "source_count": len(all_sources),
-                        }
-                        critic_span.output = {
-                            "overall": final_critic.overall,
-                            "should_refine": final_critic.should_refine,
-                        }
-                self._accumulate_usage(
-                    total_usage,
-                    final_critic,
-                    total_cost,
-                )
+                refine_count += 1
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         total_cost_usd, cost_status = self._cost_summary(total_cost)
@@ -964,6 +982,7 @@ class Orchestrator:
             elapsed_ms=elapsed_ms,
             total_cost_usd=total_cost_usd,
             cost_status=cost_status,
+            refinement_failure=refinement_failure,
         )
         await self._store_memories(task, result)
         yield {"type": "done", "result": result}
@@ -989,6 +1008,17 @@ class Orchestrator:
         "deep research",
         "comprehensive",
     )
+    _COMPARISON_MARKERS = (
+        "比较",
+        "对比",
+        "区别",
+        "差异",
+        "优缺点",
+        "利弊",
+        "取舍",
+        " versus ",
+        " vs ",
+    )
 
     def _research_mode(self) -> str:
         mode = str(
@@ -1003,6 +1033,22 @@ class Orchestrator:
             return False
         if any(marker in normalized for marker in cls._DEEP_RESEARCH_MARKERS):
             return False
+        padded = f" {normalized} "
+        if any(marker in padded for marker in cls._COMPARISON_MARKERS):
+            return False
+        sentence_breaks = len(re.findall(r"[。！？!?;\n]", normalized))
+        return sentence_breaks <= 2
+
+    @classmethod
+    def _can_use_direct_plan(cls, task: str) -> bool:
+        normalized = re.sub(r"\s+", " ", task).strip().casefold()
+        if not normalized or len(normalized) > 160:
+            return False
+        if any(marker in normalized for marker in cls._DEEP_RESEARCH_MARKERS):
+            return False
+        padded = f" {normalized} "
+        if any(marker in padded for marker in cls._COMPARISON_MARKERS):
+            return False
         sentence_breaks = len(re.findall(r"[。！？!?;\n]", normalized))
         return sentence_breaks <= 2
 
@@ -1011,7 +1057,7 @@ class Orchestrator:
             return await self._planner.run(task)
         mode = self._research_mode()
         if mode == "fast" or (
-            mode == "balanced" and self._is_simple_task(task)
+            mode == "balanced" and self._can_use_direct_plan(task)
         ):
             return ResearchPlan(
                 plan_id=f"direct-{int(time.time() * 1000):x}"[-12:],
@@ -1027,8 +1073,10 @@ class Orchestrator:
                     )
                 ],
                 reasoning=(
-                    "该问题可由单个研究任务直接回答，跳过额外规划以降低延迟。"
+                    "该问题范围集中，可由单个研究任务直接处理，"
+                    "跳过额外规划以降低延迟。"
                 ),
+                planner_status="direct",
             )
         return await self._planner.run(task)
 
@@ -1037,18 +1085,21 @@ class Orchestrator:
         task: str,
         plan: ResearchPlan,
     ) -> bool:
-        if self._settings.agent.max_refine_rounds <= 0:
-            return False
         mode = self._research_mode()
         if mode == "fast":
             return False
+        if mode == "deep":
+            return True
+        return len(plan.subtasks) > 1 or not self._is_simple_task(task)
+
+    def _max_refine_rounds(self, plan: ResearchPlan) -> int:
+        configured = max(0, self._settings.agent.max_refine_rounds)
         if (
-            mode == "balanced"
+            self._research_mode() == "balanced"
             and len(plan.subtasks) == 1
-            and self._is_simple_task(task)
         ):
-            return False
-        return mode == "deep" or len(plan.subtasks) > 1
+            return 0
+        return configured
 
     def _get_tracer(self) -> Any:
         observability = getattr(self._settings, "observability", None)
@@ -1184,11 +1235,21 @@ class Orchestrator:
                 subtask,
                 plan,
             )
+            max_context_chars = int(
+                getattr(
+                    self._settings.agent,
+                    "research_context_max_chars",
+                    12_000,
+                )
+            )
+            dependency_context = dependency_context.strip()[:max_context_chars]
+            remaining = max(0, max_context_chars - len(dependency_context))
+            bounded_shared_context = shared_context.strip()[:remaining]
             context = "\n\n".join(
                 section
                 for section in (
-                    shared_context.strip(),
-                    dependency_context.strip(),
+                    bounded_shared_context,
+                    dependency_context,
                 )
                 if section
             )
@@ -1328,7 +1389,17 @@ class Orchestrator:
         total_usage: dict[str, int],
         total_cost: dict[str, Any],
     ) -> list[SubTask]:
-        shared_context = working_memory.get_context_string()
+        max_context_chars = int(
+            getattr(
+                self._settings.agent,
+                "research_context_max_chars",
+                12_000,
+            )
+        )
+        shared_context = working_memory.get_context_string(
+            max_chars=max_context_chars,
+            include_types={"context", "thought"},
+        )
         results = await asyncio.gather(
             *[
                 self._execute_subtask(
@@ -1435,6 +1506,16 @@ class Orchestrator:
             result = AgentResult.from_dict(cached)
             if not result.output.strip():
                 return None
+            if ResearcherAgent.requires_sources(task):
+                cached_sources = result.data.get("sources")
+                if (
+                    not isinstance(cached_sources, list)
+                    or not cached_sources
+                    or not ResearcherAgent._contains_citation_marker(
+                        result.output
+                    )
+                ):
+                    return None
             cached_subtasks = result.data.get("subtask_outputs")
             has_failed_subtask = (
                 isinstance(cached_subtasks, list)
@@ -1465,6 +1546,20 @@ class Orchestrator:
                 "cost": None,
                 "cost_status": "not_applicable",
             }
+            critic_score = result.data.get("critic_score")
+            legacy_unreviewed = (
+                result.metadata.get("quality") == 0
+                and not isinstance(critic_score, dict)
+            )
+            if legacy_unreviewed:
+                result.metadata["quality"] = None
+                result.metadata["quality_status"] = "not_evaluated"
+            elif "quality_status" not in result.metadata:
+                result.metadata["quality_status"] = (
+                    "evaluated"
+                    if isinstance(result.metadata.get("quality"), (int, float))
+                    else "not_evaluated"
+                )
             if pipeline_log is not None:
                 result.data["pipeline"] = pipeline_log
             result.token_usage = {}
@@ -1488,18 +1583,41 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("Semantic memory recall failed: %s", exc)
             return memory
-        memory.add_context(
-            [
+        memory_config = getattr(self._settings, "memory", None)
+        max_total_chars = int(
+            getattr(memory_config, "semantic_recall_context_chars", 4000)
+        )
+        max_fact_chars = int(
+            getattr(memory_config, "semantic_recall_fact_chars", 2000)
+        )
+        chunks: list[dict[str, Any]] = []
+        remaining = max_total_chars
+        for fact in facts:
+            if remaining <= 0:
+                break
+            recall_content = getattr(self._semantic_memory, "recall_content", None)
+            content = (
+                recall_content(fact)
+                if callable(recall_content)
+                else str(fact.content)[:max_fact_chars]
+            )
+            content = str(content)[: min(max_fact_chars, remaining)]
+            if not content.strip():
+                continue
+            chunks.append(
                 {
                     "id": f"semantic:{fact.fact_id}",
-                    "content": fact.content,
-                    "rerank_score": fact.confidence,
+                    "content": content,
+                    "rerank_score": float(
+                        getattr(fact, "match_score", 0.0)
+                        or getattr(fact, "confidence", 0.5)
+                    ),
                     "sources": fact.sources,
                     "memory_type": "semantic",
                 }
-                for fact in facts
-            ]
-        )
+            )
+            remaining -= len(content)
+        memory.add_context(chunks)
         return memory
 
     @staticmethod
@@ -1534,20 +1652,26 @@ class Orchestrator:
                 logger.warning("Episodic memory store failed: %s", exc)
         if self._semantic_memory is not None and is_complete_success:
             quality = result.metadata.get("quality")
+            quality_status = result.metadata.get("quality_status")
             confidence = (
                 max(0.0, min(1.0, float(quality) / 10.0))
                 if isinstance(quality, (int, float)) and quality > 0
                 else 0.5
             )
-            try:
-                await self._semantic_memory.store(
-                    task,
-                    result.output,
-                    sources=result.data.get("sources", []),
-                    confidence=confidence,
-                )
-            except Exception as exc:
-                logger.warning("Semantic memory store failed: %s", exc)
+            if (
+                quality_status == "evaluated"
+                and isinstance(quality, (int, float))
+                and quality >= self._settings.agent.critic_threshold
+            ):
+                try:
+                    await self._semantic_memory.store(
+                        task,
+                        result.output,
+                        sources=result.data.get("sources", []),
+                        confidence=confidence,
+                    )
+                except Exception as exc:
+                    logger.warning("Semantic memory store failed: %s", exc)
 
     def _build_success_result(
         self,
@@ -1563,16 +1687,25 @@ class Orchestrator:
         total_cost_usd: float | None,
         cost_status: str,
         pipeline_log: dict[str, Any] | None = None,
+        refinement_failure: str | None = None,
     ) -> AgentResult:
         completed_subtasks = sum(
             1 for output in subtask_outputs if output.get("success")
         )
         failed_subtasks = len(subtask_outputs) - completed_subtasks
-        outcome = "degraded" if failed_subtasks else "success"
+        outcome = (
+            "degraded"
+            if failed_subtasks or refinement_failure
+            else "success"
+        )
         failure_reason = (
             self._format_partial_failure(subtask_outputs)
             if failed_subtasks
-            else None
+            else (
+                "报告精炼未完成，当前展示最后一个有效版本。"
+                if refinement_failure
+                else None
+            )
         )
         data: dict[str, Any] = {
             "plan": plan.to_dict(),
@@ -1583,16 +1716,38 @@ class Orchestrator:
         }
         if failure_reason:
             data["partial_failure"] = failure_reason
+        if refinement_failure:
+            data["refinement_failure"] = refinement_failure
         if pipeline_log is not None:
             data["pipeline"] = pipeline_log
+        quality_status = (
+            "not_evaluated"
+            if final_critic is None
+            else (
+                "evaluation_failed"
+                if final_critic.evaluation_status == "failed"
+                else "evaluated"
+            )
+        )
         metadata: dict[str, Any] = {
-            "quality": (final_critic.overall if final_critic else 0.0),
+            "quality": (
+                final_critic.overall
+                if final_critic is not None
+                and final_critic.evaluation_status == "evaluated"
+                else None
+            ),
+            "quality_status": quality_status,
             "cost": total_cost_usd,
             "cost_status": cost_status,
             "subtask_count": len(plan.subtasks),
             "completed_subtask_count": completed_subtasks,
             "failed_subtask_count": failed_subtasks,
             "refine_rounds": refine_count,
+            "refinement_status": (
+                "failed"
+                if refinement_failure
+                else ("completed" if refine_count > 0 else "not_needed")
+            ),
             "model": self._settings.llm.llm_provider,
             "outcome": outcome,
         }
@@ -1641,7 +1796,8 @@ class Orchestrator:
             output=failure_reason,
             data=data,
             metadata={
-                "quality": 0.0,
+                "quality": None,
+                "quality_status": "not_evaluated",
                 "cost": cost_usd,
                 "cost_status": cost_status,
                 "subtask_count": len(plan.subtasks),
@@ -1706,20 +1862,50 @@ class Orchestrator:
             for src in sources:
                 if not isinstance(src, dict):
                     continue
-                identity = str(
-                    src.get("url")
-                    or src.get("chunk_id")
-                    or src.get("id")
-                    or (
-                        f"{src.get('title', src.get('source', ''))}:"
-                        f"{src.get('content', src.get('text', ''))[:200]}"
-                    )
-                )
+                identity = Orchestrator._source_identity(src)
                 if not identity or identity in seen:
                     continue
                 seen.add(identity)
                 all_sources.append({**src, "index": len(all_sources) + 1})
         return all_sources
+
+    @staticmethod
+    def _attach_citation_maps(
+        subtask_outputs: list[dict[str, Any]],
+        all_sources: list[dict[str, Any]],
+    ) -> None:
+        global_indices = {
+            Orchestrator._source_identity(source): source.get("index")
+            for source in all_sources
+        }
+        for output in subtask_outputs:
+            sources = output.get("sources")
+            if not isinstance(sources, list):
+                continue
+            mapping: dict[str, int] = {}
+            for position, source in enumerate(sources, 1):
+                if not isinstance(source, dict):
+                    continue
+                global_index = global_indices.get(
+                    Orchestrator._source_identity(source)
+                )
+                if not isinstance(global_index, int):
+                    continue
+                mapping[str(source.get("index", position))] = global_index
+            if mapping:
+                output["citation_map"] = mapping
+
+    @staticmethod
+    def _source_identity(source: dict[str, Any]) -> str:
+        return str(
+            source.get("url")
+            or source.get("chunk_id")
+            or source.get("id")
+            or (
+                f"{source.get('title', source.get('source', ''))}:"
+                f"{str(source.get('content', source.get('text', '')))[:200]}"
+            )
+        ).strip()
 
     @staticmethod
     def _build_dependency_context(

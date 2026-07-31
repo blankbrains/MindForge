@@ -15,6 +15,20 @@ interface Props {
 export function CriticFeedbackPanel({ score }: Props) {
   if (!score) return null;
 
+  if (score.evaluation_status === "failed") {
+    return (
+      <div
+        role="status"
+        className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+      >
+        <h4 className="font-semibold">质量评审失败</h4>
+        <p className="mt-1 break-words text-xs leading-5">
+          {score.evaluation_error || score.issues?.[0] || "评审模型未返回有效结果"}
+        </p>
+      </div>
+    );
+  }
+
   const data = [
     { dimension: "完整性", value: score.completeness ?? 0 },
     { dimension: "准确性", value: score.accuracy ?? 0 },

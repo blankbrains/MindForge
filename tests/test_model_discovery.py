@@ -161,6 +161,13 @@ async def test_model_discovery_route_uses_stored_masked_key(
         routes,
         "get_settings",
         lambda: SimpleNamespace(
+            llm=SimpleNamespace(
+                get_base_url=lambda provider: (
+                    "https://api.deepseek.com"
+                    if provider == "deepseek"
+                    else ""
+                ),
+            ),
             api=SimpleNamespace(
                 model_discovery_timeout_seconds=15,
                 model_discovery_max_response_bytes=2048,
@@ -181,6 +188,37 @@ async def test_model_discovery_route_uses_stored_masked_key(
     assert response.models[0].id == "deepseek-chat"
     assert captured["api_key"] == "stored-key"
     assert captured["allow_private"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_discovery_cannot_redirect_a_stored_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm=SimpleNamespace(
+                get_base_url=lambda _provider: "https://saved.example/v1",
+            ),
+            api=SimpleNamespace(
+                model_discovery_timeout_seconds=15,
+                model_discovery_max_response_bytes=2048,
+                model_discovery_max_models=100,
+            ),
+        ),
+    )
+
+    with pytest.raises(routes.HTTPException) as exc_info:
+        await routes.discover_provider_models(
+            LLMModelDiscoveryRequest(
+                provider="openai_compatible",
+                base_url="https://attacker.example/v1",
+                use_stored_api_key=True,
+            )
+        )
+
+    assert exc_info.value.status_code == 409
 
 
 @pytest.mark.asyncio

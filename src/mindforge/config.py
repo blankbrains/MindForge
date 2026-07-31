@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 def _resolve_project_root() -> Path:
@@ -120,10 +120,10 @@ class LLMConfig(BaseSettings):
     critic_model: str = "gpt-4o"
     synthesizer_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
-    deepseek_planner: str = "deepseek-chat"
-    deepseek_researcher: str = "deepseek-chat"
-    deepseek_critic: str = "deepseek-chat"
-    deepseek_synthesizer: str = "deepseek-chat"
+    deepseek_planner: str = "deepseek-v4-flash"
+    deepseek_researcher: str = "deepseek-v4-flash"
+    deepseek_critic: str = "deepseek-v4-flash"
+    deepseek_synthesizer: str = "deepseek-v4-flash"
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_revision: str = Field(
         default="5617a9f61b028005a4858fdac845db406aefb181",
@@ -260,6 +260,7 @@ class AppConfig(BaseSettings):
 class APIConfig(BaseSettings):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8000, ge=1, le=65535)
+    access_token: str = Field(default="", max_length=4096)
     cors_origins: str = Field(default="http://localhost:5173")
     max_upload_mb: int = Field(default=200, ge=1, le=2048)
     max_text_file_mb: int = Field(default=20, ge=1, le=512)
@@ -298,6 +299,16 @@ class APIConfig(BaseSettings):
         le=10_000,
     )
     model_config = SettingsConfigDict(env_prefix="API_", extra="ignore")
+
+    @field_validator("access_token")
+    @classmethod
+    def validate_access_token(cls, value: str) -> str:
+        token = value.strip()
+        if token and len(token) < 32:
+            raise ValueError("API_ACCESS_TOKEN must contain at least 32 characters.")
+        if any(ord(char) < 32 or ord(char) == 127 for char in token):
+            raise ValueError("API_ACCESS_TOKEN must not contain control characters.")
+        return token
 
     def get_cors_origins(self) -> list[str]:
         values = [
@@ -393,6 +404,7 @@ class VisualRetrievalConfig(BaseSettings):
     model: str = ""
     detail: Literal["low", "high", "auto"] = "low"
     max_assets_per_document: int = Field(default=24, ge=1, le=500)
+    caption_concurrency: int = Field(default=4, ge=1, le=32)
     max_asset_bytes: int = Field(
         default=8 * 1024 * 1024,
         ge=64 * 1024,
@@ -488,6 +500,12 @@ class AgentConfig(BaseSettings):
     queue_timeout: int = Field(default=30, ge=1, le=600)
     sse_heartbeat_seconds: int = Field(default=10, ge=1, le=60)
     stream_chunk_size: int = Field(default=512, ge=64, le=8192)
+    research_context_max_chars: int = Field(
+        default=12_000,
+        ge=1_000,
+        le=100_000,
+        description="Maximum shared-memory context passed to one research subtask.",
+    )
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
 
@@ -504,6 +522,23 @@ class MemoryConfig(BaseSettings):
     max_episode_chars: int = Field(default=100_000, ge=1000)
     max_semantic_facts: int = Field(default=500, ge=1)
     max_semantic_fact_chars: int = Field(default=50_000, ge=1000)
+    semantic_search_chars: int = Field(default=8_000, ge=500, le=100_000)
+    semantic_recall_fact_chars: int = Field(default=2_000, ge=200, le=20_000)
+    semantic_recall_context_chars: int = Field(
+        default=4_000,
+        ge=500,
+        le=50_000,
+    )
+    semantic_min_query_coverage: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+    )
+    semantic_min_similarity: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+    )
     semantic_retention_days: int = Field(default=30, ge=1, le=3650)
     semantic_max_file_bytes: int = Field(
         default=50 * 1024 * 1024,

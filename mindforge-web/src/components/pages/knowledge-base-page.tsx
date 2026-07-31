@@ -80,6 +80,12 @@ export function KnowledgeBasePage() {
     activeJob?.status === "failed"
       ? activeJob.error || "文档索引失败"
       : null;
+  const cancelJobError =
+    cancelJob.error instanceof Error
+      ? cancelJob.error.message
+      : cancelJob.error
+        ? "取消索引失败，请稍后重试"
+        : null;
 
   useEffect(() => {
     return () => documentRequestRef.current?.abort();
@@ -145,6 +151,7 @@ export function KnowledgeBasePage() {
   };
 
   const openUploadDialog = () => {
+    cancelJob.reset?.();
     setSelectedFile(null);
     setUseRaptor(false);
     setUseGraphrag(false);
@@ -169,6 +176,7 @@ export function KnowledgeBasePage() {
     if (upload.isPending) {
       uploadAbortController?.abort();
     } else if (activeJobId && indexing) {
+      cancelJob.reset?.();
       cancelJob.mutate(activeJobId);
     }
     setCancelConfirmOpen(false);
@@ -450,7 +458,7 @@ export function KnowledgeBasePage() {
                   </div>
                 </div>
               )}
-              {(uploadError || activeJobError) && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">{uploadError || activeJobError}</div>}
+              {(uploadError || activeJobError || cancelJobError) && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">{uploadError || activeJobError || cancelJobError}</div>}
               {!activeJobId && !upload.isPending && (
                 <button type="button" onClick={handleUpload} disabled={!selectedFile} className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors">开始索引</button>
               )}

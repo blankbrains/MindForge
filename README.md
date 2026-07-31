@@ -403,7 +403,7 @@ docker compose down
    - **OpenAI**：Base URL 默认显示
      `https://api.openai.com/v1`，填写 API Key 后拉取账号可用模型。
    - **DeepSeek**：填写 API Key；Base URL 默认
-     `https://api.deepseek.com`；角色模型通常填写 `deepseek-chat`。
+     `https://api.deepseek.com`；当前角色模型填写 `deepseek-v4-flash`。
    - **兼容云 API**：填写供应商的 `/v1` Base URL、API Key 和准确模型 ID。
    - **本地模型**：填写容器可访问的 Base URL 和模型 ID；无鉴权时关闭
      “需要 API Key”。
@@ -472,12 +472,12 @@ DeepSeek：
 LLM_LLM_PROVIDER=deepseek
 LLM_DEEPSEEK_API_KEY=<your-key>
 LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com
-LLM_DEEPSEEK_PLANNER=deepseek-chat
-LLM_DEEPSEEK_RESEARCHER=deepseek-chat
-LLM_DEEPSEEK_CRITIC=deepseek-chat
-LLM_DEEPSEEK_SYNTHESIZER=deepseek-chat
+LLM_DEEPSEEK_PLANNER=deepseek-v4-flash
+LLM_DEEPSEEK_RESEARCHER=deepseek-v4-flash
+LLM_DEEPSEEK_CRITIC=deepseek-v4-flash
+LLM_DEEPSEEK_SYNTHESIZER=deepseek-v4-flash
 # 价格单位为 USD / 100 万 Token，必须按实际模型和供应商当前价格维护。
-LLM_MODEL_PRICING={"deepseek:deepseek-chat":{"input":0.0,"cached_input":0.0,"output":0.0}}
+LLM_MODEL_PRICING={"deepseek:deepseek-v4-flash":{"input":0.14,"cached_input":0.0028,"output":0.28}}
 ```
 
 OpenAI 兼容云 API：
@@ -579,6 +579,10 @@ API 和前端静态文件，并通过 `/api/v1/ready` 提供严格就绪探针�
 `DOCKER_INFRA_BIND_ADDRESS` 默认只把 PostgreSQL、Redis、Qdrant 绑定到本机。
 远程部署时必须通过启用 TLS/HTTPS 和身份认证的反向代理暴露
 MindForge；不要直接公开应用或基础设施端口。
+如果应用端口必须监听非回环地址，还必须配置至少 32 位随机
+`API_ACCESS_TOKEN`，并由反向代理为 `/api/*` 请求注入
+`Authorization: Bearer <token>`。未配置令牌时，MindForge 会拒绝非本机 API
+访问，避免管理接口因端口误暴露而直接开放。
 
 大 PDF 使用可配置的多进程页解析；上传通过持久化异步任务返回任务 ID，并提供
 阶段、进度、取消和重启恢复。知识库页面不展示历史索引任务，也不轮询任务列表；
@@ -626,7 +630,8 @@ CrossEncoder 声称为已启用。生产环境默认只从持久化模型缓存�
 视觉检索默认关闭。仅在 `.env` 中同时配置 `VISUAL_ENABLED=true`、
 `VISUAL_MODEL` 和 `VISUAL_API_KEY` 后，系统才会把持久化图像发送到兼容的视觉
 端点，生成事实描述并使用现有文本 Embedding 检索。关闭或配置不完整时不会发送
-任何图像，也不会生成视觉 Chunk。
+任何图像，也不会生成视觉 Chunk。视觉请求复用单个客户端连接池，并由
+`VISUAL_CAPTION_CONCURRENCY` 控制并发数。
 
 `PARSER_PIPELINE_VERSION`、OCR/表格模型版本、解析设置和非敏感视觉设置会进入
 索引签名；调整后必须重建索引。私有基准语料放在
@@ -669,7 +674,7 @@ GitHub Actions 自动运行：
 
 - **DAG 任务分解** — 复杂问题自动拆解为有依赖关系的子任务，识别哪些可并行、哪些需串行
 - **ReAct 工具循环** — Researcher Agent 遵循 Thought → Action → Observation 模式，逐步收集证据
-- **Self-Refine 精炼** — Critic 从完整性、准确性、深度、清晰度、引用质量 5 维度评分，不合格自动打回重写
+- **Self-Refine 精炼** — Critic 从完整性、准确性、深度、清晰度、引用质量 5 维度评分；未执行评审和评审失败会显示明确状态，不再伪装成 `0.0` 或 `5.0`
 
 ### 🛡️ 可靠性与一致性
 
@@ -681,7 +686,8 @@ GitHub Actions 自动运行：
 - **可取消解析** — 分页、OCR、表格和资产阶段协作取消，不留下部分向量或资产
 - **Embedding 隔离** — LLM 供应商与 Embedding 后端解耦，已有索引时拒绝直接切换向量空间
 - **缓存安全** — 情节记忆只复用完全相同且未过期的任务；来源和质量可复用，原生成用量保留在内部元数据中，当前缓存命中明确标记为不产生新的 API 费用
-- **三层记忆接通** — 工作记忆汇总当前任务的历史研究、规划、中间结果与来源；语义记忆会检索相关的成功研究作为后续任务上下文
+- **三层记忆接通** — 工作记忆对研究上下文设定长度上限；语义记忆只复用通过质量阈值的报告，并按原问题、词项覆盖率和相似度过滤，避免低相关长报告污染新任务
+- **引用编号统一** — 多次工具调用和多子任务使用全局来源编号，Synthesizer 会收到局部到全局的引用映射
 - **引用检查** — 除编号存在性外，还保守检查声明与来源文本是否有词汇支持
 
 ### 🔍 自适应混合检索

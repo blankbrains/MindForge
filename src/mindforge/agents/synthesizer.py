@@ -79,6 +79,7 @@ class SynthesizerAgent(BaseAgent):
         critic_feedback: Optional[CriticScore] = None,
         *,
         temperature: Optional[float] = None,
+        max_attempts: int = 3,
     ) -> AgentResult:
         """Synthesize subtask findings into the final report.
 
@@ -106,7 +107,20 @@ class SynthesizerAgent(BaseAgent):
             output = sr.get("output", sr.get("result", ""))
             if isinstance(output, AgentResult):
                 output = output.output
-            findings_lines.append(f"### Subtask {i}: {desc}\n\n{output}\n")
+            citation_map = sr.get("citation_map")
+            mapping_text = ""
+            if isinstance(citation_map, dict) and citation_map:
+                mapping_text = (
+                    "\n\nCitation remapping for this subtask: "
+                    + ", ".join(
+                        f"local [{local}] -> global [{global_index}]"
+                        for local, global_index in citation_map.items()
+                    )
+                    + ". Rewrite citations to the global numbers."
+                )
+            findings_lines.append(
+                f"### Subtask {i}: {desc}\n\n{output}{mapping_text}\n"
+            )
 
         findings_text = "\n".join(findings_lines)
 
@@ -164,7 +178,11 @@ class SynthesizerAgent(BaseAgent):
             ]
 
             temp = temperature if temperature is not None else 0.4
-            result = await self._chat(messages, temperature=temp)
+            result = await self._chat(
+                messages,
+                temperature=temp,
+                max_attempts=max_attempts,
+            )
             output = result.content or ""
             success = bool(output.strip())
             if not success:
@@ -210,6 +228,7 @@ class SynthesizerAgent(BaseAgent):
         critic_feedback: Optional[CriticScore] = None,
         *,
         temperature: Optional[float] = None,
+        max_attempts: int = 3,
     ):
         """Yield report chunks followed by one usage-bearing result event."""
         findings_lines: list[str] = []
@@ -218,7 +237,20 @@ class SynthesizerAgent(BaseAgent):
             output = sr.get("output", sr.get("result", ""))
             if isinstance(output, AgentResult):
                 output = output.output
-            findings_lines.append(f"### 子任务 {i}: {desc}\n\n{output}\n")
+            citation_map = sr.get("citation_map")
+            mapping_text = ""
+            if isinstance(citation_map, dict) and citation_map:
+                mapping_text = (
+                    "\n\n该子任务的引用编号映射："
+                    + "，".join(
+                        f"局部 [{local}] -> 全局 [{global_index}]"
+                        for local, global_index in citation_map.items()
+                    )
+                    + "。最终报告必须改用全局编号。"
+                )
+            findings_lines.append(
+                f"### 子任务 {i}: {desc}\n\n{output}{mapping_text}\n"
+            )
         findings_text = "\n".join(findings_lines)
 
         sources_text = ""
@@ -262,15 +294,14 @@ class SynthesizerAgent(BaseAgent):
         ]
         temp = temperature if temperature is not None else 0.4
 
-        stream = await self._llm.chat(
-            messages,
-            temperature=temp,
-            stream=True,
-        )
         output_parts: list[str] = []
         usage: dict[str, int] = {}
         model_used = getattr(self._llm, "_model", self._model_name)
-        async for event in stream:
+        async for event in self._chat_stream(
+            messages,
+            temperature=temp,
+            max_attempts=max_attempts,
+        ):
             if event.type == "chunk" and event.content:
                 output_parts.append(event.content)
                 yield SynthesisStreamEvent(

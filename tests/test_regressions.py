@@ -8,7 +8,7 @@ import logging
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -18,10 +18,12 @@ from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from mindforge.agents.base import AgentResult, BaseAgent
+from mindforge.agents.researcher import ResearcherAgent
 from mindforge.agents.synthesizer import SynthesizerAgent
 from mindforge.api import routes, server
 from mindforge.api.schemas import (
     LLMProviderUpdate,
+    QueryCancelRequest,
     QueryRequest,
     SettingsUpdateRequest,
 )
@@ -227,7 +229,7 @@ async def test_persistent_index_job_records_stage_progress(
             1,
             {"parsing": 0.01, "embedding": 0.02},
         )
-        return [SimpleNamespace(chunk_id="chunk")]
+        return [SimpleNamespace(chunk_id="chunk")], False, False
 
     monkeypatch.setattr(routes, "_index_with_lifecycle", fake_index)
     service = index_job_service.IndexJobService()
@@ -477,16 +479,22 @@ async def test_index_lifecycle_persists_features_that_were_actually_applied(
     async def record_status(**values):
         statuses.append(values)
 
-    async def fake_index(**_kwargs):
-        return [SimpleNamespace(chunk_id="chunk")], False, False
+    async def fake_index(**kwargs):
+        chunks = [SimpleNamespace(chunk_id="chunk")]
+        await kwargs["completion_callback"](chunks, False, False)
+        return chunks, False, False
 
     @asynccontextmanager
-    async def available_slot():
+    async def available_slot(_doc_id: str):
         yield
 
     monkeypatch.setattr(routes, "set_document_status", record_status)
     monkeypatch.setattr(routes, "_index_parsed_document", fake_index)
-    monkeypatch.setattr(routes, "index_slot", available_slot)
+    monkeypatch.setattr(routes, "document_index_slot", available_slot)
+    monkeypatch.setattr(
+        "mindforge.repositories.documents.get_document",
+        lambda _doc_id: None,
+    )
     monkeypatch.setattr(
         "mindforge.services.indexing.build_index_signature",
         lambda **_kwargs: "signature",
@@ -509,6 +517,184 @@ async def test_index_lifecycle_persists_features_that_were_actually_applied(
     assert statuses[-1]["status"] == "indexed"
     assert statuses[-1]["use_raptor"] is False
     assert statuses[-1]["use_graphrag"] is False
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_indexes_roll_back_when_catalog_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.retrieval import service
+
+    old_chunks = [
+        {
+            "id": "old",
+            "text": "old text",
+            "doc_id": "doc",
+        }
+    ]
+
+    class BM25:
+        def __init__(self) -> None:
+            self.chunks = list(old_chunks)
+
+        def get_document_chunks(self, doc_id: str):
+            assert doc_id == "doc"
+            return list(self.chunks)
+
+        def replace_document(self, doc_id: str, documents):
+            assert doc_id == "doc"
+            self.chunks = list(documents)
+
+        def delete_document(self, doc_id: str):
+            assert doc_id == "doc"
+            self.chunks = []
+            return 1
+
+        def save(self) -> None:
+            return None
+
+    class Graph:
+        def __init__(self) -> None:
+            self.state = {"version": "old"}
+
+        def snapshot_state(self):
+            return dict(self.state)
+
+        def restore_state(self, snapshot) -> None:
+            self.state = dict(snapshot)
+
+        async def delete_document_async(self, doc_id: str) -> None:
+            assert doc_id == "doc"
+            self.state = {"version": "new"}
+
+        def save(self, _path: str) -> None:
+            return None
+
+    bm25 = BM25()
+    graph = Graph()
+    monkeypatch.setattr(service, "get_bm25_retriever", lambda: bm25)
+    monkeypatch.setattr(service, "get_graph_engine", lambda **_kwargs: graph)
+    monkeypatch.setattr(service, "_graph_path", lambda: "graph.json")
+
+    async def fail_catalog_commit(_graphrag_applied: bool) -> None:
+        raise RuntimeError("catalog commit failed")
+
+    with pytest.raises(RuntimeError, match="catalog commit failed"):
+        await service.index_auxiliary_documents(
+            [
+                {
+                    "id": "new",
+                    "text": "new text",
+                    "doc_id": "doc",
+                }
+            ],
+            commit_callback=fail_catalog_commit,
+        )
+
+    assert bm25.chunks == old_chunks
+    assert graph.state == {"version": "old"}
+
+
+@pytest.mark.asyncio
+async def test_failed_reindex_restores_previous_vector_and_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = {
+        "doc_id": "doc",
+        "filename": "previous.txt",
+        "chunk_count": 4,
+        "status": "indexed",
+        "index_signature": "previous-signature",
+        "index_strategy": "fixed",
+        "use_raptor": True,
+        "use_graphrag": False,
+        "error": None,
+        "parser_metadata": {"pages": 1},
+    }
+    snapshot = [SimpleNamespace(id=1)]
+    restored: list[tuple[str, list[object], int]] = []
+    statuses: list[dict] = []
+
+    class Store:
+        async def snapshot_document(self, doc_id: str):
+            assert doc_id == "doc"
+            return snapshot
+
+        async def delete(self, doc_id: str):
+            assert doc_id == "doc"
+
+        async def restore_document(self, doc_id, points, *, batch_size):
+            restored.append((doc_id, points, batch_size))
+
+    @asynccontextmanager
+    async def available_slot(_doc_id: str):
+        yield
+
+    async def fail_index(**_kwargs):
+        raise RuntimeError("embedding failed")
+
+    async def record_status(**values):
+        statuses.append(values)
+
+    monkeypatch.setattr(routes, "get_vector_store", lambda: Store())
+    monkeypatch.setattr(routes, "document_index_slot", available_slot)
+    monkeypatch.setattr(routes, "_index_parsed_document", fail_index)
+    monkeypatch.setattr(routes, "set_document_status", record_status)
+    monkeypatch.setattr(
+        "mindforge.repositories.documents.get_document",
+        lambda _doc_id: previous,
+    )
+
+    with pytest.raises(RuntimeError, match="embedding failed"):
+        await routes._index_with_lifecycle(
+            parsed=SimpleNamespace(doc_id="doc", metadata={}),
+            source="replacement.txt",
+        )
+
+    assert restored == [
+        ("doc", snapshot, routes.get_settings().api.index_batch_size)
+    ]
+    assert statuses[-1]["status"] == "indexed"
+    assert statuses[-1]["filename"] == "previous.txt"
+    assert statuses[-1]["chunk_count"] == 4
+    assert statuses[-1]["index_signature"] == "previous-signature"
+
+
+@pytest.mark.asyncio
+async def test_rollback_continues_after_vector_backend_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.retrieval import service as retrieval_service
+    from mindforge.services import document_assets
+
+    calls: list[str] = []
+
+    class Store:
+        async def delete(self, _doc_id: str):
+            calls.append("vector")
+            raise RuntimeError("vector unavailable")
+
+    async def delete_auxiliary(_doc_id: str):
+        calls.append("auxiliary")
+
+    def remove_assets(_doc_id: str):
+        calls.append("assets")
+
+    monkeypatch.setattr(routes, "get_vector_store", lambda: Store())
+    monkeypatch.setattr(
+        retrieval_service,
+        "delete_auxiliary_document",
+        delete_auxiliary,
+    )
+    monkeypatch.setattr(
+        document_assets,
+        "remove_document_assets",
+        remove_assets,
+    )
+
+    await routes._rollback_document_index("doc")
+
+    assert calls == ["vector", "auxiliary", "assets"]
 
 
 @pytest.mark.asyncio
@@ -603,6 +789,46 @@ async def test_semantic_memory_recalls_chinese_research(
 
     assert len(facts) == 1
     assert "向量数据库" in facts[0].content
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_rejects_low_density_overlap_from_long_report(
+    tmp_path,
+) -> None:
+    memory = SemanticMemory(storage_dir=tmp_path)
+    memory.add_fact(
+        (
+            "Python 与 Java 在运行时、类型系统、虚拟机、性能优化和并发模型上"
+            "存在多方面差异。"
+            + "这一段用于模拟一篇很长但与当前查询不相关的历史报告。" * 300
+            + "异步编程只在附录中被顺带提及。"
+        ),
+        ["task: 比较 Python 和 Java"],
+        confidence=0.9,
+        task="比较 Python 和 Java 的性能、类型系统与并发模型",
+    )
+
+    facts = await memory.recall("什么是异步编程")
+
+    assert facts == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_recalls_relevant_task_with_bounded_context(
+    tmp_path,
+) -> None:
+    memory = SemanticMemory(storage_dir=tmp_path)
+    memory.add_fact(
+        "异步编程允许任务在等待 I/O 时让出执行权。" * 500,
+        ["task: 什么是异步编程"],
+        confidence=0.9,
+        task="什么是异步编程",
+    )
+
+    facts = await memory.recall("异步编程是什么")
+
+    assert len(facts) == 1
+    assert facts[0].match_score > 0
 
 
 def test_tracer_uses_langfuse_generation_api(
@@ -714,6 +940,298 @@ async def test_agent_empty_llm_response_is_not_reported_as_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_does_not_return_intermediate_tool_call_text_as_final_answer() -> None:
+    class Tool:
+        name = "probe_tool"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "probe",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+
+        async def execute_async(self, **_kwargs) -> ToolResult:
+            return ToolResult(success=True, output="tool evidence")
+
+    class ToolLLM:
+        _model = "tool-model"
+
+    agent = _ProbeAgent(llm=ToolLLM(), tools=[Tool()])
+    calls = 0
+
+    async def chat(*_args, **_kwargs) -> ChatResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ChatResult(
+                content="<input>intermediate tool request</input>",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "probe_tool",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            )
+        raise RuntimeError("final generation failed")
+
+    agent._chat = chat
+    result = await agent._run_tool_loop("test", max_rounds=1)
+
+    assert result.success is False
+    assert result.output == ""
+
+
+@pytest.mark.asyncio
+async def test_agent_assigns_global_citation_numbers_across_tool_calls() -> None:
+    class SourceTool:
+        name = "source_tool"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            return ToolResult(
+                success=True,
+                output=f"Result 1 for {query}",
+                data={
+                    "sources": [
+                        {
+                            "index": 1,
+                            "title": query,
+                            "url": f"https://example.com/{query}",
+                        }
+                    ]
+                },
+            )
+
+    class ToolLLM:
+        _model = "tool-model"
+
+    agent = _ProbeAgent(llm=ToolLLM(), tools=[SourceTool()])
+    tool_messages: list[str] = []
+    calls = 0
+
+    async def chat(messages, *args, **kwargs) -> ChatResult:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        tool_messages.extend(
+            message.content
+            for message in messages
+            if message.role == "tool"
+            and message.content not in tool_messages
+        )
+        if calls <= 2:
+            query = "first" if calls == 1 else "second"
+            return ChatResult(
+                tool_calls=[
+                    {
+                        "id": f"call-{calls}",
+                        "function": {
+                            "name": "source_tool",
+                            "arguments": json.dumps({"query": query}),
+                        },
+                    }
+                ],
+            )
+        return ChatResult(content="First [1], second [2].")
+
+    agent._chat = chat
+    result = await agent._run_tool_loop("test", max_rounds=2)
+
+    assert result.success is True
+    assert [source["index"] for source in result.data["sources"]] == [1, 2]
+    assert "must be cited as [1]" in tool_messages[0]
+    assert "must be cited as [2]" in tool_messages[1]
+
+
+@pytest.mark.asyncio
+async def test_researcher_fetches_sources_when_model_answers_directly() -> None:
+    tool_calls: list[str] = []
+
+    class SourceTool:
+        def __init__(self, name: str, *, has_sources: bool) -> None:
+            self.name = name
+            self.has_sources = has_sources
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            tool_calls.append(self.name)
+            sources = (
+                [
+                    {
+                        "index": 1,
+                        "title": "Verified source",
+                        "url": "https://example.com/source",
+                        "content": f"Evidence for {query}",
+                    }
+                ]
+                if self.has_sources
+                else []
+            )
+            return ToolResult(
+                success=True,
+                output=f"Evidence lookup for {query}",
+                data={"sources": sources},
+            )
+
+    class DirectThenGroundedLLM:
+        _model = "research-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, **_kwargs) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(content="Ungrounded direct answer.")
+            assert any(message.role == "tool" for message in messages)
+            return ChatResult(content="Grounded answer [1].")
+
+    agent = ResearcherAgent(
+        llm=DirectThenGroundedLLM(),
+        tools=[
+            SourceTool("search_knowledge_base", has_sources=False),
+            SourceTool("web_search", has_sources=True),
+        ],
+    )
+
+    result = await agent.run("解释 Python 异步编程", max_rounds=2)
+
+    assert result.success is True
+    assert result.output == "Grounded answer [1]."
+    assert tool_calls == ["search_knowledge_base", "web_search"]
+    assert result.data["citation_status"] == "available"
+    assert result.data["sources"][0]["index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_researcher_does_not_force_sources_for_greeting() -> None:
+    tool_called = False
+
+    class SourceTool:
+        name = "web_search"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+
+        async def execute_async(self, **_kwargs) -> ToolResult:
+            nonlocal tool_called
+            tool_called = True
+            return ToolResult(success=True, output="unused")
+
+    class GreetingLLM:
+        _model = "research-model"
+
+        async def chat(self, *_args, **_kwargs) -> ChatResult:
+            return ChatResult(content="你好，有什么可以帮你？")
+
+    result = await ResearcherAgent(
+        llm=GreetingLLM(),
+        tools=[SourceTool()],
+    ).run("你好", max_rounds=1)
+
+    assert result.success is True
+    assert result.data["citation_status"] == "not_required"
+    assert tool_called is False
+
+
+@pytest.mark.asyncio
+async def test_researcher_rewrites_sourced_answer_without_markers() -> None:
+    class SourceTool:
+        name = "web_search"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            return ToolResult(
+                success=True,
+                output=f"Evidence for {query}",
+                data={
+                    "sources": [
+                        {
+                            "index": 1,
+                            "title": "Verified source",
+                            "url": "https://example.com/source",
+                        }
+                    ]
+                },
+            )
+
+    class ForgetfulLLM:
+        _model = "research-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, **_kwargs) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(content="Initial direct answer.")
+            if self.calls == 2:
+                return ChatResult(content="Sourced but unmarked answer.")
+            assert "没有使用来源编号" in messages[-1].content
+            return ChatResult(content="Sourced and cited answer [1].")
+
+    result = await ResearcherAgent(
+        llm=ForgetfulLLM(),
+        tools=[SourceTool()],
+    ).run("解释 RAG", max_rounds=3)
+
+    assert result.output == "Sourced and cited answer [1]."
+    assert result.data["citation_status"] == "available"
+
+
+@pytest.mark.asyncio
 async def test_synthesizer_empty_llm_response_is_not_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -779,6 +1297,39 @@ async def test_synthesizer_stream_awaits_llm_stream(
     assert events[-1].type == "done"
     assert events[-1].result is not None
     assert events[-1].result.output == "part one part two"
+
+
+@pytest.mark.asyncio
+async def test_synthesizer_stream_honors_llm_request_timeout() -> None:
+    class SlowStreamingLLM:
+        _model = "slow-stream"
+
+        async def chat(self, *_args, **_kwargs):
+            await asyncio.sleep(0.05)
+
+            async def events():
+                yield StreamEvent(type="done")
+
+            return events()
+
+    agent = SynthesizerAgent(llm=SlowStreamingLLM())
+    object.__setattr__(agent._settings.agent, "llm_request_timeout", 0.01)
+
+    with pytest.raises(asyncio.TimeoutError):
+        _ = [
+            event
+            async for event in agent.synthesize_stream(
+                task="test",
+                subtask_results=[
+                    {
+                        "task_id": "one",
+                        "description": "one",
+                        "output": "finding",
+                    }
+                ],
+                max_attempts=1,
+            )
+        ]
 
 
 def test_web_search_validates_runtime_arguments() -> None:
@@ -1031,6 +1582,52 @@ async def test_orchestrator_research_queue_is_bounded() -> None:
     assert first_result.success is True
     assert second.success is False
     assert second.data["error"] == "research_queue_timeout"
+
+
+@pytest.mark.asyncio
+async def test_streaming_orchestrator_releases_slot_when_cancelled_during_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.agents import orchestrator as orchestrator_module
+
+    orchestrator = object.__new__(routes.Orchestrator)
+    orchestrator._research_semaphore = asyncio.Semaphore(1)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            queue_timeout=1,
+            research_timeout=10,
+            sse_heartbeat_seconds=1,
+        )
+    )
+
+    async def empty_stream(_task: str):
+        if False:
+            yield {}
+
+    orchestrator._stream_pipeline = empty_stream
+    startup_yield_reached = asyncio.Event()
+    keep_startup_blocked = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(delay: float) -> None:
+        if delay == 0:
+            startup_yield_reached.set()
+            await keep_startup_blocked.wait()
+            return
+        await real_sleep(delay)
+
+    monkeypatch.setattr(orchestrator_module.asyncio, "sleep", controlled_sleep)
+
+    async def consume_stream() -> None:
+        async for _event in orchestrator._stream_run_with_limit("cancel"):
+            pass
+
+    consumer = asyncio.create_task(consume_stream())
+    await startup_yield_reached.wait()
+    consumer.cancel()
+    await asyncio.gather(consumer, return_exceptions=True)
+
+    assert orchestrator._research_semaphore._value == 1
 
 
 @pytest.mark.asyncio
@@ -1326,6 +1923,218 @@ async def test_sse_trace_context_is_owned_by_one_producer_task(
     assert closed == [True]
     assert any(b'"type": "done"' in chunk for chunk in chunks)
     assert chunks[-1] == b"data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_api_disables_orchestrator_owned_root_trace_for_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_root_trace_values: list[bool] = []
+
+    class RecordingOrchestrator:
+        async def stream_run(
+            self,
+            _task: str,
+            *,
+            create_root_trace: bool = True,
+        ):
+            create_root_trace_values.append(create_root_trace)
+            yield {
+                "type": "done",
+                "result": AgentResult(
+                    agent_name="orchestrator",
+                    success=True,
+                    output="done",
+                    metadata={"outcome": "success"},
+                ),
+            }
+
+    monkeypatch.setattr(
+        routes,
+        "_research_trace_context",
+        lambda *_args, **_kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(fallback_enabled=False),
+        ),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in routes._stream_response_events(
+            RecordingOrchestrator(),
+            "test",
+        )
+    ]
+
+    assert create_root_trace_values == [False]
+    assert any(b'"type": "done"' in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_sse_response_cancels_producer_when_disconnected_during_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer_started = asyncio.Event()
+    producer_cancelled = asyncio.Event()
+    producer_finished = asyncio.Event()
+    release_producer = asyncio.Event()
+    startup_yield_reached = asyncio.Event()
+    keep_startup_blocked = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def blocked_events(_orch, _task: str):
+        producer_started.set()
+        try:
+            await release_producer.wait()
+        except asyncio.CancelledError:
+            producer_cancelled.set()
+            raise
+        finally:
+            producer_finished.set()
+        if False:
+            yield b""
+
+    async def controlled_sleep(delay: float) -> None:
+        if delay == 0:
+            startup_yield_reached.set()
+            await keep_startup_blocked.wait()
+            return
+        await real_sleep(delay)
+
+    monkeypatch.setattr(routes, "_stream_response_events", blocked_events)
+    monkeypatch.setattr(routes.asyncio, "sleep", controlled_sleep)
+
+    stream = routes._stream_response(None, "cancel")
+    consumer = asyncio.create_task(anext(stream))
+    await startup_yield_reached.wait()
+    await producer_started.wait()
+    consumer.cancel()
+    await asyncio.gather(consumer, return_exceptions=True)
+    await real_sleep(0)
+
+    try:
+        assert producer_cancelled.is_set()
+    finally:
+        release_producer.set()
+        await producer_finished.wait()
+
+
+@pytest.mark.asyncio
+async def test_explicit_sse_cancellation_stops_and_unregisters_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer_started = asyncio.Event()
+    producer_cancelled = asyncio.Event()
+    release_producer = asyncio.Event()
+    request_id = "research-explicit-cancel"
+    cancellation = routes._register_research_cancellation(request_id)
+    assert cancellation is not None
+
+    async def blocked_events(_orch, _task: str):
+        producer_started.set()
+        try:
+            await release_producer.wait()
+        except asyncio.CancelledError:
+            producer_cancelled.set()
+            raise
+        if False:
+            yield b""
+
+    monkeypatch.setattr(routes, "_stream_response_events", blocked_events)
+    stream = routes._stream_response(
+        None,
+        "cancel",
+        request_id=request_id,
+        cancellation=cancellation,
+    )
+    consumer = asyncio.create_task(anext(stream))
+    await producer_started.wait()
+
+    response = await routes.cancel_query(
+        QueryCancelRequest(request_id=request_id),
+    )
+    result = await asyncio.gather(consumer, return_exceptions=True)
+
+    try:
+        assert response.cancelled is True
+        assert isinstance(result[0], StopAsyncIteration)
+        assert producer_cancelled.is_set()
+        assert request_id not in routes._ACTIVE_RESEARCH_CANCELLATIONS
+    finally:
+        release_producer.set()
+        await stream.aclose()
+        routes._ACTIVE_RESEARCH_CANCELLATIONS.pop(request_id, None)
+
+
+@pytest.mark.asyncio
+async def test_sse_disconnect_releases_orchestrator_research_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline_waiting = asyncio.Event()
+    pipeline_cancelled = asyncio.Event()
+    release_pipeline = asyncio.Event()
+
+    class StreamingOrchestrator:
+        def __init__(self) -> None:
+            self._research_semaphore = asyncio.Semaphore(2)
+            self._settings = SimpleNamespace(
+                agent=SimpleNamespace(
+                    queue_timeout=1,
+                    research_timeout=10,
+                    sse_heartbeat_seconds=1,
+                )
+            )
+
+        async def _stream_pipeline(self, _task: str):
+            yield {"type": "planning", "status": "start"}
+            pipeline_waiting.set()
+            try:
+                await release_pipeline.wait()
+            except asyncio.CancelledError:
+                pipeline_cancelled.set()
+                raise
+
+        async def stream_run(self, task: str):
+            async for event in routes.Orchestrator._stream_run_with_limit(
+                self,
+                task,
+            ):
+                yield event
+
+    orchestrator = StreamingOrchestrator()
+    monkeypatch.setattr(
+        routes,
+        "_research_trace_context",
+        lambda *_args, **_kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(fallback_enabled=False),
+        ),
+    )
+
+    stream = routes._stream_response(orchestrator, "cancel")
+    first_chunk = await anext(stream)
+    assert b'"type": "planning"' in first_chunk
+    assert orchestrator._research_semaphore._value == 1
+
+    pending_chunk = asyncio.create_task(anext(stream))
+    await pipeline_waiting.wait()
+    pending_chunk.cancel()
+    await asyncio.gather(pending_chunk, return_exceptions=True)
+
+    try:
+        assert pipeline_cancelled.is_set()
+        assert orchestrator._research_semaphore._value == 2
+    finally:
+        release_pipeline.set()
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -1708,6 +2517,50 @@ async def test_unknown_api_route_returns_json_404() -> None:
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.asyncio
+async def test_remote_api_access_requires_configured_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOCKER_API_BIND_ADDRESS", "0.0.0.0")
+    monkeypatch.setattr(server._settings.api, "access_token", "")
+
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=server.app,
+            client=("203.0.113.10", 54321),
+        ),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/v1/not-a-real-endpoint")
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_api_access_token_is_required_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "a" * 32
+    monkeypatch.setenv("DOCKER_API_BIND_ADDRESS", "0.0.0.0")
+    monkeypatch.setattr(server._settings.api, "access_token", token)
+
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=server.app,
+            client=("203.0.113.10", 54321),
+        ),
+        base_url="http://test",
+    ) as client:
+        unauthorized = await client.get("/api/v1/not-a-real-endpoint")
+        authenticated = await client.get(
+            "/api/v1/not-a-real-endpoint",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert unauthorized.status_code == 401
+    assert authenticated.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -2211,6 +3064,87 @@ def test_bm25_runtime_dependencies_are_available() -> None:
     from mindforge.retrieval import bm25
 
     assert bm25._BM25S_AVAILABLE is True
+
+
+@pytest.mark.asyncio
+async def test_visual_captioning_reuses_one_client_with_bounded_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from mindforge.ingestion import visual
+    import openai
+
+    active = 0
+    max_active = 0
+    clients: list[object] = []
+    observed_clients: list[object] = []
+
+    class Client:
+        async def close(self) -> None:
+            return None
+
+    def create_client(**_kwargs):
+        client = Client()
+        clients.append(client)
+        return client
+
+    async def caption_image(*, image_path, content_type, client):
+        nonlocal active, max_active
+        assert image_path.is_file()
+        assert content_type == "image/png"
+        observed_clients.append(client)
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return f"caption for {image_path.name}"
+
+    assets = []
+    for index in range(3):
+        path = tmp_path / f"image-{index}.png"
+        path.write_bytes(b"image")
+        assets.append(
+            {
+                "asset_id": f"asset-{index}",
+                "kind": "image",
+                "page": index + 1,
+                "relative_path": path.name,
+                "content_type": "image/png",
+                "metadata": {},
+            }
+        )
+
+    config = SimpleNamespace(
+        enabled=True,
+        model="vision-model",
+        api_key="key",
+        base_url=None,
+        request_timeout_seconds=5,
+        max_assets_per_document=10,
+        caption_concurrency=2,
+        prompt_version="v1",
+    )
+    monkeypatch.setattr(
+        visual,
+        "get_settings",
+        lambda: SimpleNamespace(visual_retrieval=config),
+    )
+    monkeypatch.setattr(visual, "list_document_assets", lambda _doc_id: assets)
+    monkeypatch.setattr(
+        visual,
+        "resolve_asset_path",
+        lambda relative_path: tmp_path / relative_path,
+    )
+    monkeypatch.setattr(visual, "update_asset_caption", lambda *_a, **_k: None)
+    monkeypatch.setattr(visual, "_caption_image", caption_image)
+    monkeypatch.setattr(openai, "AsyncOpenAI", create_client)
+
+    chunks = await visual.build_visual_chunks("doc")
+
+    assert len(chunks) == 3
+    assert len(clients) == 1
+    assert set(map(id, observed_clients)) == {id(clients[0])}
+    assert max_active == 2
 
 
 @pytest.mark.asyncio

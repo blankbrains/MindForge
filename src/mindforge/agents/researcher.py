@@ -19,16 +19,18 @@ _RESEARCHER_SYSTEM_PROMPT = """你是一名专业的研究助理。你可以使�
 - **verify_citation** — 验证报告中的引用标记 [N] 是否与来源匹配。
 
 核心原则：
-1. **先直接回答**：如果你的知识储备足够回答该问题，直接在 1 轮内给出全面、详细的答案，**不要调用任何工具**。
-2. 只有在确实需要外部数据、实时信息或知识库检索时才使用工具。
-3. 如果知识库 1-2 次搜索无结果，立即停止搜索，直接用你自己的知识回答。
+1. **事实型问题先检索后回答**：定义、解释、比较、技术分析、研究和时效性问题，
+   必须至少调用一次 `search_knowledge_base` 或 `web_search` 获取真实来源。
+2. 优先搜索知识库；知识库没有高度相关资料且 `web_search` 可用时，再搜索网页。
+3. 只有寒暄、纯创作、翻译、改写或无需外部事实的计算任务可以不调用来源工具。
 4. 每次回答要**详尽、深入、结构化**——给出一次性的完整答案，包含具体细节、例证、数据。不要简短敷衍，要写到用户满意为止。复杂问题的回答应达到 800-2000 字。
 5. **输出语言必须是中文**（专业术语可保留英文）。
-6. 引用来源时使用 [N] 标记。
+6. 只要工具返回了来源，正文中的对应事实必须使用工具提供的全局 [N] 编号，
+   不得省略引用，也不得编造来源。
 7. 使用标准 Markdown：标题、段落和列表之间保留空行，每段只表达一个主题。
 8. 对比项、参数和统计数据等行列信息使用 GFM 表格；代码块必须标注语言。
 
-记住：你是一个能力强大的模型，拥有广博的知识。优先用你的知识回答，工具只是辅助手段。"""
+记住：来源工具提供可核验的证据；模型知识只能用于解释和组织，不能替代真实引用。"""
 
 
 class ResearcherAgent(BaseAgent):
@@ -39,6 +41,28 @@ class ResearcherAgent(BaseAgent):
     """
 
     model_role = "researcher"
+    _CONVERSATIONAL_TASKS = frozenset(
+        {
+            "hi",
+            "hello",
+            "hey",
+            "你好",
+            "你好啊",
+            "你好呀",
+            "您好",
+            "嗨",
+            "在吗",
+            "早上好",
+            "上午好",
+            "下午好",
+            "晚上好",
+            "谢谢",
+            "多谢",
+            "再见",
+            "你是谁",
+            "你叫什么",
+        }
+    )
 
     @property
     def name(self) -> str:
@@ -47,6 +71,11 @@ class ResearcherAgent(BaseAgent):
     @property
     def system_prompt(self) -> str:
         return _RESEARCHER_SYSTEM_PROMPT
+
+    @classmethod
+    def requires_sources(cls, task: str) -> bool:
+        normalized = " ".join(task.strip().casefold().split())
+        return bool(normalized) and normalized not in cls._CONVERSATIONAL_TASKS
 
     # ------------------------------------------------------------------
     async def run(
@@ -75,4 +104,5 @@ class ResearcherAgent(BaseAgent):
             task,
             context=context,
             max_rounds=max_rounds,
+            require_sources=self.requires_sources(task),
         )

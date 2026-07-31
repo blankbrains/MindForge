@@ -154,6 +154,27 @@ class BM25Retriever:
                 if metadata.get("doc_id") == doc_id
             )
 
+    def get_document_chunks(self, doc_id: str) -> List[Dict[str, Any]]:
+        """Return a detached copy of one document's sparse-index entries."""
+        with self._lock:
+            return [
+                {
+                    "id": chunk_id,
+                    "text": self.documents[index],
+                    **dict(
+                        self.metadatas[index]
+                        if index < len(self.metadatas)
+                        else {}
+                    ),
+                }
+                for index, chunk_id in enumerate(self.doc_ids)
+                if (
+                    self.metadatas[index].get("doc_id")
+                    if index < len(self.metadatas)
+                    else None
+                ) == doc_id
+            ]
+
     def _rebuild_retriever(self) -> None:
         if not self.documents:
             self.retriever = None

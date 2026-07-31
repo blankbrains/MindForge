@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -33,6 +34,8 @@ class Fact:
     confidence: float = 0.5
     timestamp: float = field(default_factory=time.time)
     category: str = "general"
+    task: str = ""
+    match_score: float = field(default=0.0, compare=False)
 
 
 class SemanticMemory:
@@ -50,6 +53,10 @@ class SemanticMemory:
         self._store_path = self._base / STORAGE_DIR
         self._max_facts = config.max_semantic_facts
         self._max_fact_chars = config.max_semantic_fact_chars
+        self._search_chars = config.semantic_search_chars
+        self._recall_fact_chars = config.semantic_recall_fact_chars
+        self._min_query_coverage = config.semantic_min_query_coverage
+        self._min_similarity = config.semantic_min_similarity
         self._retention_seconds = config.semantic_retention_days * 86400
         self._max_file_bytes = config.semantic_max_file_bytes
 
@@ -68,6 +75,7 @@ class SemanticMemory:
         content: str,
         sources: list[str],
         confidence: float = 0.5,
+        task: str = "",
     ) -> str:
         """Add a verified fact, deduplicating by content hash.
 
@@ -76,6 +84,7 @@ class SemanticMemory:
         import hashlib as _hashlib
 
         content = content[: self._max_fact_chars]
+        task = task.strip()[:2000]
         sources = [str(source)[:1000] for source in sources[:100]]
         fact_id = _hashlib.sha256(content.encode()).hexdigest()[:16]
 
@@ -85,6 +94,8 @@ class SemanticMemory:
             existing.sources = list(set(existing.sources + sources))
             existing.confidence = max(existing.confidence, confidence)
             existing.timestamp = time.time()
+            if task:
+                existing.task = task
             self._save()
             return fact_id
 
@@ -95,6 +106,7 @@ class SemanticMemory:
             sources=sources,
             confidence=confidence,
             category=category,
+            task=task,
         )
         self._facts[fact_id] = fact
         self._prune()
@@ -122,6 +134,7 @@ class SemanticMemory:
                 content=output,
                 sources=source_labels,
                 confidence=max(0.0, min(1.0, confidence)),
+                task=task,
             )
 
     async def recall(self, query: str, top_k: int = 5) -> list[Fact]:
@@ -136,8 +149,8 @@ class SemanticMemory:
     def search_facts(self, query: str, top_k: int = 5) -> list[Fact]:
         """Simple keyword-based fact retrieval.
 
-        Matches against the ``content`` field of stored facts. Results are
-        ranked by a combination of keyword overlap and confidence.
+        Rank by query coverage and cosine-style token overlap. Matching the
+        original task is preferred over incidental terms in a long report.
         """
         top_k = min(max(1, top_k), 50)
         query_words = self._tokenize(query)
@@ -146,15 +159,38 @@ class SemanticMemory:
         scored: list[tuple[Fact, float]] = []
 
         for fact in self._facts.values():
-            fact_words = self._tokenize(fact.content)
-            overlap = len(query_words & fact_words)
-            if overlap > 0:
-                score = (overlap / len(query_words)) * fact.confidence
-                # Small recency bonus
-                age_days = (time.time() - fact.timestamp) / 86400
-                recency_boost = max(1.0, 2.0 - age_days / 30.0)  # decays over ~30 days
-                score *= recency_boost
-                scored.append((fact, score))
+            content_words = self._tokenize(fact.content[: self._search_chars])
+            task_words = self._tokenize(fact.task)
+            content_overlap = len(query_words & content_words)
+            task_overlap = len(query_words & task_words)
+            best_overlap = max(content_overlap, task_overlap)
+            if best_overlap <= 0:
+                continue
+
+            query_coverage = best_overlap / len(query_words)
+            if query_coverage < self._min_query_coverage:
+                continue
+
+            similarities = []
+            if content_overlap:
+                similarities.append(
+                    content_overlap
+                    / math.sqrt(len(query_words) * max(1, len(content_words)))
+                )
+            if task_overlap:
+                similarities.append(
+                    task_overlap
+                    / math.sqrt(len(query_words) * max(1, len(task_words)))
+                )
+            similarity = max(similarities, default=0.0)
+            if similarity < self._min_similarity:
+                continue
+
+            age_days = max(0.0, (time.time() - fact.timestamp) / 86400)
+            recency_boost = 1.0 + max(0.0, 0.1 - age_days / 300.0)
+            score = min(1.0, similarity * fact.confidence * recency_boost)
+            fact.match_score = score
+            scored.append((fact, score))
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return [fact for fact, _ in scored[:top_k]]
@@ -185,6 +221,7 @@ class SemanticMemory:
                     "confidence": f.confidence,
                     "timestamp": f.timestamp,
                     "category": f.category,
+                    "task": f.task,
                 }
                 for fid, f in self._facts.items()
             }
@@ -213,6 +250,7 @@ class SemanticMemory:
                         confidence=d.get("confidence", 0.5),
                         timestamp=d.get("timestamp", 0.0),
                         category=d.get("category", "general"),
+                        task=str(d.get("task") or "")[:2000],
                     )
             except Exception:
                 logger.exception("Failed to load facts from %s", facts_file)
@@ -275,3 +313,7 @@ class SemanticMemory:
             else:
                 tokens.add(match)
         return tokens
+
+    def recall_content(self, fact: Fact) -> str:
+        """Return a bounded semantic-memory snippet for prompt injection."""
+        return fact.content[: self._recall_fact_chars]

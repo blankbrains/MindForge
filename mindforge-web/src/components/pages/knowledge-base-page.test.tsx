@@ -36,6 +36,9 @@ const uploadState = vi.hoisted(() => ({
   pending: false,
   completeImmediately: true,
 }));
+const cancelState = vi.hoisted(() => ({
+  error: null as Error | null,
+}));
 
 vi.mock("@/hooks/use-stats", () => ({
   useStats: () => ({
@@ -100,6 +103,10 @@ vi.mock("@/hooks/use-documents", () => ({
     cancelJob: {
       isPending: false,
       mutate: vi.fn(),
+      error: cancelState.error,
+      reset: vi.fn(() => {
+        cancelState.error = null;
+      }),
     },
     remove: {
       isPending: false,
@@ -110,7 +117,10 @@ vi.mock("@/hooks/use-documents", () => ({
 
 import { KnowledgeBasePage } from "./knowledge-base-page";
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cancelState.error = null;
+  cleanup();
+});
 
 describe("KnowledgeBasePage", () => {
   it("shows the indexing features used by each document", () => {
@@ -229,5 +239,15 @@ describe("KnowledgeBasePage", () => {
       expect(screen.queryByText("stale first content")).toBeNull();
       expect(screen.getByText("second content")).not.toBeNull();
     });
+  });
+
+  it("shows index cancellation failures", async () => {
+    runningJob.enabled = true;
+    const view = render(<KnowledgeBasePage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "上传文档" }));
+    cancelState.error = new Error("取消请求失败");
+    view.rerender(<KnowledgeBasePage />);
+    expect(screen.getByRole("alert").textContent).toContain("取消请求失败");
   });
 });

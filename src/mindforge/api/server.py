@@ -10,6 +10,8 @@ import logging
 import os
 import sys
 import asyncio
+import hmac
+import ipaddress
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -90,7 +92,74 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _api_binding_is_loopback() -> bool:
+    docker_binding = os.getenv("DOCKER_API_BIND_ADDRESS", "").strip()
+    binding = docker_binding or _settings.api.host.strip()
+    if binding.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(binding).is_loopback
+    except ValueError:
+        return False
+
+
+class APIProtectionMiddleware(BaseHTTPMiddleware):
+    """Prevent accidental exposure of the single-user administrative API."""
+
+    _PUBLIC_API_PATHS = {
+        "/api/v1/health",
+        "/api/v1/ready",
+    }
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api/") or path in self._PUBLIC_API_PATHS:
+            return await call_next(request)
+
+        configured_token = _settings.api.access_token.strip()
+        if configured_token:
+            scheme, _, supplied_token = request.headers.get(
+                "Authorization",
+                "",
+            ).partition(" ")
+            authenticated = (
+                scheme.lower() == "bearer"
+                and bool(supplied_token)
+                and hmac.compare_digest(
+                    supplied_token.strip(),
+                    configured_token,
+                )
+            )
+            if not authenticated:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "API authentication is required."},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return await call_next(request)
+
+        if _api_binding_is_loopback():
+            return await call_next(request)
+        client_host = request.client.host if request.client is not None else ""
+        try:
+            local_client = ipaddress.ip_address(client_host).is_loopback
+        except ValueError:
+            local_client = client_host.lower() == "localhost"
+        if local_client:
+            return await call_next(request)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "Remote API access is disabled until API_ACCESS_TOKEN "
+                    "is configured."
+                )
+            },
+        )
+
+
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(APIProtectionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_settings.api.get_cors_origins(),

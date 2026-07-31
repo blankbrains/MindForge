@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 _index_semaphore: asyncio.Semaphore | None = None
 _index_limit: int | None = None
+_document_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+_document_locks_guard = threading.Lock()
 
 
 class IndexingCancelledError(Exception):
@@ -174,6 +177,27 @@ async def index_slot() -> AsyncIterator[None]:
     semaphore = _get_index_semaphore()
     async with semaphore:
         yield
+
+
+@asynccontextmanager
+async def document_index_slot(doc_id: str) -> AsyncIterator[None]:
+    """Serialize rebuilds for one document while preserving global concurrency."""
+    with _document_locks_guard:
+        lock, users = _document_locks.get(doc_id, (asyncio.Lock(), 0))
+        _document_locks[doc_id] = (lock, users + 1)
+    try:
+        async with lock:
+            async with index_slot():
+                yield
+    finally:
+        with _document_locks_guard:
+            current = _document_locks.get(doc_id)
+            if current is not None and current[0] is lock:
+                remaining = current[1] - 1
+                if remaining <= 0:
+                    _document_locks.pop(doc_id, None)
+                else:
+                    _document_locks[doc_id] = (lock, remaining)
 
 
 async def set_document_status(

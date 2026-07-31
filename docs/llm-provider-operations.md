@@ -38,7 +38,7 @@ http://<服务器地址>:<API_PORT>/settings
 |------|----------|
 | Base URL | 保持 `https://api.deepseek.com`，除非使用可信代理 |
 | API Key | 填写 DeepSeek Key |
-| 四个角色模型 | 通常可统一填写 `deepseek-chat`，也可按角色分别配置 |
+| 四个角色模型 | 当前可统一填写 `deepseek-v4-flash`，也可按角色分别配置 |
 
 #### OpenAI 兼容云 API
 
@@ -224,10 +224,10 @@ LLM_SYNTHESIZER_MODEL=gpt-4o
 LLM_LLM_PROVIDER=deepseek
 LLM_DEEPSEEK_API_KEY=<your-key>
 LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com
-LLM_DEEPSEEK_PLANNER=deepseek-chat
-LLM_DEEPSEEK_RESEARCHER=deepseek-chat
-LLM_DEEPSEEK_CRITIC=deepseek-chat
-LLM_DEEPSEEK_SYNTHESIZER=deepseek-chat
+LLM_DEEPSEEK_PLANNER=deepseek-v4-flash
+LLM_DEEPSEEK_RESEARCHER=deepseek-v4-flash
+LLM_DEEPSEEK_CRITIC=deepseek-v4-flash
+LLM_DEEPSEEK_SYNTHESIZER=deepseek-v4-flash
 ```
 
 ### OpenAI 兼容云 API
@@ -320,8 +320,11 @@ AGENT_RESEARCH_TIMEOUT=180
 单次模型调用超时 <= 子任务超时 <= 研究总超时
 ```
 
-简单问题在“均衡”模式下直接使用单个研究任务，并跳过不必要的 Planner、Critic
-和精炼调用；复杂问题或“深度”模式仍执行完整 DAG。
+范围集中且文本较短的问题在“均衡”模式下直接使用单个研究任务，避免额外 Planner
+调用。普通简单题跳过 Critic；短对比题、优缺点和取舍问题即使只有一个子任务仍执行
+质量评审，但均衡模式的单任务不自动重写。明确要求全面、系统、方案或文献综述的
+问题进入完整 DAG；
+`AGENT_MAX_REFINE_ROUNDS=0` 只关闭重写，不关闭首次评审。
 
 ## 五、高级索引和脚本模型
 

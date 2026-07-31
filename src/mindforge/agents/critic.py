@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from mindforge.agents.base import BaseAgent, _estimate_cost_details
 from mindforge.models.base import ChatMessage, ChatResult
@@ -33,6 +33,8 @@ class CriticScore:
     token_usage: dict[str, int] = field(default_factory=dict)
     cost_usd: float | None = None
     cost_status: str = "usage_unavailable"
+    evaluation_status: Literal["evaluated", "failed"] = "evaluated"
+    evaluation_error: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict, *, threshold: float | None = None) -> CriticScore:
@@ -72,6 +74,8 @@ class CriticScore:
             "issues": self.issues,
             "suggestions": self.suggestions,
             "should_refine": self.should_refine,
+            "evaluation_status": self.evaluation_status,
+            "evaluation_error": self.evaluation_error,
         }
 
 
@@ -192,6 +196,7 @@ class CriticAgent(BaseAgent):
 
             raw = result.content.strip()
             score_dict = json.loads(raw)
+            _validate_score_payload(score_dict)
             score = CriticScore.from_dict(score_dict)
             score.token_usage = result.usage or {}
             cost_estimate = _estimate_cost_details(
@@ -220,21 +225,17 @@ class CriticAgent(BaseAgent):
                 usage,
                 self._provider_name,
             )
-            # 评估失败时返回中性分数，should_refine=False
-            # 避免 critic 自身故障触发无意义的精炼循环
+            error_message = str(exc).strip() or type(exc).__name__
+            # 评估失败不伪造分数，同时避免 Critic 自身故障触发精炼循环。
             return CriticScore(
-                completeness=5.0,
-                accuracy=5.0,
-                depth=5.0,
-                clarity=5.0,
-                citations=5.0,
-                overall=5.0,
-                issues=[f"Critic evaluation failed: {exc}"],
-                suggestions=["Manual review recommended."],
+                issues=[f"质量评审失败：{error_message}"],
+                suggestions=["请检查评审模型配置或稍后重新评审。"],
                 should_refine=False,
                 token_usage=usage,
                 cost_usd=cost_estimate.amount_usd,
                 cost_status=cost_estimate.status,
+                evaluation_status="failed",
+                evaluation_error=error_message[:1000],
             )
 def _bounded_score(value: Any) -> float:
     try:
@@ -244,6 +245,34 @@ def _bounded_score(value: Any) -> float:
     if not math.isfinite(score):
         return 0.0
     return min(10.0, max(0.0, score))
+
+
+def _validate_score_payload(data: Any) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("Critic response must be a JSON object.")
+    scores = data.get("scores", data)
+    if not isinstance(scores, dict):
+        raise ValueError("Critic response must contain a scores object.")
+    required = (
+        "completeness",
+        "accuracy",
+        "depth",
+        "clarity",
+        "citations",
+        "overall",
+    )
+    missing = [name for name in required if name not in scores]
+    if missing:
+        raise ValueError(
+            "Critic response is missing required scores: "
+            + ", ".join(missing)
+        )
+    for name in required:
+        value = scores[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Critic score '{name}' must be numeric.")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"Critic score '{name}' must be finite.")
 
 
 def _bounded_text_list(value: Any) -> list[str]:

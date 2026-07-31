@@ -25,12 +25,18 @@ const historyState = vi.hoisted(() => {
           id: 2,
           task: "second task",
           report: "second report",
-          quality_score: 8,
+          quality_score: 0,
           model_used: "test",
           created_at: "2026-07-27T00:00:00Z",
         },
       ],
       loaded: true,
+      loading: false,
+      loadError: null as string | null,
+      page: 1,
+      pageSize: 20,
+      total: 42,
+      serverTotal: 42,
       loadHistory: vi.fn(async () => {}),
       loadEntry: vi.fn(
         (id: number) =>
@@ -57,7 +63,9 @@ import { HistoryPage } from "./history-page";
 
 afterEach(() => {
   cleanup();
+  vi.clearAllMocks();
   historyState.state.entries[0].report = "first report";
+  historyState.state.loadError = null;
 });
 
 describe("HistoryPage", () => {
@@ -90,5 +98,22 @@ describe("HistoryPage", () => {
       expect(code).not.toBeNull();
       expect(code?.classList.contains("language-python")).toBe(true);
     });
+  });
+
+  it("does not present a legacy zero as a confirmed report score", () => {
+    render(<HistoryPage />);
+
+    expect(screen.getByText("评分状态未知")).not.toBeNull();
+    expect(screen.queryByText("质量 0.0")).toBeNull();
+  });
+
+  it("shows load failures and paginates server history", () => {
+    historyState.state.loadError = "offline";
+    render(<HistoryPage />);
+
+    expect(screen.getByRole("alert")).not.toBeNull();
+    expect(screen.getByText("第 1 / 3 页")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(historyState.state.loadHistory).toHaveBeenCalledWith(2);
   });
 });

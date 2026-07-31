@@ -109,6 +109,43 @@ class QdrantStore:
             wait=True,
         )
 
+    async def delete_points(self, point_ids: list[int | str]) -> None:
+        """Delete explicit point ids without touching other document generations."""
+        if not point_ids:
+            return
+        await self._async_client.delete(
+            collection_name=self.collection_name,
+            points_selector=point_ids,
+            wait=True,
+        )
+
+    async def snapshot_document(self, doc_id: str) -> list[PointStruct]:
+        """Capture one document's points so a failed rebuild can restore them."""
+        records = await self.scroll_all(
+            filters={"doc_id": doc_id},
+            with_vectors=True,
+        )
+        return [
+            PointStruct(
+                id=record.id,
+                vector=record.vector,
+                payload=dict(record.payload or {}),
+            )
+            for record in records
+        ]
+
+    async def restore_document(
+        self,
+        doc_id: str,
+        points: list[PointStruct],
+        *,
+        batch_size: int,
+    ) -> None:
+        """Replace a partial rebuild with a previously captured snapshot."""
+        await self.delete(doc_id)
+        for index in range(0, len(points), batch_size):
+            await self.upsert(points[index:index + batch_size])
+
     async def count(self, filters: Optional[Dict] = None) -> int:
         result = await self._async_client.count(
             collection_name=self.collection_name,

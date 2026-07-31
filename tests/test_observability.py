@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from mindforge.agents.critic import CriticScore
 from mindforge.agents.orchestrator import Orchestrator
 from mindforge.agents.planner import ResearchPlan, SubTask
 from mindforge.agents.synthesizer import SynthesisStreamEvent
+from mindforge.api import routes
 from mindforge.api.schemas import HistorySaveRequest
 
 
@@ -308,6 +310,154 @@ async def test_streaming_trace_keeps_context_across_streamed_synthesis(
     assert names.count("orchestrator.research") == 1
     assert names.count("agent.synthesizer") == 1
     assert detail["summary"]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_api_stream_and_orchestrator_share_one_root_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from mindforge.agents import orchestrator as orchestrator_module
+    from mindforge.observability import store as store_module
+    from mindforge.observability import tracer as tracer_module
+
+    settings = _settings(tmp_path)
+    settings.agent.fallback_enabled = False
+    monkeypatch.setattr(orchestrator_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(tracer_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(store_module, "get_settings", lambda: settings)
+
+    class PlannerStub:
+        async def run(self, task: str) -> ResearchPlan:
+            return ResearchPlan(
+                plan_id="api-plan",
+                original_task=task,
+                subtasks=[
+                    SubTask(task_id="one", description="first"),
+                    SubTask(task_id="two", description="second"),
+                ],
+            )
+
+    class ResearcherStub:
+        async def run(self, task: str, context: str | None = None) -> AgentResult:
+            del context
+            return AgentResult(
+                agent_name="researcher",
+                success=True,
+                output=f"{task} finding",
+            )
+
+    class SynthesizerStub:
+        async def synthesize_stream(self, **_kwargs):
+            yield SynthesisStreamEvent(type="chunk", content="report")
+            yield SynthesisStreamEvent(
+                type="done",
+                result=AgentResult(
+                    agent_name="synthesizer",
+                    success=True,
+                    output="report",
+                ),
+            )
+
+    class CriticStub:
+        async def evaluate(self, **_kwargs) -> CriticScore:
+            return CriticScore(overall=8.0, should_refine=False)
+
+    tracer = tracer_module.Tracer()
+    monkeypatch.setattr(tracer_module, "get_tracer", lambda: tracer)
+    orchestrator = Orchestrator(
+        planner=PlannerStub(),
+        researcher=ResearcherStub(),
+        synthesizer=SynthesizerStub(),
+        critic=CriticStub(),
+        tracer=tracer,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in routes._stream_response_events(
+            orchestrator,
+            "API trace integration",
+        )
+    ]
+
+    assert any(b'"type": "done"' in chunk for chunk in chunks)
+    repository = store_module.TraceRepository(tmp_path)
+    listing = repository.list_traces(limit=20, offset=0)
+    assert listing["total"] == 1
+    detail = repository.get_trace(listing["traces"][0]["trace_id"])
+    assert detail is not None
+    names = [item["name"] for item in detail["observations"]]
+    assert names.count("orchestrator.research") == 1
+    assert names.count("agent.planner") == 1
+    assert names.count("agent.researcher") == 2
+    assert names.count("agent.synthesizer") == 1
+    assert names.count("agent.critic") == 1
+
+
+@pytest.mark.asyncio
+async def test_api_proxy_orchestrator_also_shares_one_root_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from mindforge.observability import store as store_module
+    from mindforge.observability import tracer as tracer_module
+
+    settings = _settings(tmp_path)
+    settings.agent.fallback_enabled = False
+    monkeypatch.setattr(routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(tracer_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(store_module, "get_settings", lambda: settings)
+
+    tracer = tracer_module.Tracer()
+    monkeypatch.setattr(tracer_module, "get_tracer", lambda: tracer)
+
+    class ProxyOrchestrator:
+        async def stream_run(
+            self,
+            task: str,
+            *,
+            create_root_trace: bool = True,
+        ):
+            trace_context = (
+                tracer.span(
+                    "orchestrator.research",
+                    metadata={"display_name": task},
+                )
+                if create_root_trace
+                else nullcontext(None)
+            )
+            with trace_context:
+                with tracer.span("agent.researcher"):
+                    pass
+                yield {
+                    "type": "done",
+                    "result": AgentResult(
+                        agent_name="orchestrator",
+                        success=True,
+                        output="done",
+                        metadata={"outcome": "success"},
+                    ),
+                }
+
+    chunks = [
+        chunk
+        async for chunk in routes._stream_response_events(
+            ProxyOrchestrator(),
+            "Proxy trace integration",
+        )
+    ]
+
+    assert any(b'"type": "done"' in chunk for chunk in chunks)
+    repository = store_module.TraceRepository(tmp_path)
+    listing = repository.list_traces(limit=20, offset=0)
+    assert listing["total"] == 1
+    detail = repository.get_trace(listing["traces"][0]["trace_id"])
+    assert detail is not None
+    names = [item["name"] for item in detail["observations"]]
+    assert names.count("orchestrator.research") == 1
+    assert names.count("agent.researcher") == 1
 
 
 def test_history_trace_id_validation() -> None:

@@ -1,4 +1,4 @@
-import { type FormEvent } from "react";
+import { type FormEvent, type MouseEvent } from "react";
 import { Send, Square } from "lucide-react";
 
 interface QueryInputProps {
@@ -25,6 +25,14 @@ export function QueryInput({
     }
   };
 
+  const handleCancel = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    onCancel();
+  };
+
+  const buttonClassName =
+    "inline-flex min-w-28 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50";
+
   return (
     <form onSubmit={handleSubmit} className="w-full">
       <div className="relative rounded-xl border border-border bg-surface shadow-sm transition-shadow focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50">
@@ -45,31 +53,29 @@ export function QueryInput({
           <span className="text-xs text-text-muted">
             按 Enter 提交 · Shift+Enter 换行
           </span>
-          <button
-            type={isRunning ? "button" : "submit"}
-            onClick={isRunning ? onCancel : undefined}
-            disabled={!isRunning && !value.trim()}
-            className={
-              "inline-flex min-w-28 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 "
-              + (
-                isRunning
-                  ? "bg-red-500 hover:bg-red-600"
-                  : "bg-primary hover:bg-primary-dark"
-              )
-            }
-          >
-            {isRunning ? (
-              <>
-                <Square className="h-4 w-4 fill-current" />
-                停止研究
-              </>
-            ) : (
+          {isRunning ? (
+            <button
+              key="cancel"
+              type="button"
+              onClick={handleCancel}
+              className={`${buttonClassName} bg-red-500 hover:bg-red-600`}
+            >
+              <Square className="h-4 w-4 fill-current" />
+              停止研究
+            </button>
+          ) : (
+            <button
+              key="submit"
+              type="submit"
+              disabled={!value.trim()}
+              className={`${buttonClassName} bg-primary hover:bg-primary-dark`}
+            >
               <>
                 <Send className="h-4 w-4" />
                 {retrievalOnly ? "知识库检索" : "开始研究"}
               </>
-            )}
-          </button>
+            </button>
+          )}
         </div>
       </div>
     </form>

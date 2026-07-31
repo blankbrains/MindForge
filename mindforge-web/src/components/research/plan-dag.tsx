@@ -14,7 +14,7 @@ import {
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import { RotateCcw } from "lucide-react";
+import { Info, RotateCcw, TriangleAlert } from "lucide-react";
 import "@xyflow/react/dist/style.css";
 import type { ResearchPlan, SubTask } from "@/types/research";
 import { useResearchStore } from "@/store/research-store";
@@ -183,34 +183,57 @@ export function PlanDAG({ plan }: Props) {
   if (!plan || plan.subtasks.length === 0) return null;
 
   return (
-    <div className="relative h-[460px] w-full overflow-hidden rounded-lg border border-border bg-surface">
-      <button
-        type="button"
-        onClick={resetLayout}
-        className="absolute right-3 top-3 z-10 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface text-text-muted shadow-sm hover:bg-surface-alt hover:text-text"
-        title="恢复自动布局"
-        aria-label="恢复任务 DAG 自动布局"
-      >
-        <RotateCcw className="h-4 w-4" />
-      </button>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onInit={(instance) => {
-          flowRef.current = instance;
-        }}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.25}
-        maxZoom={1.5}
-        nodesConnectable={false}
-        deleteKeyCode={null}
-      >
-        <Background gap={24} size={1} />
-        <Controls showInteractive={false} />
-      </ReactFlow>
+    <div className="space-y-3">
+      {plan.planner_status === "direct" && (
+        <div className="flex items-start gap-2 border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <span>均衡模式判定该问题范围集中，直接使用单个研究任务。</span>
+        </div>
+      )}
+      {plan.planner_status === "fallback" && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+        >
+          <TriangleAlert
+            className="mt-0.5 h-4 w-4 shrink-0"
+            aria-hidden="true"
+          />
+          <span>
+            Planner 规划失败，已降级为单任务
+            {plan.planner_error ? `：${plan.planner_error}` : "。"}
+          </span>
+        </div>
+      )}
+      <div className="relative h-[460px] w-full overflow-hidden rounded-lg border border-border bg-surface">
+        <button
+          type="button"
+          onClick={resetLayout}
+          className="absolute right-3 top-3 z-10 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface text-text-muted shadow-sm hover:bg-surface-alt hover:text-text"
+          title="恢复自动布局"
+          aria-label="恢复任务 DAG 自动布局"
+        >
+          <RotateCcw className="h-4 w-4" />
+        </button>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onInit={(instance) => {
+            flowRef.current = instance;
+          }}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          minZoom={0.25}
+          maxZoom={1.5}
+          nodesConnectable={false}
+          deleteKeyCode={null}
+        >
+          <Background gap={24} size={1} />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
     </div>
   );
 }

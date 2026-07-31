@@ -311,7 +311,7 @@ class IndexJobService:
                     metrics=metrics,
                 )
 
-            chunks = await _index_with_lifecycle(
+            chunks, _raptor_applied, _graphrag_applied = await _index_with_lifecycle(
                 parsed=parsed,
                 source=str(job["filename"]),
                 strategy=str(job["strategy"]),

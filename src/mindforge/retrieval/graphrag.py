@@ -274,6 +274,41 @@ class GraphRAGEngine:
             )
         return staging
 
+    def snapshot_state(self) -> tuple[
+        Dict[str, Entity],
+        List[Relation],
+        List[Community],
+        Dict[str, Set[str]],
+    ]:
+        """Capture a detached graph state for transactional persistence."""
+        with self._state_lock:
+            return copy.deepcopy(
+                (
+                    self.entities,
+                    self.relations,
+                    self.communities,
+                    self._adjacency,
+                )
+            )
+
+    def restore_state(
+        self,
+        snapshot: tuple[
+            Dict[str, Entity],
+            List[Relation],
+            List[Community],
+            Dict[str, Set[str]],
+        ],
+    ) -> None:
+        """Restore a graph snapshot after a failed persistent update."""
+        with self._state_lock:
+            (
+                self.entities,
+                self.relations,
+                self.communities,
+                self._adjacency,
+            ) = copy.deepcopy(snapshot)
+
     async def _build_graph(
         self,
         documents: List[Dict[str, Any]],
@@ -576,12 +611,22 @@ class GraphRAGEngine:
         if hasattr(selected_llm, "chat"):
             from mindforge.models.base import ChatMessage
 
-            result = await selected_llm.chat(
-                [ChatMessage(role="user", content=prompt)],
-                temperature=0.2,
+            from mindforge.config import get_settings
+
+            result = await asyncio.wait_for(
+                selected_llm.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    temperature=0.2,
+                ),
+                timeout=float(get_settings().agent.llm_request_timeout),
             )
             return str(getattr(result, "content", result))
-        result = await selected_llm(prompt)
+        from mindforge.config import get_settings
+
+        result = await asyncio.wait_for(
+            selected_llm(prompt),
+            timeout=float(get_settings().agent.llm_request_timeout),
+        )
         return str(getattr(result, "content", result))
 
     def delete_document(self, doc_id: str) -> None:

@@ -180,7 +180,9 @@ export function ResearchSettingsPanel() {
         <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
         <p>
           “快速”和“均衡”模式会主动减少不必要的 Planner、Critic
-          与精炼调用；深度模式优先完整性，耗时和费用会更高。
+          与精炼调用；均衡模式的单任务只评审、不自动重写。深度模式优先完整性，
+          耗时和费用会更高。最大精炼轮次设为 0 时仍会进行质量评审，只是不触发
+          报告重写。
         </p>
       </div>
     </section>

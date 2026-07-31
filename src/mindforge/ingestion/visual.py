@@ -35,6 +35,7 @@ async def _caption_image(
     *,
     image_path: Path,
     content_type: str,
+    client: Any,
 ) -> str:
     config = get_settings().visual_retrieval
     if not config.enabled:
@@ -48,53 +49,43 @@ async def _caption_image(
             f"Visual asset exceeds VISUAL_MAX_ASSET_BYTES: {image_path.name}"
         )
 
-    from openai import AsyncOpenAI
-
     encoded = await asyncio.to_thread(
         lambda: base64.b64encode(image_path.read_bytes()).decode("ascii")
     )
-    client = AsyncOpenAI(
-        api_key=config.api_key,
-        base_url=config.base_url or None,
-        timeout=config.request_timeout_seconds,
+    completion = await client.chat.completions.create(
+        model=config.model,
+        max_tokens=config.max_tokens,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Describe this document image for retrieval. State visible "
+                    "objects, chart/table type, labels, values, formulas, and "
+                    "relationships when legible. Do not invent unreadable text."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Create a concise factual retrieval caption.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": (
+                                f"data:{content_type or 'image/png'};base64,"
+                                f"{encoded}"
+                            ),
+                            "detail": config.detail,
+                        },
+                    },
+                ],
+            },
+        ],
     )
-    try:
-        completion = await client.chat.completions.create(
-            model=config.model,
-            max_tokens=config.max_tokens,
-            temperature=0,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Describe this document image for retrieval. State visible "
-                        "objects, chart/table type, labels, values, formulas, and "
-                        "relationships when legible. Do not invent unreadable text."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Create a concise factual retrieval caption.",
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": (
-                                    f"data:{content_type or 'image/png'};base64,"
-                                    f"{encoded}"
-                                ),
-                                "detail": config.detail,
-                            },
-                        },
-                    ],
-                },
-            ],
-        )
-    finally:
-        await client.close()
     content = completion.choices[0].message.content
     return content.strip() if content else ""
 
@@ -119,29 +110,59 @@ async def build_visual_chunks(
         and str(asset.get("content_type") or "").startswith("image/")
     ][: config.max_assets_per_document]
 
-    chunks: list[DocumentChunk] = []
-    for asset in visual_assets:
+    if not visual_assets:
+        return []
+
+    uncached_assets = [
+        asset
+        for asset in visual_assets
+        if not str((asset.get("metadata") or {}).get("caption") or "").strip()
+    ]
+    client = None
+    if uncached_assets:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url or None,
+            timeout=config.request_timeout_seconds,
+        )
+    semaphore = asyncio.Semaphore(config.caption_concurrency)
+
+    async def build_chunk(asset: dict[str, Any]) -> DocumentChunk | None:
         if cancelled is not None and cancelled():
             raise asyncio.CancelledError("Visual captioning was cancelled.")
         metadata = dict(asset.get("metadata") or {})
         caption = str(metadata.get("caption") or "").strip()
         if not caption:
             try:
-                caption = await _caption_image(
-                    image_path=resolve_asset_path(
-                        str(asset["relative_path"])
-                    ),
-                    content_type=str(asset.get("content_type") or "image/png"),
-                )
+                if client is None:
+                    raise VisualRetrievalConfigurationError(
+                        "Visual caption client was not initialized."
+                    )
+                async with semaphore:
+                    if cancelled is not None and cancelled():
+                        raise asyncio.CancelledError(
+                            "Visual captioning was cancelled."
+                        )
+                    caption = await _caption_image(
+                        image_path=resolve_asset_path(
+                            str(asset["relative_path"])
+                        ),
+                        content_type=str(
+                            asset.get("content_type") or "image/png"
+                        ),
+                        client=client,
+                    )
             except Exception:
                 logger.warning(
                     "Visual captioning failed for asset %s.",
                     asset["asset_id"],
                     exc_info=True,
                 )
-                continue
+                return None
             if not caption:
-                continue
+                return None
             await asyncio.to_thread(
                 update_asset_caption,
                 str(asset["asset_id"]),
@@ -156,25 +177,42 @@ async def build_visual_chunks(
         prefix = f"Visual asset on page {page}: " if page else "Visual asset: "
         content = prefix + caption
         asset_id = str(asset["asset_id"])
-        chunks.append(
-            DocumentChunk(
-                chunk_id=hashlib.md5(
-                    f"{doc_id}:visual:{asset_id}:{config.model}:{config.prompt_version}".encode()
-                ).hexdigest()[:12],
-                doc_id=doc_id,
-                content=content,
-                metadata={
-                    **(document_metadata or {}),
-                    "element_type": "image",
-                    "source_method": "vision_caption",
-                    "asset_id": asset_id,
-                    "asset_page": page,
-                    "asset_content_type": asset.get("content_type"),
-                    "visual_model": config.model,
-                    "visual_prompt_version": config.prompt_version,
-                    "chunk_start": None,
-                    "chunk_end": None,
-                },
-            )
+        return DocumentChunk(
+            chunk_id=hashlib.md5(
+                (
+                    f"{doc_id}:visual:{asset_id}:"
+                    f"{config.model}:{config.prompt_version}"
+                ).encode()
+            ).hexdigest()[:12],
+            doc_id=doc_id,
+            content=content,
+            metadata={
+                **(document_metadata or {}),
+                "element_type": "image",
+                "source_method": "vision_caption",
+                "asset_id": asset_id,
+                "asset_page": page,
+                "asset_content_type": asset.get("content_type"),
+                "visual_model": config.model,
+                "visual_prompt_version": config.prompt_version,
+                "chunk_start": None,
+                "chunk_end": None,
+            },
         )
-    return chunks
+
+    tasks = [
+        asyncio.create_task(build_chunk(asset))
+        for asset in visual_assets
+    ]
+    try:
+        chunks = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    finally:
+        if client is not None:
+            await client.close()
+    return [chunk for chunk in chunks if chunk is not None]

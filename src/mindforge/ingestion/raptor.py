@@ -211,9 +211,14 @@ class RAPTORIndexer:
             # 兼容 BaseLLM.chat() 接口
             if hasattr(self.llm, "chat"):
                 from mindforge.models.base import ChatMessage
-                result = await self.llm.chat(
-                    [ChatMessage(role="user", content=prompt)],
-                    temperature=0.3,
+                from mindforge.config import get_settings
+
+                result = await asyncio.wait_for(
+                    self.llm.chat(
+                        [ChatMessage(role="user", content=prompt)],
+                        temperature=0.3,
+                    ),
+                    timeout=float(get_settings().agent.llm_request_timeout),
                 )
                 content = result.content or ""
                 if not content.strip():
@@ -221,7 +226,12 @@ class RAPTORIndexer:
                 return content.strip()[:1000]
             else:
                 # callable fallback: async llm_fn
-                result = await self.llm(prompt)
+                from mindforge.config import get_settings
+
+                result = await asyncio.wait_for(
+                    self.llm(prompt),
+                    timeout=float(get_settings().agent.llm_request_timeout),
+                )
                 return str(result).strip()[:1000]
         except Exception:
             logger.exception("RAPTOR summarization failed for level %d", level)

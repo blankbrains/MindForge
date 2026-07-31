@@ -115,7 +115,12 @@ class WorkingMemory:
         self._entries[key] = entry
         self._manage_capacity()
 
-    def get_context_string(self, max_chars: int | None = None) -> str:
+    def get_context_string(
+        self,
+        max_chars: int | None = None,
+        *,
+        include_types: set[str] | None = None,
+    ) -> str:
         """Return a flattened string of the working memory contents.
 
         Ordering priority (within each group, entries are sorted by
@@ -139,6 +144,8 @@ class WorkingMemory:
         thoughts: list[MemoryEntry] = []
 
         for entry in self._entries.values():
+            if include_types is not None and entry.entry_type not in include_types:
+                continue
             if entry.entry_type == "tool_result":
                 tool_results.append(entry)
             elif entry.entry_type == "context":

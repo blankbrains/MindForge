@@ -5,6 +5,13 @@ import { normalizeCitationSources } from "@/lib/citations";
 import type { CitationSource } from "@/types/research";
 
 const LOCAL_HISTORY_ID_FLOOR = 1_000_000_000_000;
+let historyLoadGeneration = 0;
+
+function sortHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
+  return entries.sort((a, b) =>
+    (b.created_at ?? "").localeCompare(a.created_at ?? ""),
+  );
+}
 
 export interface HistoryEntry {
   id: number;
@@ -26,7 +33,14 @@ interface ResearchUsageSummary {
 
 export interface HistoryState {
   entries: HistoryEntry[];
+  localEntries: HistoryEntry[];
   loaded: boolean;
+  loading: boolean;
+  loadError: string | null;
+  page: number;
+  pageSize: number;
+  total: number;
+  serverTotal: number;
 
   addEntry: (entry: HistoryEntry) => void;
   addFromResearch: (
@@ -38,7 +52,7 @@ export interface HistoryState {
     sources?: CitationSource[],
     traceId?: string,
   ) => Promise<void>;
-  loadHistory: () => Promise<void>;
+  loadHistory: (page?: number) => Promise<void>;
   loadEntry: (id: number) => Promise<void>;
   removeEntry: (id: number) => Promise<void>;
   clearAll: () => Promise<void>;
@@ -48,14 +62,45 @@ export const useHistoryStore = create<HistoryState>()(
   persist(
     (set, get) => ({
       entries: [],
+      localEntries: [],
       loaded: false,
+      loading: false,
+      loadError: null,
+      page: 1,
+      pageSize: 20,
+      total: 0,
+      serverTotal: 0,
 
       addEntry: (entry) =>
-        set((s) => ({
-          entries: [entry, ...s.entries]
-            .sort((a, b) => ((b.created_at ?? 0) > (a.created_at ?? 0) ? 1 : -1))
-            .slice(0, 100),
-        })),
+        set((s) => {
+          const localEntries =
+            entry.id >= LOCAL_HISTORY_ID_FLOOR
+              ? sortHistoryEntries([entry, ...s.localEntries]).slice(0, 100)
+              : s.localEntries;
+          const serverEntries =
+            entry.id < LOCAL_HISTORY_ID_FLOOR
+              ? [entry, ...s.entries.filter(
+                  (current) => current.id < LOCAL_HISTORY_ID_FLOOR,
+                )]
+              : s.entries.filter(
+                  (current) => current.id < LOCAL_HISTORY_ID_FLOOR,
+                );
+          return {
+            localEntries,
+            entries:
+              s.page === 1
+                ? sortHistoryEntries([
+                    ...localEntries,
+                    ...sortHistoryEntries(serverEntries).slice(0, s.pageSize),
+                  ])
+                : s.entries,
+            total: s.total + 1,
+            serverTotal:
+              entry.id < LOCAL_HISTORY_ID_FLOOR
+                ? s.serverTotal + 1
+                : s.serverTotal,
+          };
+        }),
 
       addFromResearch: async (
         task,
@@ -124,46 +169,63 @@ export const useHistoryStore = create<HistoryState>()(
         get().addEntry(entry);
       },
 
-      loadHistory: async () => {
+      loadHistory: async (requestedPage = 1) => {
+        const page = Math.max(1, Math.floor(requestedPage));
+        const pageSize = get().pageSize;
+        const generation = historyLoadGeneration + 1;
+        historyLoadGeneration = generation;
+        set({ loading: true, loadError: null });
         try {
-          const pageSize = 100;
-          let page = 1;
-          let total = 0;
-          const serverEntries: HistoryEntry[] = [];
-
-          do {
-            const res = await fetch(
-              `${API_BASE}/history?page=${page}&page_size=${pageSize}`,
-            );
-            if (!res.ok) {
-              throw new Error(
-                `History request failed with ${res.status}`,
-              );
-            }
-            const data = await res.json() as {
-              entries?: HistoryEntry[];
-              total?: number;
-            };
-            serverEntries.push(...(data.entries ?? []));
-            total = data.total ?? serverEntries.length;
-            page += 1;
-          } while (
-            serverEntries.length < total
-            && page <= Math.ceil(total / pageSize) + 1
+          const res = await fetch(
+            `${API_BASE}/history?page=${page}&page_size=${pageSize}`,
           );
-
-          const localEntries = get().entries.filter(
-            (entry) => entry.id >= LOCAL_HISTORY_ID_FLOOR,
-          );
-          const merged = [...localEntries, ...serverEntries]
-            .sort((a, b) =>
-              (b.created_at ?? "").localeCompare(a.created_at ?? ""),
+          if (!res.ok) {
+            throw new Error(
+              `History request failed with ${res.status}`,
             );
-          set({ entries: merged });
+          }
+          const data = await res.json() as {
+            entries?: HistoryEntry[];
+            total?: number;
+          };
+          const serverEntries = data.entries ?? [];
+          const serverTotal = data.total ?? serverEntries.length;
+          const lastPage = Math.max(1, Math.ceil(serverTotal / pageSize));
+          if (page > lastPage) {
+            if (historyLoadGeneration !== generation) return;
+            await get().loadHistory(lastPage);
+            return;
+          }
+          if (historyLoadGeneration !== generation) return;
+
+          const localEntries =
+            page === 1
+              ? get().localEntries
+              : [];
+          const merged = sortHistoryEntries([
+            ...localEntries,
+            ...serverEntries,
+          ]);
+          set({
+            entries: merged,
+            page,
+            total: serverTotal + get().localEntries.length,
+            serverTotal,
+            loaded: true,
+            loading: false,
+            loadError: null,
+          });
         } catch (error) {
           console.warn("history-store: history load failed", error);
-        } finally {
-          set({ loaded: true });
+          if (historyLoadGeneration !== generation) return;
+          set({
+            loaded: true,
+            loading: false,
+            loadError:
+              error instanceof Error
+                ? error.message
+                : "历史记录加载失败。",
+          });
         }
       },
 
@@ -194,30 +256,45 @@ export const useHistoryStore = create<HistoryState>()(
               `History deletion failed with ${res.status}`,
             );
           }
+          await get().loadHistory(get().page);
+          return;
         }
-        set((s) => ({ entries: s.entries.filter((e) => e.id !== id) }));
+        set((s) => ({
+          entries: s.entries.filter((e) => e.id !== id),
+          localEntries: s.localEntries.filter((e) => e.id !== id),
+          total: Math.max(0, s.total - 1),
+          serverTotal:
+            id < LOCAL_HISTORY_ID_FLOOR
+              ? Math.max(0, s.serverTotal - 1)
+              : s.serverTotal,
+        }));
       },
 
       clearAll: async () => {
-        const hasServerEntries = get().entries.some(
-          (entry) => entry.id < LOCAL_HISTORY_ID_FLOOR,
+        const res = await fetch(
+          `${API_BASE}/history`,
+          { method: "DELETE" },
         );
-        if (hasServerEntries) {
-          const res = await fetch(
-            `${API_BASE}/history`,
-            { method: "DELETE" },
+        if (!res.ok) {
+          throw new Error(
+            `History clear failed with ${res.status}`,
           );
-          if (!res.ok) {
-            throw new Error(
-              `History clear failed with ${res.status}`,
-            );
-          }
         }
-        set({ entries: [] });
+        set({
+          entries: [],
+          localEntries: [],
+          page: 1,
+          total: 0,
+          serverTotal: 0,
+          loadError: null,
+        });
       },
     }),
     {
       name: "mindforge-history",
+      partialize: (state) => ({
+        localEntries: state.localEntries,
+      }),
     },
   ),
 );

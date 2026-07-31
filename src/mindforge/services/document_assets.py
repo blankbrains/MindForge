@@ -8,12 +8,14 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mindforge.config import get_settings, resolve_project_path
 from mindforge.repositories.document_assets import (
     delete_document_asset_records,
+    list_document_assets,
     replace_document_assets,
 )
 
@@ -29,6 +31,15 @@ class DocumentAssetCancelledError(DocumentAssetError):
 
 
 CancellationCallback = Callable[[], bool]
+
+
+@dataclass
+class DocumentAssetSnapshot:
+    """Detached asset files and rows retained during a document rebuild."""
+
+    doc_id: str
+    backup_directory: Path | None
+    records: list[dict[str, Any]]
 
 
 def get_asset_root() -> Path:
@@ -361,3 +372,47 @@ def remove_document_assets(doc_id: str) -> None:
     directory = _safe_doc_directory(doc_id)
     delete_document_asset_records(doc_id)
     _remove_directory(directory)
+
+
+def snapshot_document_assets(doc_id: str) -> DocumentAssetSnapshot:
+    """Copy one document's current assets for rebuild rollback."""
+    final_directory = _safe_doc_directory(doc_id)
+    records = list_document_assets(doc_id, include_source=True)
+    backup_directory: Path | None = None
+    if final_directory.exists():
+        root = get_asset_root()
+        backup_directory = (
+            root
+            / ".staging"
+            / f"{doc_id}-snapshot-{uuid.uuid4().hex}"
+        )
+        backup_directory.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(final_directory, backup_directory)
+    return DocumentAssetSnapshot(
+        doc_id=doc_id,
+        backup_directory=backup_directory,
+        records=records,
+    )
+
+
+def restore_document_assets(snapshot: DocumentAssetSnapshot) -> None:
+    """Restore files and database rows from a rebuild snapshot."""
+    final_directory = _safe_doc_directory(snapshot.doc_id)
+    if final_directory.exists():
+        _remove_directory(final_directory)
+    if (
+        snapshot.backup_directory is not None
+        and snapshot.backup_directory.exists()
+    ):
+        final_directory.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(snapshot.backup_directory, final_directory)
+    replace_document_assets(snapshot.doc_id, snapshot.records)
+
+
+def discard_document_asset_snapshot(snapshot: DocumentAssetSnapshot) -> None:
+    """Remove a successful rebuild's no-longer-needed asset snapshot."""
+    if (
+        snapshot.backup_directory is not None
+        and snapshot.backup_directory.exists()
+    ):
+        _remove_directory(snapshot.backup_directory)

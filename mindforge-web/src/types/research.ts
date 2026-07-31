@@ -13,6 +13,8 @@ export interface ResearchPlan {
   original_task: string;
   subtasks: SubTask[];
   reasoning: string;
+  planner_status?: "planned" | "direct" | "fallback";
+  planner_error?: string | null;
 }
 
 export interface AgentResult {
@@ -59,6 +61,8 @@ export interface CriticScore {
   issues?: string[];
   suggestions?: string[];
   should_refine: boolean;
+  evaluation_status?: "evaluated" | "failed";
+  evaluation_error?: string | null;
 }
 
 type SSEEventPayload =

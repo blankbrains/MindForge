@@ -37,6 +37,47 @@ const MAX_STREAMED_ANSWER_CHARS =
 let nextRequestId = 0;
 let activeRequestId: number | null = null;
 
+function createServerRequestId(requestId: number): string {
+  return [
+    "research",
+    Date.now().toString(36),
+    requestId.toString(36),
+    Math.random().toString(36).slice(2, 14),
+  ].join("-");
+}
+
+async function cancelServerResearch(requestId: string): Promise<void> {
+  if (typeof fetch !== "function") return;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 1_500);
+  try {
+    await fetch(`${API_BASE}/query/cancel`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ request_id: requestId }),
+      keepalive: true,
+      signal: controller.signal,
+    });
+  } catch {
+    // Disconnecting the SSE stream remains the fallback cancellation signal.
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function stopResearchTransport(
+  requestId: string | null,
+  connection: { abort: () => void } | null,
+): void {
+  if (!requestId) {
+    connection?.abort();
+    return;
+  }
+  void cancelServerResearch(requestId).finally(() => connection?.abort());
+}
+
 function isRunningStatus(status: string): boolean {
   return status === "connecting" || status === "streaming";
 }
@@ -47,6 +88,7 @@ export function useResearchSession() {
   const streamFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingAnswerRef = useRef("");
   const requestIdRef = useRef<number | null>(null);
+  const serverRequestIdRef = useRef<string | null>(null);
   const sessionState = useResearchStore(
     useShallow((state) => ({
       status: state.status,
@@ -97,8 +139,11 @@ export function useResearchSession() {
         activeRequestId = null;
       }
       requestIdRef.current = null;
-      abortRef.current?.abort();
+      const serverRequestId = serverRequestIdRef.current;
+      serverRequestIdRef.current = null;
+      const connection = abortRef.current;
       abortRef.current = null;
+      stopResearchTransport(serverRequestId, connection);
       if (streamFlushRef.current) clearTimeout(streamFlushRef.current);
       streamFlushRef.current = null;
       pendingAnswerRef.current = "";
@@ -123,16 +168,21 @@ export function useResearchSession() {
         clearTimeout(researchTimeoutRef.current);
         researchTimeoutRef.current = null;
       }
-      abortRef.current?.abort();
+      const previousServerRequestId = serverRequestIdRef.current;
+      serverRequestIdRef.current = null;
+      const previousConnection = abortRef.current;
       abortRef.current = null;
+      stopResearchTransport(previousServerRequestId, previousConnection);
       if (streamFlushRef.current) {
         clearTimeout(streamFlushRef.current);
         streamFlushRef.current = null;
       }
       pendingAnswerRef.current = "";
       const requestId = ++nextRequestId;
+      const serverRequestId = createServerRequestId(requestId);
       activeRequestId = requestId;
       requestIdRef.current = requestId;
+      serverRequestIdRef.current = serverRequestId;
 
       // 使用 getState 确保拿到最新 setState action，避免闭包陈旧引用
       useResearchStore.setState({
@@ -168,6 +218,9 @@ export function useResearchSession() {
         if (activeRequestId !== requestId) return;
         activeRequestId = null;
         requestIdRef.current = null;
+        if (serverRequestIdRef.current === serverRequestId) {
+          serverRequestIdRef.current = null;
+        }
         researchTimeoutRef.current = null;
         useResearchStore
           .getState()
@@ -176,13 +229,13 @@ export function useResearchSession() {
           );
         const connection = abortRef.current;
         abortRef.current = null;
-        connection?.abort();
+        stopResearchTransport(serverRequestId, connection);
       }, timeoutMs);
       researchTimeoutRef.current = timeoutId;
 
       abortRef.current = createSSEConnection<SSEEvent>(
         `${API_BASE}/query`,
-        { task, stream: true },
+        { request_id: serverRequestId, task, stream: true },
         (event) => {
           if (activeRequestId !== requestId) return;
           if (event.type === "answer_chunk") {
@@ -212,6 +265,9 @@ export function useResearchSession() {
             researchTimeoutRef.current = null;
             activeRequestId = null;
             requestIdRef.current = null;
+            if (serverRequestIdRef.current === serverRequestId) {
+              serverRequestIdRef.current = null;
+            }
             const connection = abortRef.current;
             abortRef.current = null;
             connection?.abort();
@@ -219,14 +275,21 @@ export function useResearchSession() {
           }
           if (event.type === "done") {
             clearTimeout(timeoutId);
+            if (serverRequestIdRef.current === serverRequestId) {
+              serverRequestIdRef.current = null;
+            }
             if (!event.result.success) return;
             const result = event.result as unknown as
               | Record<string, unknown>
               | undefined;
             const report = (result?.output as string) || "";
-            const quality = (
+            const rawQuality = (
               result?.metadata as Record<string, unknown> | undefined
-            )?.quality as number | undefined;
+            )?.quality;
+            const quality =
+              typeof rawQuality === "number" && Number.isFinite(rawQuality)
+                ? rawQuality
+                : undefined;
             const model = (
               result?.metadata as Record<string, unknown> | undefined
             )?.model as string | undefined;
@@ -275,6 +338,9 @@ export function useResearchSession() {
           if (activeRequestId !== requestId) return;
           activeRequestId = null;
           requestIdRef.current = null;
+          if (serverRequestIdRef.current === serverRequestId) {
+            serverRequestIdRef.current = null;
+          }
           clearTimeout(timeoutId);
           researchTimeoutRef.current = null;
           abortRef.current = null;
@@ -291,6 +357,9 @@ export function useResearchSession() {
           if (activeRequestId !== requestId) return;
           activeRequestId = null;
           requestIdRef.current = null;
+          if (serverRequestIdRef.current === serverRequestId) {
+            serverRequestIdRef.current = null;
+          }
           clearTimeout(timeoutId);
           researchTimeoutRef.current = null;
           abortRef.current = null;
@@ -351,8 +420,11 @@ export function useResearchSession() {
   const cancelResearch = useCallback(() => {
     activeRequestId = null;
     requestIdRef.current = null;
-    abortRef.current?.abort();
+    const serverRequestId = serverRequestIdRef.current;
+    serverRequestIdRef.current = null;
+    const connection = abortRef.current;
     abortRef.current = null;
+    stopResearchTransport(serverRequestId, connection);
     if (streamFlushRef.current) {
       clearTimeout(streamFlushRef.current);
       streamFlushRef.current = null;

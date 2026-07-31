@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   cleanup,
   fireEvent,
@@ -9,6 +10,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryInput } from "@/components/research/query-input";
 
 afterEach(cleanup);
+
+function RunningQueryInput({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (task: string) => void;
+  onCancel: () => void;
+}) {
+  const [isRunning, setIsRunning] = useState(true);
+
+  return (
+    <QueryInput
+      value="不能被重新提交"
+      onChange={vi.fn()}
+      onSubmit={onSubmit}
+      isRunning={isRunning}
+      onCancel={() => {
+        onCancel();
+        setIsRunning(false);
+      }}
+    />
+  );
+}
 
 describe("QueryInput", () => {
   it("labels retrieval-only submissions accurately", () => {
@@ -65,5 +89,19 @@ describe("QueryInput", () => {
 
     expect(onChange).toHaveBeenCalledWith("新的草稿");
     expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it("does not submit the form when cancellation synchronously ends the run", () => {
+    const onSubmit = vi.fn();
+    const onCancel = vi.fn();
+    render(<RunningQueryInput onSubmit={onSubmit} onCancel={onCancel} />);
+
+    const stopButton = screen.getByRole("button", { name: "停止研究" });
+    fireEvent.click(stopButton);
+
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(stopButton.getAttribute("type")).toBe("button");
+    expect(screen.getByRole("button", { name: "开始研究" })).toBeTruthy();
   });
 });

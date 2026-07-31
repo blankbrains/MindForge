@@ -46,8 +46,27 @@ export function ReportViewer({ result }: Props) {
       : typeof result.data?.retrieval_quality === "number"
         ? result.data.retrieval_quality
         : null;
-  const quality =
-    typeof metadata.quality === "number" ? metadata.quality : null;
+  const rawQuality =
+    typeof metadata.quality === "number" && Number.isFinite(metadata.quality)
+      ? metadata.quality
+      : null;
+  const criticScore = result.data?.critic_score;
+  const explicitQualityStatus =
+    typeof metadata.quality_status === "string"
+      ? metadata.quality_status
+      : null;
+  const qualityStatus =
+    explicitQualityStatus
+    ?? (
+      rawQuality !== null
+      && (
+        rawQuality !== 0
+        || (criticScore !== null && typeof criticScore === "object")
+      )
+        ? "evaluated"
+        : "not_evaluated"
+    );
+  const quality = qualityStatus === "evaluated" ? rawQuality : null;
   const fromCache = result.data?.from_cache === true;
   const completedSubtasks =
     typeof metadata.completed_subtask_count === "number"
@@ -58,6 +77,10 @@ export function ReportViewer({ result }: Props) {
       ? metadata.failed_subtask_count
       : 0;
   const fallback = result.data?.fallback === true;
+  const refinementFailure =
+    typeof result.data?.refinement_failure === "string"
+      ? result.data.refinement_failure
+      : "";
 
   return (
     <div className="space-y-4">
@@ -71,7 +94,9 @@ export function ReportViewer({ result }: Props) {
             <p className="font-semibold">
               {fallback
                 ? "研究链路失败，当前展示知识库检索结果"
-                : "部分子任务未完成，当前报告为降级结果"}
+                : refinementFailure
+                  ? "报告精炼未完成，当前展示评审前的有效版本"
+                  : "部分子任务未完成，当前报告为降级结果"}
             </p>
             {failureReason && (
               <p className="mt-1 break-words text-xs opacity-80">
@@ -89,14 +114,18 @@ export function ReportViewer({ result }: Props) {
             <span className="font-semibold">缓存命中</span>
           </div>
         )}
-        {quality !== null && (
-          <div>
-            <span className="text-text-muted">报告评分：</span>
+        <div>
+          <span className="text-text-muted">报告评分：</span>
+          {quality !== null ? (
             <span className="font-semibold text-primary">
               {quality.toFixed(1)} / 10
             </span>
-          </div>
-        )}
+          ) : (
+            <span className="font-semibold text-text-muted">
+              {qualityStatus === "evaluation_failed" ? "评审失败" : "未评审"}
+            </span>
+          )}
+        </div>
         {retrievalQuality !== null && (
           <div>
             <span className="text-text-muted">检索相关性：</span>

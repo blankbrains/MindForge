@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -200,79 +201,136 @@ async def index_auxiliary_documents(
     progress_callback: Any = None,
     timings: dict[str, float] | None = None,
     start_progress: float = 88.0,
+    commit_callback: Callable[[bool], Awaitable[None]] | None = None,
 ) -> bool:
     """Persist BM25 and optional GraphRAG indexes for uploaded chunks."""
     if not documents:
+        if commit_callback is not None:
+            await commit_callback(False)
         return False
     stage_timings = timings if timings is not None else {}
     async with _index_lock:
-        if progress_callback is not None:
-            await progress_callback(
-                "bm25",
-                start_progress,
-                len(documents),
-                dict(stage_timings),
-            )
-        started = asyncio.get_running_loop().time()
         bm25 = get_bm25_retriever()
         doc_id = str(documents[0].get("doc_id") or "")
-        if doc_id:
-            await asyncio.to_thread(
-                bm25.replace_document,
-                doc_id,
-                documents,
-            )
-        else:
-            await asyncio.to_thread(bm25.upsert_documents, documents)
-        await asyncio.to_thread(bm25.save)
-        stage_timings["bm25"] = asyncio.get_running_loop().time() - started
-        bm25_end = 97.0 if use_graphrag else 99.0
-        if progress_callback is not None:
-            await progress_callback(
-                "bm25",
-                bm25_end,
-                len(documents),
-                dict(stage_timings),
-            )
-
-        if use_graphrag:
+        bm25_snapshot = await asyncio.to_thread(
+            bm25.get_document_chunks,
+            doc_id,
+        ) if doc_id else []
+        graph = get_graph_engine(
+            entity_llm=graph_entity_llm,
+            summary_llm=graph_summary_llm,
+        )
+        graph_snapshot = await asyncio.to_thread(graph.snapshot_state)
+        try:
             if progress_callback is not None:
                 await progress_callback(
-                    "graphrag",
-                    97.0,
+                    "bm25",
+                    start_progress,
                     len(documents),
                     dict(stage_timings),
                 )
             started = asyncio.get_running_loop().time()
-            graph = get_graph_engine(
-                entity_llm=graph_entity_llm,
-                summary_llm=graph_summary_llm,
-            )
-            await graph.build_graph(documents)
-            await asyncio.to_thread(graph.save, str(_graph_path()))
-            stage_timings["graphrag"] = asyncio.get_running_loop().time() - started
+            if doc_id:
+                await asyncio.to_thread(
+                    bm25.replace_document,
+                    doc_id,
+                    documents,
+                )
+            else:
+                await asyncio.to_thread(bm25.upsert_documents, documents)
+            await asyncio.to_thread(bm25.save)
+            stage_timings["bm25"] = asyncio.get_running_loop().time() - started
+            bm25_end = 97.0 if use_graphrag else 99.0
             if progress_callback is not None:
                 await progress_callback(
-                    "graphrag",
-                    99.0,
+                    "bm25",
+                    bm25_end,
                     len(documents),
                     dict(stage_timings),
                 )
-            return True
-    return False
+
+            graphrag_applied = False
+            if use_graphrag:
+                if progress_callback is not None:
+                    await progress_callback(
+                        "graphrag",
+                        97.0,
+                        len(documents),
+                        dict(stage_timings),
+                    )
+                started = asyncio.get_running_loop().time()
+                await graph.build_graph(documents)
+                await asyncio.to_thread(graph.save, str(_graph_path()))
+                stage_timings["graphrag"] = (
+                    asyncio.get_running_loop().time() - started
+                )
+                if progress_callback is not None:
+                    await progress_callback(
+                        "graphrag",
+                        99.0,
+                        len(documents),
+                        dict(stage_timings),
+                    )
+                graphrag_applied = True
+            elif doc_id:
+                await graph.delete_document_async(doc_id)
+                await asyncio.to_thread(graph.save, str(_graph_path()))
+
+            if commit_callback is not None:
+                await commit_callback(graphrag_applied)
+            return graphrag_applied
+        except BaseException:
+            try:
+                if doc_id:
+                    if bm25_snapshot:
+                        await asyncio.to_thread(
+                            bm25.replace_document,
+                            doc_id,
+                            bm25_snapshot,
+                        )
+                    else:
+                        await asyncio.to_thread(bm25.delete_document, doc_id)
+                    await asyncio.to_thread(bm25.save)
+            except Exception:
+                logger.exception(
+                    "Failed to restore BM25 after indexing document %s.",
+                    doc_id,
+                )
+            try:
+                await asyncio.to_thread(graph.restore_state, graph_snapshot)
+                await asyncio.to_thread(graph.save, str(_graph_path()))
+            except Exception:
+                logger.exception(
+                    "Failed to restore GraphRAG after indexing document %s.",
+                    doc_id,
+                )
+            raise
 
 
 async def delete_auxiliary_document(doc_id: str) -> None:
     """Delete a document from persistent BM25 and GraphRAG indexes."""
     async with _index_lock:
+        errors: list[Exception] = []
         bm25 = get_bm25_retriever()
-        removed = await asyncio.to_thread(bm25.delete_document, doc_id)
-        if removed:
-            await asyncio.to_thread(bm25.save)
+        try:
+            removed = await asyncio.to_thread(bm25.delete_document, doc_id)
+            if removed:
+                await asyncio.to_thread(bm25.save)
+        except Exception as exc:
+            errors.append(exc)
+            logger.exception("Failed to delete BM25 document %s.", doc_id)
 
         graph = get_graph_engine()
-        await graph.delete_document_async(doc_id)
-        await asyncio.to_thread(graph.save, str(_graph_path()))
+        try:
+            await graph.delete_document_async(doc_id)
+            await asyncio.to_thread(graph.save, str(_graph_path()))
+        except Exception as exc:
+            errors.append(exc)
+            logger.exception("Failed to delete GraphRAG document %s.", doc_id)
+        if errors:
+            raise RuntimeError(
+                f"Failed to delete {len(errors)} auxiliary index backend(s)."
+            ) from errors[0]
 
 
 def reset_retrieval_service() -> None:

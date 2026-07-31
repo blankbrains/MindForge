@@ -7,6 +7,7 @@ import { useResearchStore } from "@/store/research-store";
 import { useSettingsStore } from "@/store/settings-store";
 
 interface CapturedConnection {
+  body: Record<string, unknown>;
   onEvent: (event: SSEEvent) => void;
   onComplete: () => void;
   onError: (error: Error) => void;
@@ -21,12 +22,13 @@ vi.mock("@/lib/sse-parser", () => ({
   createSSEConnection: vi.fn(
     (
       _url: string,
-      _body: unknown,
+      body: Record<string, unknown>,
       onEvent: (event: SSEEvent) => void,
       onComplete: () => void,
       onError: (error: Error) => void,
     ) => {
       const connection = {
+        body,
         onEvent,
         onComplete,
         onError,
@@ -40,9 +42,17 @@ vi.mock("@/lib/sse-parser", () => ({
 
 import { useResearchSession } from "@/hooks/use-research-session";
 
+async function flushCancellationRequest(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe("useResearchSession", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
     sseState.connections.length = 0;
     useResearchStore.getState().reset();
     useHistoryStore.setState({
@@ -54,13 +64,15 @@ describe("useResearchSession", () => {
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
-  it("ignores callbacks from a superseded SSE request", () => {
+  it("ignores callbacks from a superseded SSE request", async () => {
     const { result, unmount } = renderHook(() => useResearchSession());
 
     act(() => result.current.startResearch("first"));
     act(() => result.current.startResearch("second"));
+    await flushCancellationRequest();
 
     expect(sseState.connections).toHaveLength(2);
     expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
@@ -81,8 +93,14 @@ describe("useResearchSession", () => {
     unmount();
   });
 
-  it("fully clears the active run when the user cancels", () => {
+  it("fully clears the active run when the user cancels", async () => {
     const { result, unmount } = renderHook(() => useResearchSession());
+    let finishCancellation!: () => void;
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishCancellation = () => resolve({ ok: true } as Response);
+      }),
+    );
 
     act(() => result.current.startResearch("cancel me"));
     act(() => {
@@ -94,13 +112,26 @@ describe("useResearchSession", () => {
     });
 
     const state = useResearchStore.getState();
-    expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
+    expect(sseState.connections[0].abort).not.toHaveBeenCalled();
     expect(state.status).toBe("cancelled");
     expect(state.task).toBe("cancel me");
     expect(state.activeTask).toBe("");
     expect(state.startedAt).toBeNull();
     expect(state.planning).toBe(false);
     expect(state.phase).toBe("cancelled");
+    const requestId = sseState.connections[0].body.request_id;
+    expect(requestId).toEqual(expect.any(String));
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/query/cancel",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ request_id: requestId }),
+        keepalive: true,
+      }),
+    );
+    finishCancellation();
+    await flushCancellationRequest();
+    expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
 
     act(() => {
       sseState.connections[0].onEvent({
@@ -115,13 +146,14 @@ describe("useResearchSession", () => {
     unmount();
   });
 
-  it("interrupts the run when its page unmounts", () => {
+  it("interrupts the run when its page unmounts", async () => {
     const { result, unmount } = renderHook(() => useResearchSession());
 
     act(() => result.current.startResearch("navigate away"));
     expect(useResearchStore.getState().status).toBe("streaming");
 
     unmount();
+    await flushCancellationRequest();
 
     const state = useResearchStore.getState();
     expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
@@ -151,12 +183,13 @@ describe("useResearchSession", () => {
     unmount();
   });
 
-  it("ends the run and aborts the request at the configured timeout", () => {
+  it("ends the run and aborts the request at the configured timeout", async () => {
     useSettingsStore.setState({ researchTimeout: 30 });
     const { result, unmount } = renderHook(() => useResearchSession());
 
     act(() => result.current.startResearch("timeout test"));
     act(() => vi.advanceTimersByTime(30_000));
+    await flushCancellationRequest();
 
     const state = useResearchStore.getState();
     expect(sseState.connections[0].abort).toHaveBeenCalledOnce();

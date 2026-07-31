@@ -22,6 +22,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class QueryRequest(BaseModel):
     """Payload for submitting a research task."""
 
+    request_id: str | None = Field(
+        None,
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="Client-generated identifier used for explicit cancellation.",
+    )
     task: str = Field(
         ...,
         min_length=1,
@@ -29,6 +36,24 @@ class QueryRequest(BaseModel):
         description="Natural-language research task or question.",
     )
     stream: bool = Field(False, description="If true, use SSE streaming response.")
+
+
+class QueryCancelRequest(BaseModel):
+    """Payload for cancelling one active streaming research request."""
+
+    request_id: str = Field(
+        ...,
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
+class QueryCancelResponse(BaseModel):
+    """Cancellation acknowledgement for a streaming research request."""
+
+    request_id: str
+    cancelled: bool
 
 
 class QueryResponse(BaseModel):
@@ -39,6 +64,11 @@ class QueryResponse(BaseModel):
     report: str | None = None
     sources: list[dict[str, Any]] = Field(default_factory=list)
     quality_score: float | None = None
+    quality_status: Literal[
+        "evaluated",
+        "not_evaluated",
+        "evaluation_failed",
+    ] = "not_evaluated"
     latency_ms: float = 0.0
     cost_usd: float | None = None
     cost_status: str = "usage_unavailable"

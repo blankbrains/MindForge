@@ -68,6 +68,7 @@ def get_document(doc_id: str) -> dict[str, Any] | None:
             "index_strategy": record.index_strategy,
             "use_raptor": record.use_raptor,
             "use_graphrag": record.use_graphrag,
+            "error": record.error,
             "parser_metadata": dict(record.parser_metadata or {}),
         }
 
@@ -84,6 +85,7 @@ def list_documents() -> list[dict[str, Any]]:
     with SessionLocal() as db:
         records = (
             db.query(DocumentCatalog)
+            .filter(DocumentCatalog.status == "indexed")
             .order_by(
                 DocumentCatalog.updated_at.desc(),
                 DocumentCatalog.doc_id.asc(),

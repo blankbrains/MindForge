@@ -38,6 +38,12 @@ function normalizeCriticScore(value: unknown): CriticScore | null {
     issues: boundedTextList(score.issues),
     suggestions: boundedTextList(score.suggestions),
     should_refine: score.should_refine === true,
+    evaluation_status:
+      score.evaluation_status === "failed" ? "failed" : "evaluated",
+    evaluation_error:
+      typeof score.evaluation_error === "string"
+        ? score.evaluation_error.slice(0, 1_000)
+        : null,
   };
 }
 

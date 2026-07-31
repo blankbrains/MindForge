@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import json
 import threading
@@ -18,9 +19,9 @@ from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 
 from mindforge.agents.base import AgentResult
-from mindforge.agents.critic import CriticScore
+from mindforge.agents.critic import CriticAgent, CriticScore
 from mindforge.agents.orchestrator import Orchestrator
-from mindforge.agents.planner import ResearchPlan, SubTask
+from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
 from mindforge.api import routes
 from mindforge.api import server
 from mindforge.api.schemas import (
@@ -619,6 +620,7 @@ async def test_orchestrator_passes_dependency_context_and_cost() -> None:
     )
     orchestrator._settings = SimpleNamespace(
         agent=SimpleNamespace(
+            research_mode="fast",
             research_timeout=30,
             subtask_timeout=5,
             max_refine_rounds=0,
@@ -632,6 +634,7 @@ async def test_orchestrator_passes_dependency_context_and_cost() -> None:
     assert researcher.calls[0] == ("first", None)
     assert researcher.calls[1][0] == "second"
     assert "result for first" in (researcher.calls[1][1] or "")
+    assert (researcher.calls[1][1] or "").count("result for first") == 1
     assert result.cost_usd == pytest.approx(0.5)
     assert "cost_usd" not in result.token_usage
 
@@ -662,6 +665,573 @@ async def test_orchestrator_adds_semantic_memory_to_working_context() -> None:
     memory = await orchestrator._create_working_memory("task")
 
     assert "Prior verified research." in memory.get_context_string()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_rejects_cached_factual_answer_without_citations() -> None:
+    class EpisodicMemoryStub:
+        async def recall(self, task: str):
+            assert task == "什么是 RAG"
+            return AgentResult(
+                agent_name="orchestrator",
+                success=True,
+                output="RAG 是一种检索增强生成技术。",
+                data={"sources": []},
+                metadata={"outcome": "success"},
+            ).to_dict()
+
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._episodic_memory = EpisodicMemoryStub()
+
+    result = await orchestrator._recall_cached_result(
+        "什么是 RAG",
+        start_time=time.perf_counter(),
+    )
+
+    assert result is None
+
+
+def test_success_without_critic_is_marked_not_evaluated() -> None:
+    orchestrator = Orchestrator(
+        planner=SimpleNamespace(),
+        researcher=SimpleNamespace(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        llm=SimpleNamespace(llm_provider="test"),
+    )
+    plan = ResearchPlan(
+        plan_id="simple",
+        original_task="什么是异步编程",
+        subtasks=[SubTask(task_id="t1", description="什么是异步编程")],
+    )
+
+    result = orchestrator._build_success_result(
+        output="异步编程允许任务在等待期间让出执行权。",
+        plan=plan,
+        subtask_outputs=[
+            {
+                "task_id": "t1",
+                "description": "什么是异步编程",
+                "success": True,
+                "output": "异步编程允许任务在等待期间让出执行权。",
+                "sources": [],
+            }
+        ],
+        sources=[],
+        final_critic=None,
+        refine_count=0,
+        total_usage={"total_tokens": 10},
+        elapsed_ms=100,
+        total_cost_usd=0.001,
+        cost_status="estimated",
+    )
+
+    assert result.metadata["quality"] is None
+    assert result.metadata["quality_status"] == "not_evaluated"
+
+
+@pytest.mark.asyncio
+async def test_critic_failure_is_not_reported_as_a_numeric_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    critic = object.__new__(CriticAgent)
+    critic._model_name = "critic-model"
+    critic._provider_name = "test"
+
+    async def invalid_json(*_args, **_kwargs):
+        return SimpleNamespace(
+            content="not-json",
+            usage={"total_tokens": 4},
+            model="critic-model",
+        )
+
+    critic._chat = invalid_json
+    monkeypatch.setattr(
+        "mindforge.agents.critic.get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(critic_threshold=7.0),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindforge.agents.critic._estimate_cost_details",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            amount_usd=None,
+            status="pricing_unconfigured",
+        ),
+    )
+
+    score = await critic.evaluate(
+        task="研究问题",
+        draft="研究报告",
+    )
+
+    assert score.evaluation_status == "failed"
+    assert score.overall == 0.0
+    assert score.should_refine is False
+
+
+@pytest.mark.asyncio
+async def test_critic_missing_required_scores_is_an_evaluation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    critic = object.__new__(CriticAgent)
+    critic._model_name = "critic-model"
+    critic._provider_name = "test"
+
+    async def incomplete_score(*_args, **_kwargs):
+        return SimpleNamespace(
+            content='{"scores": {"overall": 8}}',
+            usage={},
+            model="critic-model",
+        )
+
+    critic._chat = incomplete_score
+    monkeypatch.setattr(
+        "mindforge.agents.critic.get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(critic_threshold=7.0),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindforge.agents.critic._estimate_cost_details",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            amount_usd=None,
+            status="usage_unavailable",
+        ),
+    )
+
+    score = await critic.evaluate(task="研究问题", draft="研究报告")
+
+    assert score.evaluation_status == "failed"
+    assert score.overall == 0.0
+
+
+def test_balanced_mode_does_not_treat_short_comparison_as_simple() -> None:
+    assert Orchestrator._is_simple_task("什么是异步编程") is True
+    assert Orchestrator._is_simple_task("Python 和 Java 有什么区别") is False
+    assert Orchestrator._is_simple_task("对比 RAG 与 GraphRAG 的优缺点") is False
+    assert Orchestrator._can_use_direct_plan("Python 和 Java 有什么区别") is False
+    assert Orchestrator._can_use_direct_plan("全面对比 Python 和 Java") is False
+
+
+@pytest.mark.asyncio
+async def test_balanced_comparison_uses_planner_instead_of_direct_plan() -> None:
+    calls: list[str] = []
+
+    class RecordingPlanner:
+        async def run(self, task: str) -> ResearchPlan:
+            calls.append(task)
+            return ResearchPlan(
+                plan_id="comparison",
+                original_task=task,
+                subtasks=[
+                    SubTask(task_id="python", description="研究 Python"),
+                    SubTask(task_id="java", description="研究 Java"),
+                    SubTask(
+                        task_id="compare",
+                        description="综合比较 Python 和 Java",
+                        dependencies=["python", "java"],
+                    ),
+                ],
+            )
+
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(research_mode="balanced")
+    )
+    orchestrator._planner_injected = False
+    orchestrator._planner = RecordingPlanner()
+
+    plan = await orchestrator._create_plan("Python 和 Java 有什么区别")
+
+    assert calls == ["Python 和 Java 有什么区别"]
+    assert plan.planner_status == "planned"
+    assert len(plan.subtasks) == 3
+
+
+@pytest.mark.asyncio
+async def test_planner_replans_under_decomposed_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner = object.__new__(PlannerAgent)
+    planner._model_name = "planner-model"
+    planner._provider_name = "test"
+    calls: list[list] = []
+
+    async def planned_response(messages, *_args, **_kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            subtasks = [
+                {
+                    "task_id": "t1",
+                    "description": "python和go的协程有什么区别？",
+                    "task_type": "research",
+                    "dependencies": [],
+                    "priority": 1,
+                    "subtopics": [],
+                }
+            ]
+        else:
+            subtasks = [
+                {
+                    "task_id": "t1",
+                    "description": "研究 Python 协程的机制与运行模型",
+                    "task_type": "research",
+                    "dependencies": [],
+                    "priority": 1,
+                    "subtopics": ["asyncio", "事件循环"],
+                },
+                {
+                    "task_id": "t2",
+                    "description": "研究 Go goroutine 的机制与运行模型",
+                    "task_type": "research",
+                    "dependencies": [],
+                    "priority": 1,
+                    "subtopics": ["goroutine", "GMP 调度"],
+                },
+                {
+                    "task_id": "t3",
+                    "description": "综合比较两者的调度、通信和适用场景",
+                    "task_type": "analysis",
+                    "dependencies": ["t1", "t2"],
+                    "priority": 2,
+                    "subtopics": ["调度差异", "并发模型", "选型"],
+                },
+            ]
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "reasoning": "根据问题结构规划。",
+                    "subtasks": subtasks,
+                },
+                ensure_ascii=False,
+            ),
+            usage={},
+            model="planner-model",
+        )
+
+    planner._chat = planned_response
+    monkeypatch.setattr(
+        "mindforge.agents.planner.get_settings",
+        lambda: SimpleNamespace(agent=SimpleNamespace(max_subtasks=5)),
+    )
+
+    plan = await planner.run("python和go的协程有什么区别？")
+
+    assert plan.planner_status == "planned"
+    assert len(calls) == 2
+    assert len(plan.subtasks) == 3
+    assert "Python 协程" in plan.subtasks[0].description
+    assert "Go goroutine" in plan.subtasks[1].description
+    assert plan.subtasks[2].dependencies == ["t1", "t2"]
+    assert "未通过质量校验" in calls[1][-1].content
+
+
+def test_planner_quality_validation_uses_task_shape() -> None:
+    simple_plan = ResearchPlan(
+        plan_id="simple",
+        original_task="什么是协程",
+        subtasks=[
+            SubTask(
+                task_id="t1",
+                description="什么是协程",
+                subtopics=["协程定义"],
+            )
+        ],
+    )
+    comparison_plan = ResearchPlan(
+        plan_id="comparison",
+        original_task="Python 和 Go 的协程有什么区别",
+        subtasks=[
+            SubTask(
+                task_id="t1",
+                description="研究 Python 协程",
+                subtopics=["asyncio"],
+            ),
+            SubTask(
+                task_id="t2",
+                description="研究 Go goroutine",
+                subtopics=["GMP 调度"],
+            ),
+            SubTask(
+                task_id="t3",
+                description="综合比较",
+                dependencies=["t1", "t2"],
+                subtopics=["机制差异"],
+            ),
+        ],
+    )
+    duplicate_plan = ResearchPlan(
+        plan_id="duplicate",
+        original_task="诊断接口超时的根因并修复",
+        subtasks=[
+            SubTask(task_id="t1", description="检查接口"),
+            SubTask(task_id="t2", description="检查接口"),
+        ],
+    )
+
+    assert PlannerAgent._quality_errors("什么是协程", simple_plan) == []
+    assert (
+        PlannerAgent._quality_errors(
+            "Python 和 Go 的协程有什么区别",
+            comparison_plan,
+        )
+        == []
+    )
+    assert any(
+        "描述重复" in error
+        for error in PlannerAgent._quality_errors(
+            "诊断接口超时的根因并修复",
+            duplicate_plan,
+        )
+    )
+    assert PlannerAgent._minimum_subtask_count("什么是协程") == 1
+    assert (
+        PlannerAgent._minimum_subtask_count(
+            "分析接口超时的原因、影响和解决方案"
+        )
+        == 3
+    )
+    assert (
+        PlannerAgent._minimum_subtask_count(
+            "为什么接口变慢，如何定位并修复？"
+        )
+        == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_planner_fallback_exposes_failure_and_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner = object.__new__(PlannerAgent)
+    planner._model_name = "planner-model"
+    planner._provider_name = "test"
+
+    async def invalid_json(*_args, **_kwargs):
+        return SimpleNamespace(
+            content="{invalid",
+            usage={"prompt_tokens": 12, "completion_tokens": 1},
+            model="planner-model",
+        )
+
+    planner._chat = invalid_json
+    monkeypatch.setattr(
+        "mindforge.agents.planner.get_settings",
+        lambda: SimpleNamespace(agent=SimpleNamespace(max_subtasks=5)),
+    )
+    monkeypatch.setattr(
+        "mindforge.agents.planner._estimate_cost_details",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            amount_usd=None,
+            status="pricing_unconfigured",
+        ),
+    )
+
+    plan = await planner.run("比较 Python 和 Java")
+    restored = ResearchPlan.from_dict(plan.to_dict())
+
+    assert plan.planner_status == "fallback"
+    assert plan.planner_error
+    assert len(plan.subtasks) == 1
+    assert restored.planner_status == "fallback"
+    assert restored.planner_error == plan.planner_error
+
+
+def test_balanced_single_subtask_comparison_still_runs_critic() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="balanced",
+            max_refine_rounds=0,
+        )
+    )
+    plan = ResearchPlan(
+        plan_id="comparison",
+        original_task="Python 和 Java 有什么区别",
+        subtasks=[
+            SubTask(
+                task_id="t1",
+                description="Python 和 Java 有什么区别",
+            )
+        ],
+    )
+
+    assert orchestrator._should_run_critic(
+        "Python 和 Java 有什么区别",
+        plan,
+    ) is True
+    assert orchestrator._max_refine_rounds(plan) == 0
+
+
+@pytest.mark.asyncio
+async def test_deep_mode_evaluates_once_when_refinement_is_disabled() -> None:
+    class Planner:
+        async def run(self, task: str) -> ResearchPlan:
+            return ResearchPlan(
+                plan_id="deep",
+                original_task=task,
+                subtasks=[SubTask(task_id="t1", description=task)],
+            )
+
+    class Researcher:
+        async def run(self, task: str, *, context=None) -> AgentResult:
+            del context
+            return AgentResult(agent_name="researcher", output=f"answer: {task}")
+
+    class Critic:
+        calls = 0
+
+        async def evaluate(self, **_kwargs) -> CriticScore:
+            self.calls += 1
+            return CriticScore(overall=8.0, should_refine=False)
+
+    critic = Critic()
+    orchestrator = Orchestrator(
+        planner=Planner(),
+        researcher=Researcher(),
+        synthesizer=SimpleNamespace(),
+        critic=critic,
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="deep",
+            max_refine_rounds=0,
+            research_timeout=10,
+            subtask_timeout=5,
+            queue_timeout=5,
+            research_context_max_chars=12_000,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+        observability=SimpleNamespace(enable_tracing=False),
+    )
+
+    result = await orchestrator.run("深入解释异步编程")
+
+    assert critic.calls == 1
+    assert result.metadata["quality"] == 8.0
+    assert result.metadata["quality_status"] == "evaluated"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_final_critic_score_after_refinement() -> None:
+    class Planner:
+        async def run(self, task: str) -> ResearchPlan:
+            return ResearchPlan(
+                plan_id="deep",
+                original_task=task,
+                subtasks=[SubTask(task_id="t1", description=task)],
+            )
+
+    class Researcher:
+        async def run(self, task: str, *, context=None) -> AgentResult:
+            del context
+            return AgentResult(agent_name="researcher", output=f"draft: {task}")
+
+    class Synthesizer:
+        async def synthesize(self, **_kwargs) -> AgentResult:
+            return AgentResult(agent_name="synthesizer", output="refined")
+
+    class Critic:
+        calls = 0
+
+        async def evaluate(self, **_kwargs) -> CriticScore:
+            self.calls += 1
+            if self.calls == 1:
+                return CriticScore(overall=5.0, should_refine=True)
+            return CriticScore(overall=8.5, should_refine=False)
+
+    orchestrator = Orchestrator(
+        planner=Planner(),
+        researcher=Researcher(),
+        synthesizer=Synthesizer(),
+        critic=Critic(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="deep",
+            max_refine_rounds=1,
+            research_timeout=10,
+            subtask_timeout=5,
+            queue_timeout=5,
+            sse_heartbeat_seconds=1,
+            stream_chunk_size=512,
+            research_context_max_chars=12_000,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+        observability=SimpleNamespace(enable_tracing=False),
+    )
+
+    events = [event async for event in orchestrator.stream_run("深入研究")]
+    feedback = [
+        event["score"].overall
+        for event in events
+        if event["type"] == "critic_feedback"
+    ]
+    result = next(event["result"] for event in events if event["type"] == "done")
+
+    assert feedback == [5.0, 8.5]
+    assert result.output == "refined"
+    assert result.metadata["quality"] == 8.5
+
+
+@pytest.mark.asyncio
+async def test_refinement_failure_keeps_the_last_valid_report() -> None:
+    class Planner:
+        async def run(self, task: str) -> ResearchPlan:
+            return ResearchPlan(
+                plan_id="refine-failure",
+                original_task=task,
+                subtasks=[SubTask(task_id="t1", description=task)],
+            )
+
+    class Researcher:
+        async def run(self, task: str, *, context=None) -> AgentResult:
+            del context
+            return AgentResult(agent_name="researcher", output=f"draft: {task}")
+
+    class Synthesizer:
+        async def synthesize(self, **kwargs) -> AgentResult:
+            assert kwargs["max_attempts"] == 1
+            raise asyncio.TimeoutError
+
+    class Critic:
+        async def evaluate(self, **_kwargs) -> CriticScore:
+            return CriticScore(overall=6.5, should_refine=True)
+
+    orchestrator = Orchestrator(
+        planner=Planner(),
+        researcher=Researcher(),
+        synthesizer=Synthesizer(),
+        critic=Critic(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="deep",
+            max_refine_rounds=1,
+            research_timeout=10,
+            subtask_timeout=5,
+            queue_timeout=5,
+            sse_heartbeat_seconds=1,
+            stream_chunk_size=512,
+            research_context_max_chars=12_000,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+        observability=SimpleNamespace(enable_tracing=False),
+    )
+
+    events = [event async for event in orchestrator.stream_run("深入研究")]
+    result = next(event["result"] for event in events if event["type"] == "done")
+
+    assert not any(event["type"] == "error" for event in events)
+    assert result.success is True
+    assert result.output == "draft: 深入研究"
+    assert result.metadata["outcome"] == "degraded"
+    assert result.metadata["quality"] == 6.5
+    assert result.metadata["refinement_status"] == "failed"
+    assert result.data["refinement_failure"]
 
 
 @pytest.mark.asyncio
@@ -722,6 +1292,38 @@ async def test_sync_and_stream_cache_restore_the_same_result() -> None:
     assert sync_result.metadata["cached_generation_cost_status"] == "estimated"
     assert sync_result.data["from_cache"] is True
     assert stream_result.data["from_cache"] is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_cached_zero_without_critic_is_normalized_to_unreviewed() -> None:
+    cached = AgentResult(
+        agent_name="orchestrator",
+        output="Legacy cached report.",
+        data={"critic_score": None, "sources": []},
+        metadata={"quality": 0.0, "outcome": "success"},
+    )
+
+    class MemoryStub:
+        async def recall(self, task: str):
+            assert task == "你好"
+            return cached.to_dict()
+
+    orchestrator = Orchestrator(
+        planner=SimpleNamespace(),
+        researcher=SimpleNamespace(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+        episodic_memory=MemoryStub(),
+    )
+
+    result = await orchestrator._recall_cached_result(
+        "你好",
+        start_time=time.perf_counter(),
+    )
+
+    assert result is not None
+    assert result.metadata["quality"] is None
+    assert result.metadata["quality_status"] == "not_evaluated"
 
 
 @pytest.mark.asyncio
@@ -969,6 +1571,7 @@ def test_collect_sources_deduplicates_and_reindexes() -> None:
     ]
 
     sources = Orchestrator._collect_sources(outputs)
+    Orchestrator._attach_citation_maps(outputs, sources)
 
     assert [source["url"] for source in sources] == [
         "https://a.example",
@@ -976,6 +1579,8 @@ def test_collect_sources_deduplicates_and_reindexes() -> None:
         "https://c.example",
     ]
     assert [source["index"] for source in sources] == [1, 2, 3]
+    assert outputs[0]["citation_map"] == {"1": 1, "2": 2}
+    assert outputs[1]["citation_map"] == {"1": 2, "2": 3}
 
 
 def test_code_executor_uses_isolated_subprocess() -> None:

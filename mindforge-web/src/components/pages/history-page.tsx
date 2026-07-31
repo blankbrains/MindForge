@@ -19,6 +19,12 @@ export function HistoryPage() {
   const {
     entries,
     loaded,
+    loading,
+    loadError,
+    page,
+    pageSize,
+    total,
+    serverTotal,
     loadHistory,
     loadEntry,
     removeEntry,
@@ -33,7 +39,7 @@ export function HistoryPage() {
   const detailRequestGenerationRef = useRef(0);
 
   useEffect(() => {
-    void loadHistory();
+    void loadHistory(1);
   }, [loadHistory]);
 
   const toggleEntry = async (id: number) => {
@@ -115,21 +121,40 @@ export function HistoryPage() {
             浏览过去的研究任务与结果
           </p>
         </div>
-        <EmptyState
-          icon={<Clock className="h-12 w-12" />}
-          title="暂无记录"
-          description="完成一个研究任务后，记录会自动出现在这里"
-        />
+        {loadError ? (
+          <div
+            role="alert"
+            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+          >
+            <p>历史记录加载失败，当前内容可能不是服务器最新状态。</p>
+            <button
+              type="button"
+              onClick={() => void loadHistory(page)}
+              disabled={loading}
+              className="mt-3 rounded-lg border border-red-300 px-3 py-1.5 font-medium transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-700 dark:hover:bg-red-900"
+            >
+              {loading ? "重试中…" : "重新加载"}
+            </button>
+          </div>
+        ) : (
+          <EmptyState
+            icon={<Clock className="h-12 w-12" />}
+            title="暂无记录"
+            description="完成一个研究任务后，记录会自动出现在这里"
+          />
+        )}
       </div>
     );
   }
+
+  const totalPages = Math.max(1, Math.ceil(serverTotal / pageSize));
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">研究历史</h1>
-          <p className="mt-1 text-text-muted">{entries.length} 条记录</p>
+          <p className="mt-1 text-text-muted">{total} 条记录</p>
         </div>
         <button
           type="button"
@@ -150,6 +175,22 @@ export function HistoryPage() {
           className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
         >
           {actionError}
+        </div>
+      )}
+      {loadError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+        >
+          <span>服务器历史加载失败，当前显示的是上次成功结果或本地记录。</span>
+          <button
+            type="button"
+            onClick={() => void loadHistory(page)}
+            disabled={loading}
+            className="rounded-lg border border-red-300 px-3 py-1.5 font-medium transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-700 dark:hover:bg-red-900"
+          >
+            {loading ? "重试中…" : "重新加载"}
+          </button>
         </div>
       )}
 
@@ -192,7 +233,8 @@ export function HistoryPage() {
                           {new Date(entry.created_at).toLocaleString()}
                         </span>
                       )}
-                      {entry.quality_score != null && (
+                      {entry.quality_score != null
+                        && entry.quality_score > 0 && (
                         <span
                           className={cn(
                             "rounded-full px-2 py-0.5 font-medium",
@@ -202,6 +244,16 @@ export function HistoryPage() {
                           )}
                         >
                           质量 {entry.quality_score.toFixed(1)}
+                        </span>
+                      )}
+                      {entry.quality_score == null && (
+                        <span className="rounded-full bg-surface-alt px-2 py-0.5 font-medium text-text-muted">
+                          未评审
+                        </span>
+                      )}
+                      {entry.quality_score === 0 && (
+                        <span className="rounded-full bg-surface-alt px-2 py-0.5 font-medium text-text-muted">
+                          评分状态未知
                         </span>
                       )}
                       {entry.model_used && (
@@ -268,6 +320,33 @@ export function HistoryPage() {
           );
         })}
       </div>
+
+      {totalPages > 1 && (
+        <nav
+          aria-label="历史记录分页"
+          className="flex items-center justify-between gap-4 border-t border-border pt-4"
+        >
+          <button
+            type="button"
+            onClick={() => void loadHistory(page - 1)}
+            disabled={page <= 1 || loading}
+            className="rounded-lg border border-border px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-alt disabled:opacity-50"
+          >
+            上一页
+          </button>
+          <span className="text-sm text-text-muted">
+            第 {page} / {totalPages} 页
+          </span>
+          <button
+            type="button"
+            onClick={() => void loadHistory(page + 1)}
+            disabled={page >= totalPages || loading}
+            className="rounded-lg border border-border px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-alt disabled:opacity-50"
+          >
+            下一页
+          </button>
+        </nav>
+      )}
 
       {deleteTargetId != null && (
         <Modal

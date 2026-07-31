@@ -61,7 +61,7 @@ class DeepSeekAdapter(BaseLLM):
 
     def __init__(
         self,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-flash",
         api_key: Optional[str] = None,
         base_url: str = DEEPSEEK_BASE_URL,
         max_retries: int = 0,

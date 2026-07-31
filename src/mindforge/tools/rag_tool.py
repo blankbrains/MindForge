@@ -224,7 +224,7 @@ class RAGTool(BaseTool):
                     "results": [],
                     "sources": [],
                     "total": 0,
-                    "quality": 0.0,
+                    "retrieval_quality": 0.0,
                     "intent": "conversation",
                 },
                 execution_time_ms=(time.perf_counter() - start) * 1000,

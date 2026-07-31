@@ -6,11 +6,12 @@ import time
 import uuid
 import logging
 import asyncio
+import inspect
 import os
 import shutil
 import tempfile
 import threading
-from contextlib import nullcontext
+from contextlib import aclosing, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Awaitable, Callable, Literal
@@ -37,6 +38,8 @@ from mindforge.api.schemas import (
     IndexJobResponse,
     IndexRequest,
     IndexResponse,
+    QueryCancelRequest,
+    QueryCancelResponse,
     QueryRequest,
     QueryResponse,
     LLMDiscoveredModel,
@@ -70,7 +73,7 @@ from mindforge.models.base import (
 from mindforge.services.health import get_health_monitor
 from mindforge.services.indexing import (
     IndexingCancelledError,
-    index_slot,
+    document_index_slot,
     remove_document_status,
     set_document_status,
 )
@@ -91,10 +94,32 @@ _orchestrator: Orchestrator | None = None
 _ORCHESTRATOR_LOCK = threading.Lock()
 _ENV_FILE_LOCK = threading.RLock()
 _SETTINGS_UPDATE_LOCK = threading.RLock()
+_RESEARCH_CANCELLATION_LOCK = threading.RLock()
+_ACTIVE_RESEARCH_CANCELLATIONS: dict[str, asyncio.Event] = {}
 IndexProgressCallback = Callable[
     [str, float, int, dict[str, float]],
     Awaitable[None],
 ]
+
+
+def _register_research_cancellation(
+    request_id: str,
+) -> asyncio.Event | None:
+    cancellation = asyncio.Event()
+    with _RESEARCH_CANCELLATION_LOCK:
+        if request_id in _ACTIVE_RESEARCH_CANCELLATIONS:
+            return None
+        _ACTIVE_RESEARCH_CANCELLATIONS[request_id] = cancellation
+    return cancellation
+
+
+def _unregister_research_cancellation(
+    request_id: str,
+    cancellation: asyncio.Event,
+) -> None:
+    with _RESEARCH_CANCELLATION_LOCK:
+        if _ACTIVE_RESEARCH_CANCELLATIONS.get(request_id) is cancellation:
+            _ACTIVE_RESEARCH_CANCELLATIONS.pop(request_id, None)
 
 
 async def _report_index_progress(
@@ -419,6 +444,10 @@ async def _index_parsed_document(
     progress_callback: IndexProgressCallback | None = None,
     timings: dict[str, float] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    completion_callback: Callable[
+        [list[DocumentChunk], bool, bool],
+        Awaitable[None],
+    ] | None = None,
 ) -> tuple[list[DocumentChunk], bool, bool]:
     """Run the complete, shared indexing pipeline for one parsed document."""
     stage_timings = timings if timings is not None else {}
@@ -612,7 +641,8 @@ async def _index_parsed_document(
                 len(raptor_points),
             )
         except Exception:
-            logger.exception("RAPTOR indexing skipped.")
+            logger.exception("RAPTOR indexing failed.")
+            raise
         finally:
             stage_timings["raptor"] = time.perf_counter() - started
             await _report_index_progress(
@@ -636,6 +666,14 @@ async def _index_parsed_document(
         }
         for chunk in chunks
     ]
+    async def commit_auxiliary_indexes(graphrag_applied: bool) -> None:
+        if completion_callback is not None:
+            await completion_callback(
+                chunks,
+                raptor_applied,
+                graphrag_applied,
+            )
+
     graphrag_applied = await index_auxiliary_documents(
         auxiliary_docs,
         graph_entity_llm=graph_entity_llm,
@@ -644,24 +682,115 @@ async def _index_parsed_document(
         progress_callback=progress_callback,
         timings=stage_timings,
         start_progress=94.0 if enable_raptor and raptor_llm else 88.0,
+        commit_callback=(
+            commit_auxiliary_indexes
+            if completion_callback is not None
+            else None
+        ),
     )
     return chunks, raptor_applied, graphrag_applied
 
 
-async def _rollback_document_index(doc_id: str) -> None:
+async def _rollback_document_index(
+    doc_id: str,
+    *,
+    include_auxiliary: bool = True,
+    include_assets: bool = True,
+) -> None:
     """Best-effort rollback for a partially indexed document."""
+    errors: list[Exception] = []
     try:
         await get_vector_store().delete(doc_id)
-        from mindforge.retrieval.service import delete_auxiliary_document
-        from mindforge.services.document_assets import remove_document_assets
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("Failed to roll back vector index for document %s.", doc_id)
 
-        await delete_auxiliary_document(doc_id)
-        await asyncio.to_thread(remove_document_assets, doc_id)
-    except Exception:
-        logger.exception(
-            "Failed to roll back partial index for document %s.",
+    if include_auxiliary:
+        try:
+            from mindforge.retrieval.service import delete_auxiliary_document
+
+            await delete_auxiliary_document(doc_id)
+        except Exception as exc:
+            errors.append(exc)
+            logger.exception(
+                "Failed to roll back auxiliary indexes for document %s.",
+                doc_id,
+            )
+
+    if include_assets:
+        try:
+            from mindforge.services.document_assets import remove_document_assets
+
+            await asyncio.to_thread(remove_document_assets, doc_id)
+        except Exception as exc:
+            errors.append(exc)
+            logger.exception("Failed to roll back assets for document %s.", doc_id)
+
+    if errors:
+        logger.error(
+            "Document %s rollback completed with %d failed backend(s).",
             doc_id,
+            len(errors),
         )
+
+
+async def _restore_previous_document(
+    *,
+    document: dict[str, Any],
+    vector_snapshot: list[Any],
+    asset_snapshot: Any,
+) -> None:
+    """Restore a previously indexed document after a failed rebuild."""
+    errors: list[Exception] = []
+    try:
+        await get_vector_store().restore_document(
+            str(document["doc_id"]),
+            vector_snapshot,
+            batch_size=get_settings().api.index_batch_size,
+        )
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception(
+            "Failed to restore vector snapshot for document %s.",
+            document["doc_id"],
+        )
+
+    if asset_snapshot is not None:
+        try:
+            from mindforge.services.document_assets import restore_document_assets
+
+            await asyncio.to_thread(restore_document_assets, asset_snapshot)
+        except Exception as exc:
+            errors.append(exc)
+            logger.exception(
+                "Failed to restore asset snapshot for document %s.",
+                document["doc_id"],
+            )
+
+    try:
+        await set_document_status(
+            doc_id=str(document["doc_id"]),
+            filename=str(document["filename"]),
+            status=str(document["status"]),
+            chunk_count=int(document["chunk_count"]),
+            index_signature=document.get("index_signature"),
+            index_strategy=str(document.get("index_strategy") or "auto"),
+            use_raptor=bool(document.get("use_raptor")),
+            use_graphrag=bool(document.get("use_graphrag")),
+            error=document.get("error"),
+            parser_metadata=dict(document.get("parser_metadata") or {}),
+        )
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception(
+            "Failed to restore catalog snapshot for document %s.",
+            document["doc_id"],
+        )
+
+    if errors:
+        raise RuntimeError(
+            f"Failed to restore {len(errors)} document backend(s)."
+        ) from errors[0]
 
 
 async def _index_with_lifecycle(
@@ -679,23 +808,45 @@ async def _index_with_lifecycle(
 ) -> tuple[list[DocumentChunk], bool, bool]:
     """Index one document under a bounded slot and persist its state."""
     from mindforge.services.indexing import build_index_signature
+    from mindforge.repositories.documents import get_document
 
     index_signature = build_index_signature(
         strategy=strategy,
         use_raptor=use_raptor,
         use_graphrag=use_graphrag,
     )
-    await set_document_status(
-        doc_id=parsed.doc_id,
-        filename=source,
-        status="indexing",
-        index_strategy=strategy,
-        use_raptor=use_raptor,
-        use_graphrag=use_graphrag,
-        parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
-    )
+    previous_document: dict[str, Any] | None = None
+    vector_snapshot: list[Any] = []
+    asset_snapshot: Any = None
+    lifecycle_started = False
     try:
-        async with index_slot():
+        async with document_index_slot(parsed.doc_id):
+            candidate = await asyncio.to_thread(get_document, parsed.doc_id)
+            if candidate is not None and candidate.get("status") == "indexed":
+                previous_document = candidate
+                vector_snapshot = await get_vector_store().snapshot_document(
+                    parsed.doc_id
+                )
+                if source_path is not None:
+                    from mindforge.services.document_assets import (
+                        snapshot_document_assets,
+                    )
+
+                    asset_snapshot = await asyncio.to_thread(
+                        snapshot_document_assets,
+                        parsed.doc_id,
+                    )
+
+            await set_document_status(
+                doc_id=parsed.doc_id,
+                filename=source,
+                status="indexing",
+                index_strategy=strategy,
+                use_raptor=use_raptor,
+                use_graphrag=use_graphrag,
+                parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
+            )
+            lifecycle_started = True
             if source_path is not None:
                 from mindforge.services.document_assets import (
                     DocumentAssetCancelledError,
@@ -732,6 +883,26 @@ async def _index_with_lifecycle(
                 )
                 if cancelled is not None and cancelled():
                     raise IndexingCancelledError("Indexing was cancelled.")
+
+            async def complete_index(
+                completed_chunks: list[DocumentChunk],
+                applied_raptor: bool,
+                applied_graphrag: bool,
+            ) -> None:
+                await set_document_status(
+                    doc_id=parsed.doc_id,
+                    filename=source,
+                    status="indexed",
+                    chunk_count=len(completed_chunks),
+                    index_signature=index_signature,
+                    index_strategy=strategy,
+                    use_raptor=applied_raptor,
+                    use_graphrag=applied_graphrag,
+                    parser_metadata=dict(
+                        getattr(parsed, "metadata", {}) or {}
+                    ),
+                )
+
             (
                 chunks,
                 applied_raptor,
@@ -746,42 +917,72 @@ async def _index_with_lifecycle(
                 progress_callback=progress_callback,
                 timings=timings,
                 cancelled=cancelled,
+                completion_callback=complete_index,
             )
     except (asyncio.CancelledError, IndexingCancelledError):
-        await _rollback_document_index(parsed.doc_id)
-        await set_document_status(
-            doc_id=parsed.doc_id,
-            filename=source,
-            status="cancelled",
-            index_strategy=strategy,
-            use_raptor=use_raptor,
-            use_graphrag=use_graphrag,
-        )
+        if lifecycle_started:
+            await _rollback_document_index(
+                parsed.doc_id,
+                include_auxiliary=previous_document is None,
+                include_assets=source_path is not None,
+            )
+            if previous_document is not None:
+                await _restore_previous_document(
+                    document=previous_document,
+                    vector_snapshot=vector_snapshot,
+                    asset_snapshot=asset_snapshot,
+                )
+            else:
+                await set_document_status(
+                    doc_id=parsed.doc_id,
+                    filename=source,
+                    status="cancelled",
+                    index_strategy=strategy,
+                    use_raptor=use_raptor,
+                    use_graphrag=use_graphrag,
+                )
         raise
     except Exception as exc:
-        await _rollback_document_index(parsed.doc_id)
-        await set_document_status(
-            doc_id=parsed.doc_id,
-            filename=source,
-            status="failed",
-            index_strategy=strategy,
-            use_raptor=use_raptor,
-            use_graphrag=use_graphrag,
-            error=str(exc)[:2000],
-        )
+        if lifecycle_started:
+            await _rollback_document_index(
+                parsed.doc_id,
+                include_auxiliary=previous_document is None,
+                include_assets=source_path is not None,
+            )
+            if previous_document is not None:
+                await _restore_previous_document(
+                    document=previous_document,
+                    vector_snapshot=vector_snapshot,
+                    asset_snapshot=asset_snapshot,
+                )
+            else:
+                await set_document_status(
+                    doc_id=parsed.doc_id,
+                    filename=source,
+                    status="failed",
+                    index_strategy=strategy,
+                    use_raptor=use_raptor,
+                    use_graphrag=use_graphrag,
+                    error=str(exc)[:2000],
+                )
         raise
+    finally:
+        if asset_snapshot is not None:
+            try:
+                from mindforge.services.document_assets import (
+                    discard_document_asset_snapshot,
+                )
 
-    await set_document_status(
-        doc_id=parsed.doc_id,
-        filename=source,
-        status="indexed",
-        chunk_count=len(chunks),
-        index_signature=index_signature,
-        index_strategy=strategy,
-        use_raptor=applied_raptor,
-        use_graphrag=applied_graphrag,
-        parser_metadata=dict(getattr(parsed, "metadata", {}) or {}),
-    )
+                await asyncio.to_thread(
+                    discard_document_asset_snapshot,
+                    asset_snapshot,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to discard asset snapshot for document %s.",
+                    parsed.doc_id,
+                    exc_info=True,
+                )
     return chunks, applied_raptor, applied_graphrag
 
 
@@ -883,6 +1084,27 @@ def _research_trace_context(task: str, *, transport: str):
         return nullcontext(None)
 
 
+def _call_orchestrator_method(
+    orchestrator: Any,
+    method_name: str,
+    task: str,
+) -> Any:
+    """Call an orchestrator entry point without creating a second root trace."""
+    method = getattr(orchestrator, method_name)
+    try:
+        parameters = inspect.signature(method).parameters.values()
+        supports_trace_control = any(
+            parameter.name == "create_root_trace"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        supports_trace_control = False
+    if supports_trace_control:
+        return method(task, create_root_trace=False)
+    return method(task)
+
+
 def _finish_research_trace(
     span: Any,
     *,
@@ -932,7 +1154,11 @@ async def _execute_query_non_stream(
     if llm_available:
         try:
             orch = await asyncio.to_thread(get_orchestrator)
-            result = await orch.run(body.task)
+            result = await _call_orchestrator_method(
+                orch,
+                "run",
+                body.task,
+            )
             if not result.success:
                 primary_failure = result
                 primary_failure_reason = (
@@ -948,7 +1174,20 @@ async def _execute_query_non_stream(
                     trace_id=trace_id,
                     report=result.output,
                     sources=list(result.data.get("sources", [])),
-                    quality_score=float(result.metadata.get("quality", 0)),
+                    quality_score=(
+                        float(result.metadata["quality"])
+                        if isinstance(
+                            result.metadata.get("quality"),
+                            (int, float),
+                        )
+                        else None
+                    ),
+                    quality_status=str(
+                        result.metadata.get(
+                            "quality_status",
+                            "not_evaluated",
+                        )
+                    ),
                     latency_ms=round(latency, 2),
                     cost_usd=(
                         round(float(cost_value), 10)
@@ -1016,8 +1255,9 @@ async def _execute_query_non_stream(
             report=result.output,
             sources=list(result_data.get("sources", [])),
             quality_score=None,
+            quality_status="not_evaluated",
             latency_ms=round(latency, 2),
-            cost_usd=primary_failure.cost_usd if primary_failure else 0.0,
+            cost_usd=primary_failure.cost_usd if primary_failure else None,
             cost_status=(
                 primary_failure.cost_status
                 if primary_failure
@@ -1040,34 +1280,76 @@ async def _execute_query_non_stream(
         ) from exc
 
 
+@router.post("/query/cancel", response_model=QueryCancelResponse)
+async def cancel_query(body: QueryCancelRequest) -> QueryCancelResponse:
+    """Cancel one active streaming research request."""
+    with _RESEARCH_CANCELLATION_LOCK:
+        cancellation = _ACTIVE_RESEARCH_CANCELLATIONS.get(body.request_id)
+    if cancellation is None:
+        return QueryCancelResponse(
+            request_id=body.request_id,
+            cancelled=False,
+        )
+    cancellation.set()
+    return QueryCancelResponse(
+        request_id=body.request_id,
+        cancelled=True,
+    )
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query(body: QueryRequest):
     """Submit a research task. Falls back to retrieval-only if LLM is unavailable."""
     start = time.time()
-    llm_available = await asyncio.to_thread(has_llm_credentials)
 
     if body.stream:
-        orch = None
-        if llm_available:
-            try:
-                orch = await asyncio.to_thread(get_orchestrator)
-            except LLMConfigurationError as exc:
-                logger.warning(
-                    "Configured Agent provider could not initialize; "
-                    "using retrieval fallback: %s",
-                    exc,
+        request_id = body.request_id or uuid.uuid4().hex
+        cancellation = _register_research_cancellation(request_id)
+        if cancellation is None:
+            raise HTTPException(
+                status_code=409,
+                detail="A research request with this request_id is already active.",
+            )
+        try:
+            llm_available = await asyncio.to_thread(has_llm_credentials)
+            orch = None
+            if llm_available:
+                try:
+                    orch = await asyncio.to_thread(get_orchestrator)
+                except LLMConfigurationError as exc:
+                    logger.warning(
+                        "Configured Agent provider could not initialize; "
+                        "using retrieval fallback: %s",
+                        exc,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Agent initialization failed for SSE; "
+                        "using retrieval fallback."
+                    )
+            else:
+                logger.info(
+                    "No LLM credentials configured; using retrieval-only SSE."
                 )
-            except Exception:
-                logger.exception(
-                    "Agent initialization failed for SSE; using retrieval fallback."
-                )
-        else:
-            logger.info("No LLM credentials configured; using retrieval-only SSE.")
-        return StreamingResponse(
-            _stream_response(orch, body.task),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+            return StreamingResponse(
+                _stream_response(
+                    orch,
+                    body.task,
+                    request_id=request_id,
+                    cancellation=cancellation,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-MindForge-Request-ID": request_id,
+                },
+            )
+        except BaseException:
+            _unregister_research_cancellation(request_id, cancellation)
+            raise
+
+    llm_available = await asyncio.to_thread(has_llm_credentials)
 
     with _research_trace_context(body.task, transport="rest") as trace_span:
         if trace_span is not None:
@@ -1318,21 +1600,45 @@ async def list_documents():
 @router.delete("/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str):
     """Delete a document from Qdrant."""
-    store = get_vector_store()
+    errors: list[Exception] = []
     try:
-        await store.delete(doc_id)
+        await get_vector_store().delete(doc_id)
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("Vector deletion failed for document %s.", doc_id)
+    try:
         from mindforge.retrieval.service import delete_auxiliary_document
-        from mindforge.services.document_assets import remove_document_assets
 
         await delete_auxiliary_document(doc_id)
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("Auxiliary deletion failed for document %s.", doc_id)
+    try:
+        from mindforge.services.document_assets import remove_document_assets
+
         await asyncio.to_thread(remove_document_assets, doc_id)
-        await remove_document_status(doc_id)
-    except Exception:
-        logger.exception("Delete failed for document %s.", doc_id)
+    except Exception as exc:
+        errors.append(exc)
+        logger.exception("Asset deletion failed for document %s.", doc_id)
+    if errors:
         raise HTTPException(
             status_code=503,
-            detail="Knowledge base is temporarily unavailable.",
-        )
+            detail=(
+                "Document deletion was incomplete; retry to finish cleaning "
+                "all storage backends."
+            ),
+        ) from errors[0]
+    try:
+        await remove_document_status(doc_id)
+    except Exception as exc:
+        logger.exception("Catalog deletion failed for document %s.", doc_id)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Document data was removed, but the catalog update failed; "
+                "retry the deletion."
+            ),
+        ) from exc
     return None
 
 
@@ -1493,7 +1799,23 @@ async def upload_document(
 
 def _stored_provider_api_key(provider: LLMProviderName) -> str:
     """Resolve a provider key without returning it to the browser."""
-    settings_key = get_settings().llm.get_api_key(provider).strip()
+    llm_settings = get_settings().llm
+    get_api_key = getattr(llm_settings, "get_api_key", None)
+    settings_key = (
+        get_api_key(provider)
+        if callable(get_api_key)
+        else getattr(
+            llm_settings,
+            {
+                "openai": "openai_api_key",
+                "deepseek": "deepseek_api_key",
+                "openai_compatible": "compatible_api_key",
+                "local": "local_api_key",
+            }[provider],
+            "",
+        )
+    )
+    settings_key = str(settings_key or "").strip()
     try:
         from mindforge.db import (
             ApiKey,
@@ -1531,6 +1853,19 @@ async def discover_provider_models(
     body: LLMModelDiscoveryRequest,
 ) -> LLMModelDiscoveryResponse:
     """Fetch model IDs using unsaved provider connection values."""
+    settings = get_settings()
+    if body.use_stored_api_key:
+        configured_base_url = (
+            settings.llm.get_base_url(body.provider) or ""
+        ).rstrip("/")
+        if body.base_url.rstrip("/") != configured_base_url:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A stored API key may only be used with the provider's "
+                    "saved Base URL. Save the new URL with a reconfirmed key first."
+                ),
+            )
     api_key = (
         _stored_provider_api_key(body.provider)
         if body.use_stored_api_key
@@ -1545,7 +1880,6 @@ async def discover_provider_models(
             detail="请先填写或保存该 Provider 的 API Key。",
         )
 
-    settings = get_settings()
     try:
         models, truncated = await discover_models(
             base_url=body.base_url,
@@ -1972,6 +2306,63 @@ def _update_settings_locked(body: SettingsUpdateRequest):
 
         for provider_update in provider_updates:
             provider = provider_update.provider
+            get_base_url = getattr(current_settings.llm, "get_base_url", None)
+            current_base_url = (
+                (
+                    get_base_url(provider)
+                    if callable(get_base_url)
+                    else getattr(
+                        current_settings.llm,
+                        {
+                            "openai": "openai_base_url",
+                            "deepseek": "deepseek_base_url",
+                            "openai_compatible": "compatible_base_url",
+                            "local": "local_base_url",
+                        }[provider],
+                        "",
+                    )
+                )
+                or ""
+            ).rstrip("/")
+            requested_base_url = (
+                provider_update.base_url.rstrip("/")
+                if provider_update.base_url is not None
+                else current_base_url
+            )
+            key_reconfirmed = (
+                provider_update.api_key is not None
+                and not provider_update.api_key.startswith("***")
+            )
+            get_api_key = getattr(current_settings.llm, "get_api_key", None)
+            configured_key = (
+                get_api_key(provider)
+                if callable(get_api_key)
+                else getattr(
+                    current_settings.llm,
+                    {
+                        "openai": "openai_api_key",
+                        "deepseek": "deepseek_api_key",
+                        "openai_compatible": "compatible_api_key",
+                        "local": "local_api_key",
+                    }[provider],
+                    "",
+                )
+            )
+            existing_key = str(configured_key or "").strip()
+            if not existing_key:
+                existing_key = _stored_provider_api_key(provider)
+            if (
+                requested_base_url != current_base_url
+                and existing_key
+                and not key_reconfirmed
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Changing a Provider Base URL requires re-entering "
+                        "or explicitly clearing its API key."
+                    ),
+                )
             base_url_keys = {
                 "openai": "LLM_OPENAI_BASE_URL",
                 "deepseek": "LLM_DEEPSEEK_BASE_URL",
@@ -2626,23 +3017,51 @@ def _serialize_event(event: dict) -> dict:
 async def _stream_response(
     orch: Orchestrator | None,
     task: str,
+    *,
+    request_id: str | None = None,
+    cancellation: asyncio.Event | None = None,
 ) -> AsyncGenerator[bytes, None]:
     """Stream SSE bytes while one producer task owns the trace context."""
     chunk_queue: asyncio.Queue[bytes | object] = asyncio.Queue()
     stream_finished = object()
 
     async def pump_chunks() -> None:
-        try:
-            async for chunk in _stream_response_events(orch, task):
-                chunk_queue.put_nowait(chunk)
-        finally:
-            chunk_queue.put_nowait(stream_finished)
+        async with aclosing(_stream_response_events(orch, task)) as events:
+            try:
+                async for chunk in events:
+                    chunk_queue.put_nowait(chunk)
+            finally:
+                chunk_queue.put_nowait(stream_finished)
 
-    producer_task = asyncio.create_task(pump_chunks())
-    await asyncio.sleep(0)
+    producer_task: asyncio.Task[None] | None = None
+    cancellation_task: asyncio.Task[bool] | None = None
+    chunk_task: asyncio.Task[bytes | object] | None = None
     try:
+        producer_task = asyncio.create_task(pump_chunks())
+        if cancellation is not None:
+            cancellation_task = asyncio.create_task(cancellation.wait())
+        # A client can disconnect immediately after receiving response headers.
+        # Keep startup inside the cleanup boundary so the producer cannot
+        # outlive its SSE connection.
+        await asyncio.sleep(0)
         while True:
-            chunk = await chunk_queue.get()
+            chunk_task = asyncio.create_task(chunk_queue.get())
+            if cancellation_task is not None:
+                done, _pending = await asyncio.wait(
+                    {chunk_task, cancellation_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancellation_task in done:
+                    if not chunk_task.done():
+                        chunk_task.cancel()
+                        await asyncio.gather(
+                            chunk_task,
+                            return_exceptions=True,
+                        )
+                    chunk_task = None
+                    return
+            chunk = await chunk_task
+            chunk_task = None
             if chunk is stream_finished:
                 await producer_task
                 return
@@ -2650,9 +3069,17 @@ async def _stream_response(
                 raise RuntimeError("SSE producer returned an invalid chunk.")
             yield chunk
     finally:
-        if not producer_task.done():
+        if chunk_task is not None and not chunk_task.done():
+            chunk_task.cancel()
+            await asyncio.gather(chunk_task, return_exceptions=True)
+        if cancellation_task is not None and not cancellation_task.done():
+            cancellation_task.cancel()
+            await asyncio.gather(cancellation_task, return_exceptions=True)
+        if producer_task is not None and not producer_task.done():
             producer_task.cancel()
             await asyncio.gather(producer_task, return_exceptions=True)
+        if request_id is not None and cancellation is not None:
+            _unregister_research_cancellation(request_id, cancellation)
 
 
 async def _stream_response_events(
@@ -2681,61 +3108,76 @@ async def _stream_response_events(
         fallback_enabled = get_settings().agent.fallback_enabled
         if orch is not None:
             try:
-                async for event in orch.stream_run(task):
-                    if trace_id:
-                        event = {**event, "trace_id": trace_id}
-                    if event.get("type") == "done":
-                        result = event.get("result")
-                        success = (
-                            result.success
-                            if isinstance(result, AgentResult)
-                            else (
-                                result.get("success")
-                                if isinstance(result, dict)
-                                else None
-                            )
-                        )
-                        if success is False:
-                            primary_failure = (
-                                result if isinstance(result, AgentResult) else None
-                            )
-                            primary_failure_reason = (
-                                result.output
+                research_stream_source = _call_orchestrator_method(
+                    orch,
+                    "stream_run",
+                    task,
+                )
+                async with aclosing(research_stream_source) as research_stream:
+                    async for event in research_stream:
+                        if trace_id:
+                            event = {**event, "trace_id": trace_id}
+                        if event.get("type") == "done":
+                            result = event.get("result")
+                            success = (
+                                result.success
                                 if isinstance(result, AgentResult)
-                                else str(result.get("output", ""))
+                                else (
+                                    result.get("success")
+                                    if isinstance(result, dict)
+                                    else None
+                                )
                             )
-                            primary_failure_reason = (
-                                primary_failure_reason
-                                or "Agent pipeline returned an unsuccessful result."
+                            if success is False:
+                                primary_failure = (
+                                    result
+                                    if isinstance(result, AgentResult)
+                                    else None
+                                )
+                                primary_failure_reason = (
+                                    result.output
+                                    if isinstance(result, AgentResult)
+                                    else str(result.get("output", ""))
+                                )
+                                primary_failure_reason = (
+                                    primary_failure_reason
+                                    or (
+                                        "Agent pipeline returned an "
+                                        "unsuccessful result."
+                                    )
+                                )
+                                use_retrieval_fallback = fallback_enabled
+                                if not fallback_enabled:
+                                    completed_result = result
+                                    yield (
+                                        "data: "
+                                        f"{json.dumps(_serialize_event(event), ensure_ascii=False)}"
+                                        "\n\n"
+                                    ).encode()
+                                break
+                            completed_result = result
+                        elif event.get("type") == "error":
+                            primary_failure_reason = str(
+                                event.get("content") or "研究任务执行失败。"
                             )
                             use_retrieval_fallback = fallback_enabled
-                            if not fallback_enabled:
-                                completed_result = result
-                                yield f"data: {json.dumps(_serialize_event(event), ensure_ascii=False)}\n\n".encode()
-                            break
-                        completed_result = result
-                    elif event.get("type") == "error":
-                        primary_failure_reason = str(
-                            event.get("content") or "研究任务执行失败。"
-                        )
-                        use_retrieval_fallback = fallback_enabled
-                        if fallback_enabled:
-                            continue
-                    try:
-                        payload = json.dumps(
-                            _serialize_event(event),
-                            ensure_ascii=False,
-                        )
-                    except TypeError:
-                        payload = json.dumps(
-                            {
-                                "type": "info",
-                                "content": str(event)[:200],
-                                "trace_id": trace_id,
-                            },
-                            ensure_ascii=False,
-                        )
-                    yield f"data: {payload}\n\n".encode()
+                            if fallback_enabled:
+                                continue
+                        try:
+                            payload = json.dumps(
+                                _serialize_event(event),
+                                ensure_ascii=False,
+                            )
+                        except TypeError:
+                            payload = json.dumps(
+                                {
+                                    "type": "info",
+                                    "content": str(event)[:200],
+                                    "trace_id": trace_id,
+                                },
+                                ensure_ascii=False,
+                            )
+                        yield f"data: {payload}\n\n".encode()
             except Exception as exc:
                 primary_failure_reason = str(exc)
                 logger.warning(
@@ -2772,7 +3214,7 @@ async def _stream_response_events(
                     cost_usd = (
                         primary_failure.cost_usd
                         if primary_failure is not None
-                        else 0.0
+                        else None
                     )
                     cost_status = (
                         primary_failure.cost_status
@@ -2797,6 +3239,7 @@ async def _stream_response_events(
                         },
                         "metadata": {
                             "quality": None,
+                            "quality_status": "not_evaluated",
                             "retrieval_quality": float(
                                 result_data.get("retrieval_quality", 0.0)
                             ),
