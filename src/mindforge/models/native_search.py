@@ -6,7 +6,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
 
@@ -20,6 +20,14 @@ _MARKDOWN_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 _RAW_URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+", re.IGNORECASE)
+_GENERIC_SOURCE_TITLES = frozenset(
+    {
+        "",
+        "untitled",
+        "web",
+        "web source",
+    }
+)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -143,6 +151,57 @@ def _source_candidates(
     return candidates
 
 
+def _source_evidence(text: str) -> dict[str, str]:
+    evidence_by_url: dict[str, str] = {}
+    for block in re.split(r"\n\s*\n", text):
+        normalized_block = block.strip()
+        if not normalized_block:
+            continue
+        raw_urls = [
+            url
+            for _title, url in _MARKDOWN_LINK_RE.findall(normalized_block)
+        ]
+        raw_urls.extend(_RAW_URL_RE.findall(normalized_block))
+        for raw_url in raw_urls:
+            url = _valid_public_url(raw_url)
+            if not url:
+                continue
+            existing = evidence_by_url.get(url)
+            if existing == normalized_block:
+                continue
+            evidence_by_url[url] = (
+                f"{existing}\n\n{normalized_block}"[:4000]
+                if existing
+                else normalized_block[:4000]
+            )
+    return evidence_by_url
+
+
+def _is_generic_source_title(value: str) -> bool:
+    return value.strip().casefold() in _GENERIC_SOURCE_TITLES
+
+
+def _derived_source_title(url: str) -> str:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").removeprefix("www.")
+    path_parts = [
+        unquote(part).strip()
+        for part in parsed.path.split("/")
+        if part.strip()
+    ]
+    slug = path_parts[-1] if path_parts else ""
+    slug = re.sub(r"\.(?:html?|php|aspx?)$", "", slug, flags=re.IGNORECASE)
+    if (
+        not slug
+        or slug.casefold() in {"article", "detail", "index", "page"}
+        or slug.isdigit()
+    ):
+        return host or "Web source"
+    readable = re.sub(r"[-_]+", " ", slug)
+    readable = re.sub(r"\s+", " ", readable).strip()
+    return f"{host} - {readable}" if host and readable else (host or readable)
+
+
 def normalize_responses_web_search(
     response: Any,
     *,
@@ -157,25 +216,40 @@ def normalize_responses_web_search(
         else _message_text(payload)
     )
     sources: list[dict[str, Any]] = []
-    seen_urls: set[str] = set()
-    evidence = text[:4000]
+    sources_by_url: dict[str, dict[str, Any]] = {}
+    evidence_by_url = _source_evidence(text)
     for title, raw_url in _source_candidates(payload, text):
         url = _valid_public_url(raw_url)
-        if not url or url in seen_urls:
+        if not url:
             continue
-        seen_urls.add(url)
-        sources.append(
-            {
-                "index": len(sources) + 1,
-                "title": title.strip()[:500] or "Web source",
-                "url": url,
-                "content": evidence,
-                "source": "web",
-                "backend": f"{provider}:native",
-            }
-        )
+        normalized_title = title.strip()[:500] or "Web source"
+        existing = sources_by_url.get(url)
+        if existing is not None:
+            if (
+                _is_generic_source_title(str(existing.get("title") or ""))
+                and not _is_generic_source_title(normalized_title)
+            ):
+                existing["title"] = normalized_title
+            if not existing.get("content") and evidence_by_url.get(url):
+                existing["content"] = evidence_by_url[url]
+            continue
         if len(sources) >= max_results:
-            break
+            continue
+        source = {
+            "index": len(sources) + 1,
+            "title": normalized_title,
+            "url": url,
+            "content": evidence_by_url.get(url, ""),
+            "source": "web",
+            "backend": f"{provider}:native",
+            "verification_mode": "provider_native",
+        }
+        sources.append(source)
+        sources_by_url[url] = source
+
+    for source in sources:
+        if _is_generic_source_title(str(source.get("title") or "")):
+            source["title"] = _derived_source_title(str(source["url"]))
 
     return NativeWebSearchResult(
         text=text,
@@ -183,7 +257,7 @@ def normalize_responses_web_search(
         usage=normalize_token_usage(payload.get("usage")),
         model=str(payload.get("model") or ""),
         backend=f"{provider}:native",
-        answer_ready=True,
+        answer_ready=False,
     )
 
 
@@ -199,9 +273,13 @@ async def responses_web_search(
 ) -> NativeWebSearchResult:
     prompt = (
         "Use web search to gather current, verifiable evidence for the "
-        "following query. Respond in the query's language. Include the exact "
-        "source URLs as Markdown links, keep the evidence concise, and do not "
-        f"return more than {max_results} distinct sources.\n\nQuery: {query}"
+        "following query. This is an evidence-collection step, not the final "
+        "answer. Respond in the query's language with compact, complete "
+        "evidence bullets, each paired with its exact source URL as a "
+        "Markdown link. Cover all compared subjects and major decision "
+        "dimensions before adding detail. Do not start a long report or leave "
+        "an unfinished section. Return no more than "
+        f"{max_results} distinct sources.\n\nQuery: {query}"
     )
     request: dict[str, Any] = {
         "model": model,

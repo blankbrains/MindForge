@@ -205,6 +205,11 @@ class CriticAgent(BaseAgent):
                     source_text += f"\nURL: {url}"
                 if evidence:
                     source_text += f"\n证据: {evidence}"
+                elif s.get("verification_mode") == "provider_native":
+                    source_text += (
+                        "\n证据类型: 模型供应商原生搜索返回的来源 URL 映射，"
+                        "未附网页正文摘录；不要将其视为重复正文或完整页面证据。"
+                    )
                 bounded = source_text[:remaining]
                 src_lines.append(bounded)
                 remaining -= len(bounded)
@@ -224,18 +229,51 @@ class CriticAgent(BaseAgent):
         ]
 
         result: ChatResult | None = None
+        total_usage: dict[str, int] = {}
+        last_parse_error: Exception | None = None
         try:
-            result = await self._chat(
-                messages,
-                response_format={"type": "json_object"},
-                temperature=0.2,
-            )
-
-            raw = result.content.strip()
-            score_dict = json.loads(raw)
-            _validate_score_payload(score_dict)
+            score_dict: dict[str, Any] | None = None
+            for attempt in range(2):
+                result = await self._chat(
+                    messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                )
+                for key, value in (result.usage or {}).items():
+                    if isinstance(value, (int, float)) and not isinstance(
+                        value,
+                        bool,
+                    ):
+                        total_usage[key] = total_usage.get(key, 0) + int(value)
+                raw = result.content.strip()
+                try:
+                    parsed = json.loads(raw)
+                    _validate_score_payload(parsed)
+                    score_dict = parsed
+                    break
+                except (json.JSONDecodeError, ValueError) as exc:
+                    last_parse_error = exc
+                    if attempt >= 1:
+                        raise
+                    messages.extend(
+                        [
+                            ChatMessage(role="assistant", content=raw),
+                            ChatMessage(
+                                role="user",
+                                content=(
+                                    "上一份评审结果不是符合约定结构的合法 JSON。"
+                                    "请重新评审，并且只返回包含完整 scores、issues、"
+                                    "suggestions 和 should_refine 的 JSON 对象。"
+                                ),
+                            ),
+                        ]
+                    )
+            if score_dict is None:
+                raise last_parse_error or ValueError(
+                    "Critic did not return a valid score payload."
+                )
             score = CriticScore.from_dict(score_dict)
-            score.token_usage = result.usage or {}
+            score.token_usage = total_usage
             cost_estimate = _estimate_cost_details(
                 result.model or self._model_name,
                 score.token_usage,
@@ -253,7 +291,9 @@ class CriticAgent(BaseAgent):
             return score
 
         except Exception as exc:
-            usage = result.usage if result is not None else {}
+            usage = total_usage or (
+                result.usage if result is not None else {}
+            )
             model_used = (
                 result.model
                 if result is not None and result.model

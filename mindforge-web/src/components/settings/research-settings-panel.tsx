@@ -125,6 +125,15 @@ export function ResearchSettingsPanel() {
             onChange={state.setMaxToolCallsTotal}
           />
           <NumberField
+            id="agent-queue-timeout"
+            label="工具排队超时（秒）"
+            detail="等待研究或工具并发槽位的最长时间"
+            value={state.queueTimeout}
+            min={1}
+            max={600}
+            onChange={state.setQueueTimeout}
+          />
+          <NumberField
             id="agent-max-iter"
             label="Researcher 最大轮次"
             value={state.maxIterations}
@@ -155,6 +164,15 @@ export function ResearchSettingsPanel() {
             min={5}
             max={600}
             onChange={state.setLLMRequestTimeout}
+          />
+          <NumberField
+            id="sandbox-timeout"
+            label="代码执行超时（秒）"
+            detail="单次 code_executor 沙箱运行的最长时间"
+            value={state.sandboxTimeout}
+            min={5}
+            max={60}
+            onChange={state.setSandboxTimeout}
           />
           <NumberField
             id="agent-research-timeout"
@@ -225,6 +243,7 @@ function NumberField({
   min,
   max,
   step,
+  detail,
   onChange,
 }: {
   id: string;
@@ -233,11 +252,18 @@ function NumberField({
   min: number;
   max: number;
   step?: number;
+  detail?: string;
   onChange: (value: number) => void;
 }) {
+  const descriptionId = detail ? `${id}-description` : undefined;
   return (
-    <label htmlFor={id} className="block">
-      <span className="mb-1.5 block text-sm font-medium">{label}</span>
+    <div className="block">
+      <label
+        htmlFor={id}
+        className="mb-1.5 block text-sm font-medium"
+      >
+        {label}
+      </label>
       <input
         id={id}
         type="number"
@@ -246,8 +272,17 @@ function NumberField({
         max={max}
         step={step}
         onChange={(event) => onChange(Number(event.target.value))}
+        aria-describedby={descriptionId}
         className={inputClassName}
       />
-    </label>
+      {detail && (
+        <span
+          id={descriptionId}
+          className="mt-1 block text-xs leading-5 text-text-muted"
+        >
+          {detail}
+        </span>
+      )}
+    </div>
   );
 }

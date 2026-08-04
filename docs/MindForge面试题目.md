@@ -972,7 +972,7 @@ class Orchestrator:
         )
         self.synthesizer = SynthesizerAgent(model="gpt-4o")
         self.critic = CriticAgent(model="gpt-4o")
-        self.timeout = get_settings().agent.research_timeout  # 默认 180s
+        self.timeout = get_settings().agent.research_timeout  # 默认 300s
 
     async def run(self, query: str) -> AgentResult:
         # 1. Planner 分解

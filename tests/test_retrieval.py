@@ -22,6 +22,7 @@ from mindforge.agents.base import AgentResult
 from mindforge.agents.critic import CriticAgent, CriticScore
 from mindforge.agents.orchestrator import Orchestrator
 from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
+from mindforge.agents.researcher import ResearcherAgent
 from mindforge.api import routes
 from mindforge.api import server
 from mindforge.api.schemas import (
@@ -64,8 +65,45 @@ def test_provider_update_validates_base_url_and_duplicates() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("update", "expected_detail"),
+    [
+        (
+            SettingsUpdateRequest(
+                llm_request_timeout=90,
+                subtask_timeout=60,
+                research_timeout=180,
+            ),
+            "LLM request timeout",
+        ),
+        (
+            SettingsUpdateRequest(
+                queue_timeout=200,
+                research_timeout=180,
+            ),
+            "tool queue timeout",
+        ),
+        (
+            SettingsUpdateRequest(
+                native_web_search_timeout_seconds=90,
+                subtask_timeout=60,
+            ),
+            "native web-search timeout",
+        ),
+        (
+            SettingsUpdateRequest(
+                llm_request_timeout=10,
+                sandbox_timeout=15,
+                subtask_timeout=10,
+            ),
+            "sandbox timeout",
+        ),
+    ],
+)
 def test_settings_reject_contradictory_timeout_budgets(
     monkeypatch: pytest.MonkeyPatch,
+    update: SettingsUpdateRequest,
+    expected_detail: str,
 ) -> None:
     monkeypatch.setattr(
         routes,
@@ -75,21 +113,18 @@ def test_settings_reject_contradictory_timeout_budgets(
                 llm_request_timeout=45,
                 subtask_timeout=60,
                 research_timeout=180,
-            )
+                queue_timeout=30,
+            ),
+            web_search=SimpleNamespace(native_timeout_seconds=5),
+            sandbox=SimpleNamespace(sandbox_timeout=5),
         ),
     )
 
     with pytest.raises(Exception) as exc_info:
-        routes._update_settings_locked(
-            SettingsUpdateRequest(
-                llm_request_timeout=90,
-                subtask_timeout=60,
-                research_timeout=180,
-            )
-        )
+        routes._update_settings_locked(update)
 
     assert getattr(exc_info.value, "status_code", None) == 422
-    assert "LLM request timeout" in str(getattr(exc_info.value, "detail", ""))
+    assert expected_detail in str(getattr(exc_info.value, "detail", ""))
 
 
 def test_env_sync_quotes_values_and_prevents_entry_injection(
@@ -794,6 +829,69 @@ async def test_critic_failure_is_not_reported_as_a_numeric_score(
 
 
 @pytest.mark.asyncio
+async def test_critic_retries_one_invalid_structured_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    critic = object.__new__(CriticAgent)
+    critic._model_name = "critic-model"
+    critic._provider_name = "test"
+    calls = 0
+
+    async def repaired_json(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(
+                content="",
+                usage={"total_tokens": 4},
+                model="critic-model",
+            )
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "scores": {
+                        "completeness": 8,
+                        "accuracy": 8,
+                        "depth": 7,
+                        "clarity": 9,
+                        "citations": 7,
+                        "overall": 7,
+                    },
+                    "issues": [],
+                    "suggestions": [],
+                    "should_refine": True,
+                },
+                ensure_ascii=False,
+            ),
+            usage={"total_tokens": 6},
+            model="critic-model",
+        )
+
+    critic._chat = repaired_json
+    monkeypatch.setattr(
+        "mindforge.agents.critic.get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(critic_threshold=7.0),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindforge.agents.critic._estimate_cost_details",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            amount_usd=None,
+            status="usage_unavailable",
+        ),
+    )
+
+    score = await critic.evaluate(task="研究问题", draft="研究报告")
+
+    assert calls == 2
+    assert score.evaluation_status == "evaluated"
+    assert score.overall == 7.0
+    assert score.should_refine is True
+    assert score.token_usage["total_tokens"] == 10
+
+
+@pytest.mark.asyncio
 async def test_critic_missing_required_scores_is_an_evaluation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -829,16 +927,16 @@ async def test_critic_missing_required_scores_is_an_evaluation_failure(
     assert score.overall == 0.0
 
 
-def test_balanced_mode_does_not_treat_short_comparison_as_simple() -> None:
+def test_balanced_mode_routes_focused_comparison_directly() -> None:
     assert Orchestrator._is_simple_task("什么是异步编程") is True
     assert Orchestrator._is_simple_task("Python 和 Java 有什么区别") is False
     assert Orchestrator._is_simple_task("对比 RAG 与 GraphRAG 的优缺点") is False
-    assert Orchestrator._can_use_direct_plan("Python 和 Java 有什么区别") is False
+    assert Orchestrator._can_use_direct_plan("Python 和 Java 有什么区别") is True
     assert Orchestrator._can_use_direct_plan("全面对比 Python 和 Java") is False
 
 
 @pytest.mark.asyncio
-async def test_balanced_comparison_uses_planner_instead_of_direct_plan() -> None:
+async def test_balanced_comparison_uses_one_direct_research_task() -> None:
     calls: list[str] = []
 
     class RecordingPlanner:
@@ -867,9 +965,13 @@ async def test_balanced_comparison_uses_planner_instead_of_direct_plan() -> None
 
     plan = await orchestrator._create_plan("Python 和 Java 有什么区别")
 
-    assert calls == ["Python 和 Java 有什么区别"]
-    assert plan.planner_status == "planned"
-    assert len(plan.subtasks) == 3
+    assert calls == []
+    assert plan.planner_status == "direct"
+    assert len(plan.subtasks) == 1
+    assert plan.subtasks[0].description == "Python 和 Java 有什么区别"
+    assert ResearcherAgent.source_requirement(
+        plan.subtasks[0].description
+    ) == "preferred"
 
 
 @pytest.mark.asyncio
@@ -1087,6 +1189,132 @@ def test_balanced_single_subtask_comparison_still_runs_critic() -> None:
     assert orchestrator._max_refine_rounds(plan) == 0
 
 
+def test_balanced_single_subtask_honors_configured_refinement() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="balanced",
+            max_refine_rounds=1,
+        )
+    )
+    plan = ResearchPlan(
+        plan_id="focused",
+        original_task="什么是异步编程",
+        subtasks=[
+            SubTask(
+                task_id="t1",
+                description="什么是异步编程",
+            )
+        ],
+    )
+
+    assert orchestrator._should_run_critic(
+        "什么是异步编程",
+        plan,
+    ) is True
+    assert orchestrator._max_refine_rounds(plan) == 1
+
+
+def test_report_without_sources_drops_unbacked_citation_markers() -> None:
+    report = (
+        "Python 适合快速迭代 [1]，Java 适合企业集成 [2]。\n\n"
+        "[文档](https://example.com) 保持不变。"
+    )
+
+    cleaned = Orchestrator._strip_unbacked_citations(report, [])
+
+    assert "[1]" not in cleaned
+    assert "[2]" not in cleaned
+    assert "[文档](https://example.com)" in cleaned
+    assert Orchestrator._strip_unbacked_citations(
+        report,
+        [{"index": 1, "url": "https://example.com"}],
+    ) == report
+
+
+def test_final_citation_status_reflects_report_verification() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._settings = SimpleNamespace(
+        llm=SimpleNamespace(llm_provider="test")
+    )
+    plan = ResearchPlan(
+        plan_id="mixed-grounding",
+        original_task="task",
+        subtasks=[
+            SubTask(task_id="t1", description="grounded"),
+            SubTask(task_id="t2", description="model only"),
+        ],
+    )
+
+    result = orchestrator._build_success_result(
+        output="报告 [1]",
+        plan=plan,
+        subtask_outputs=[
+            {
+                "task_id": "t1",
+                "success": True,
+                "outcome": "success",
+                "grounding_status": "grounded",
+                "sources": [{"index": 1, "url": "https://example.com"}],
+            },
+            {
+                "task_id": "t2",
+                "success": True,
+                "outcome": "success",
+                "grounding_status": "model_only",
+                "sources": [],
+            },
+        ],
+        sources=[{"index": 1, "url": "https://example.com"}],
+        final_critic=CriticScore(overall=8.0),
+        refine_count=0,
+        total_usage={},
+        elapsed_ms=1,
+        total_cost_usd=None,
+        cost_status="usage_unavailable",
+        citation_verification={"valid": True, "status": "valid"},
+    )
+
+    assert result.metadata["grounding_status"] == "model_only"
+    assert result.metadata["citation_status"] == "valid"
+
+
+def test_balanced_mode_refines_only_actionable_content_deficits() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="balanced",
+            critic_threshold=7.0,
+        )
+    )
+
+    assert orchestrator._should_refine_report(
+        CriticScore(overall=7.0, should_refine=True)
+    ) is False
+    assert orchestrator._should_refine_report(
+        CriticScore(
+            completeness=6.0,
+            accuracy=8.0,
+            depth=7.0,
+            clarity=8.0,
+            citations=8.0,
+            overall=6.9,
+            should_refine=False,
+        )
+    ) is True
+    assert orchestrator._should_refine_report(
+        CriticScore(
+            completeness=8.0,
+            accuracy=6.0,
+            depth=7.0,
+            clarity=8.0,
+            citations=4.0,
+            overall=6.6,
+            should_refine=True,
+        )
+    ) is False
+
+
 @pytest.mark.asyncio
 async def test_deep_mode_evaluates_once_when_refinement_is_disabled() -> None:
     class Planner:
@@ -1295,6 +1523,9 @@ async def test_sync_and_stream_cache_restore_the_same_result() -> None:
         ),
         llm=SimpleNamespace(llm_provider="test"),
     )
+    cached.metadata["research_cache_fingerprint"] = (
+        orchestrator._research_cache_fingerprint()
+    )
 
     sync_result = await orchestrator.run("cached task")
     events = [event async for event in orchestrator.stream_run("cached task")]
@@ -1336,6 +1567,9 @@ async def test_legacy_cached_zero_without_critic_is_normalized_to_unreviewed() -
         critic=SimpleNamespace(),
         episodic_memory=MemoryStub(),
     )
+    cached.metadata["research_cache_fingerprint"] = (
+        orchestrator._research_cache_fingerprint()
+    )
 
     result = await orchestrator._recall_cached_result(
         "你好",
@@ -1345,6 +1579,52 @@ async def test_legacy_cached_zero_without_critic_is_normalized_to_unreviewed() -
     assert result is not None
     assert result.metadata["quality"] is None
     assert result.metadata["quality_status"] == "not_evaluated"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_rejects_cache_from_an_old_execution_strategy() -> None:
+    cached = AgentResult(
+        agent_name="orchestrator",
+        output="Old two-researcher comparison [1].",
+        data={
+            "sources": [
+                {
+                    "index": 1,
+                    "title": "Source",
+                    "url": "https://example.com/source",
+                }
+            ],
+            "subtask_outputs": [
+                {"task_id": "python", "success": True},
+                {"task_id": "java", "success": True},
+            ],
+        },
+        metadata={
+            "quality": 8.0,
+            "quality_status": "evaluated",
+            "outcome": "success",
+            "research_cache_fingerprint": "old-routing-strategy",
+        },
+    )
+
+    class MemoryStub:
+        async def recall(self, _task: str):
+            return cached.to_dict()
+
+    orchestrator = Orchestrator(
+        planner=SimpleNamespace(),
+        researcher=SimpleNamespace(),
+        synthesizer=SimpleNamespace(),
+        critic=SimpleNamespace(),
+        episodic_memory=MemoryStub(),
+    )
+
+    result = await orchestrator._recall_cached_result(
+        "Python and Java agent selection",
+        start_time=time.perf_counter(),
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio

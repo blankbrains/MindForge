@@ -139,25 +139,18 @@ body {
 }
 
 .markdown-content .citation-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.45rem;
-  min-height: 1.45rem;
-  margin: 0 0.08rem;
-  border: 1px solid color-mix(in srgb, var(--color-primary) 35%, transparent);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-  font-size: 0.78em;
+  display: inline;
+  margin: 0 0.08em;
+  font-size: 0.72em;
   font-weight: 700;
   line-height: 1;
   text-decoration: none;
-  vertical-align: 0.08em;
+  vertical-align: super;
 }
 
 .markdown-content .citation-link:hover,
 .markdown-content .citation-link:focus-visible {
-  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+  text-decoration: underline;
 }
 
 .research-sources {

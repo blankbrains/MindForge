@@ -1,5 +1,6 @@
 export type TraceStatus =
   | "success"
+  | "warning"
   | "degraded"
   | "error"
   | "cancelled";

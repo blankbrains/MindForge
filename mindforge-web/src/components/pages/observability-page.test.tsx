@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   refetch: vi.fn(),
   deleteTrace: vi.fn(),
   clearTraces: vi.fn(),
+  traceStatus: "degraded",
+  failureCount: 1,
 }));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -49,10 +51,10 @@ vi.mock("@/hooks/use-observability", () => ({
           start_time: 1_800_000_000,
           end_time: 1_800_000_002,
           duration_ms: 2000,
-          status: "degraded",
+          status: mocks.traceStatus,
           error: null,
           failure_summary: null,
-          failure_count: 0,
+          failure_count: mocks.failureCount,
           task_preview: null,
           metadata: {},
           span_count: 3,
@@ -84,11 +86,11 @@ vi.mock("@/hooks/use-observability", () => ({
         start_time: 1_800_000_000,
         end_time: 1_800_000_002,
         duration_ms: 2000,
-        status: "degraded",
+        status: mocks.traceStatus,
         error: "LLM request timed out after 45 seconds.",
         failure_summary:
           "检测到 1 个异常节点。主要原因：LLM 请求在 45 秒后超时。",
-        failure_count: 1,
+        failure_count: mocks.failureCount,
         task_preview: null,
         metadata: {},
         span_count: 3,
@@ -173,6 +175,8 @@ describe("ObservabilityPage", () => {
     mocks.refetch.mockReset();
     mocks.deleteTrace.mockReset();
     mocks.clearTraces.mockReset();
+    mocks.traceStatus = "degraded";
+    mocks.failureCount = 1;
   });
 
   it("shows backend status and the complete trace chain", () => {
@@ -196,5 +200,18 @@ describe("ObservabilityPage", () => {
     expect(langfuseLink.getAttribute("href")).toBe(
       "https://langfuse.example/trace/test",
     );
+  });
+
+  it("shows recovered child failures as success with warnings", () => {
+    mocks.traceStatus = "success";
+    mocks.failureCount = 2;
+
+    render(<ObservabilityPage />);
+
+    expect(screen.getAllByText("成功（有告警）").length).toBeGreaterThan(0);
+    expect(screen.getByText(/链路异常汇总（最终已恢复）/)).toBeTruthy();
+    expect(
+      screen.getAllByRole("option", { name: "成功（有告警）" }).length,
+    ).toBeGreaterThan(0);
   });
 });

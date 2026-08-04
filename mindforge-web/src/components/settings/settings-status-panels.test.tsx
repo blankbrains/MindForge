@@ -14,6 +14,9 @@ beforeEach(() => {
     duckDuckGoEnabled: false,
     modelOnlyFallbackEnabled: true,
     webSearchAvailable: false,
+    queueTimeout: 30,
+    nativeWebSearchTimeoutSeconds: 30,
+    sandboxTimeout: 15,
     rerankerConfigured: true,
     rerankerAvailable: false,
     rerankerLoadFailed: true,
@@ -48,5 +51,25 @@ describe("settings status panels", () => {
         "研究会保留模型回答，并明确标记为无可核验引用",
       ),
     ).toBeTruthy();
+    expect(
+      screen.getByRole("spinbutton", {
+        name: "原生联网搜索超时（秒）",
+      }),
+    ).toHaveProperty("value", "30");
+  });
+
+  it("shows runtime tool timeout controls", () => {
+    render(<ResearchSettingsPanel />);
+
+    expect(
+      screen.getByRole("spinbutton", {
+        name: "工具排队超时（秒）",
+      }),
+    ).toHaveProperty("value", "30");
+    expect(
+      screen.getByRole("spinbutton", {
+        name: "代码执行超时（秒）",
+      }),
+    ).toHaveProperty("value", "15");
   });
 });

@@ -542,7 +542,13 @@ class Tracer:
         )
         success = output.get("success")
         status = str(span.metadata.get("status") or "").strip().lower()
-        if status not in {"success", "degraded", "error", "cancelled"}:
+        if status not in {
+            "success",
+            "warning",
+            "degraded",
+            "error",
+            "cancelled",
+        }:
             status = (
                 "error"
                 if span.error or success is False

@@ -98,6 +98,11 @@ class _UnusedCritic:
         raise AssertionError("critic should not run for this simple balanced task")
 
 
+class _PassCritic:
+    async def evaluate(self, **_kwargs) -> CriticScore:
+        return CriticScore(overall=8.0, should_refine=False)
+
+
 def test_ready_tasks_honor_planner_priority() -> None:
     plan = ResearchPlan(
         plan_id="priority",
@@ -132,12 +137,25 @@ async def test_researcher_receives_task_type_and_subtopics() -> None:
         "实现并验证排序算法",
         task_type="code",
         subtopics=["边界输入", "复杂度"],
+        total_subtasks=2,
     )
 
     context = str(captured.get("context") or "")
     assert "code" in context
     assert "边界输入" in context
     assert "复杂度" in context
+    assert "中文字符" not in context
+
+
+def test_multi_subtask_researcher_uses_evidence_brief_guidance() -> None:
+    guidance = ResearcherAgent.response_length_guidance(
+        "围绕 Agent 应用评估 Python 的选型依据",
+        total_subtasks=2,
+    )
+
+    assert "证据子任务" in guidance
+    assert "800-1600" in guidance
+    assert "3200-6000" not in guidance
 
 
 def test_direct_plan_rejects_compound_multi_intent_task() -> None:
@@ -155,11 +173,11 @@ def test_recommendation_question_uses_one_direct_subtask() -> None:
     assert PlannerAgent._minimum_subtask_count(task) == 1
     assert Orchestrator._can_use_direct_plan(task) is True
     assert classify_response_depth(task) == "standard"
-    assert "900-1600" in ResearcherAgent.response_length_guidance(task)
+    assert "1600-2800" in ResearcherAgent.response_length_guidance(task)
 
 
 def test_deep_research_keeps_detailed_response_guidance() -> None:
-    assert "2500-5000" in ResearcherAgent.response_length_guidance(
+    assert "3200-6000" in ResearcherAgent.response_length_guidance(
         "全面深入分析 Agent 框架的架构、生态、风险和发展趋势"
     )
 
@@ -168,12 +186,12 @@ def test_deep_research_keeps_detailed_response_guidance() -> None:
     ("task", "expected_depth", "expected_budget"),
     [
         ("请用三句话简要说明什么是 RAG", "concise", "100-500"),
-        ("什么是异步编程？", "focused", "500-1000"),
-        ("Python 和 Java 应该怎么选？", "standard", "900-1600"),
+        ("什么是异步编程？", "focused", "1000-1800"),
+        ("Python 和 Java 应该怎么选？", "standard", "1600-2800"),
         (
             "全面分析 Agent 的架构、风险、评测和部署方案",
             "deep",
-            "2500-5000",
+            "3200-6000",
         ),
     ],
 )
@@ -204,6 +222,18 @@ def test_comparison_plan_does_not_require_redundant_synthesis_subtask() -> None:
     assert PlannerAgent._minimum_subtask_count(
         "Python 和 Java 有什么区别"
     ) == 2
+    assert PlannerAgent._minimum_subtask_count(
+        "Python 和 Java 在 Agent 应用中应该怎么选"
+    ) == 2
+    assert PlannerAgent._comparison_subjects(
+        "Python 和 Java 在 Agent 应用中应该怎么选"
+    ) == ("Python", "Java")
+    assert PlannerAgent._comparison_subjects(
+        "Python 与 Java 在 Agent 应用中的选型依据"
+    ) == ("Python", "Java")
+    assert Orchestrator._can_use_direct_plan(
+        "Python 和 Java 在 Agent 应用中应该怎么选"
+    ) is True
 
 
 @pytest.mark.asyncio
@@ -550,6 +580,8 @@ def test_synthesizer_does_not_fill_missing_evidence_from_model_memory() -> None:
     assert "不得用模型记忆补造事实" in _SYNTHESIZER_SYSTEM_PROMPT
     assert "报告必须按以下结构" not in _SYNTHESIZER_SYSTEM_PROMPT
     assert "不得机械套用固定报告模板" in _SYNTHESIZER_SYSTEM_PROMPT
+    assert "范围集中的研究通常 3-5 节" in _SYNTHESIZER_SYSTEM_PROMPT
+    assert "这些范围不是硬性模板" in _SYNTHESIZER_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -574,8 +606,10 @@ async def test_synthesizer_uses_dynamic_final_report_guidance() -> None:
         ],
     )
 
-    assert "1500-2800" in captured["prompt"]
+    assert "2400-4200" in captured["prompt"]
     assert "按实际内容选择章节" in captured["prompt"]
+    assert "通常使用 4-7 个有实际内容的章节" in captured["prompt"]
+    assert "核心内容仍明显不足时提前结束" in captured["prompt"]
     assert "不得编造引用" in captured["prompt"]
 
 
@@ -616,6 +650,42 @@ async def test_synthesizer_bounds_combined_subtask_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_synthesizer_adapts_context_budget_to_report_depth() -> None:
+    class LLM:
+        _model = "synth"
+
+    agent = SynthesizerAgent(llm=LLM())
+    agent._settings = SimpleNamespace(
+        agent=SimpleNamespace(synthesis_context_max_chars=60_000)
+    )
+    captured: dict[str, str] = {}
+
+    async def response(messages, **_kwargs):
+        captured["prompt"] = messages[-1].content
+        return ChatResult(content="综合报告")
+
+    agent._chat = response
+
+    await agent.synthesize(
+        task="Python 和 Java 在 Agent 应用中应该怎么选？",
+        subtask_results=[
+            {
+                "task_id": "python",
+                "description": "Python",
+                "output": "A" * 30_000,
+            },
+            {
+                "task_id": "java",
+                "description": "Java",
+                "output": "B" * 30_000,
+            },
+        ],
+    )
+
+    assert len(captured["prompt"]) < 15_000
+
+
+@pytest.mark.asyncio
 async def test_empty_refinement_is_reported_as_degraded() -> None:
     orchestrator = Orchestrator(
         planner=_SinglePlanner(),
@@ -651,6 +721,52 @@ async def test_stream_empty_refinement_is_reported_as_degraded() -> None:
     assert result.metadata["outcome"] == "degraded"
     assert result.metadata["refinement_status"] == "failed"
     assert result.data["refinement_failure"]
+
+
+def test_unrefined_low_quality_report_is_reported_as_degraded() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(critic_threshold=7.0),
+        llm=SimpleNamespace(llm_provider="test"),
+    )
+    plan = ResearchPlan(
+        plan_id="low-quality",
+        original_task="comparison",
+        subtasks=[SubTask(task_id="t1", description="comparison")],
+    )
+
+    result = orchestrator._build_success_result(
+        output="Incomplete comparison [1].",
+        plan=plan,
+        subtask_outputs=[
+            {
+                "task_id": "t1",
+                "description": "comparison",
+                "success": True,
+                "outcome": "success",
+                "grounding_status": "grounded",
+                "output": "Incomplete comparison [1].",
+                "sources": [
+                    {
+                        "index": 1,
+                        "url": "https://example.com/source",
+                    }
+                ],
+            }
+        ],
+        sources=[{"index": 1, "url": "https://example.com/source"}],
+        final_critic=CriticScore(overall=3.5, should_refine=True),
+        refine_count=0,
+        total_usage={},
+        elapsed_ms=1,
+        total_cost_usd=None,
+        cost_status="usage_unavailable",
+        citation_verification={"valid": True, "status": "valid"},
+    )
+
+    assert result.success is True
+    assert result.metadata["outcome"] == "degraded"
+    assert "3.5/10" in result.metadata["failure_reason"]
 
 
 def test_planner_and_critic_failures_degrade_final_outcome() -> None:
@@ -862,7 +978,7 @@ async def test_invalid_final_citation_marks_report_degraded() -> None:
             ],
         ),
         synthesizer=SimpleNamespace(),
-        critic=_UnusedCritic(),
+        critic=_PassCritic(),
     )
     orchestrator._settings = _orchestrator_settings(mode="balanced")
 
@@ -872,3 +988,4 @@ async def test_invalid_final_citation_marks_report_degraded() -> None:
     assert result.metadata["outcome"] == "degraded"
     assert result.data["citation_verification"]["valid"] is False
     assert result.metadata["citation_status"] == "invalid"
+    assert result.metadata["quality_status"] == "evaluated"

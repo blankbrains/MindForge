@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import time
@@ -23,6 +25,8 @@ from mindforge.memory import WorkingMemory
 from mindforge.models.base import LLMFactory
 
 logger = logging.getLogger(__name__)
+
+_RESEARCH_CACHE_SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Orchestrator
@@ -101,6 +105,10 @@ class Orchestrator:
                     ),
                     native_timeout_seconds=(
                         self._settings.web_search.native_timeout_seconds
+                    ),
+                    native_failure_cooldown_seconds=(
+                        self._settings.web_search
+                        .native_failure_cooldown_seconds
                     ),
                 )
                 if web_search.available:
@@ -438,17 +446,18 @@ class Orchestrator:
 
         # ------------------------------------------------------------------
         # Step 4: Critic + refine loop
-        # 简单查询（1 个子任务 + 输出较短）跳过 Critic 以提速
         # ------------------------------------------------------------------
-        # 用 Researcher 原始输出判断复杂度（Synthesizer 会把简单内容扩写成报告）
-        current_draft = draft_result.output
+        current_draft = self._strip_unbacked_citations(
+            draft_result.output,
+            all_sources,
+        )
         final_critic: Optional[CriticScore] = None
         refine_count = 0
         refinement_failure: str | None = None
 
         if not self._should_run_critic(task, plan):
-            logger.info("简单查询，跳过 Critic 评估（提速）")
-            pipeline_log["critic"] = {"skipped": True, "reason": "简单查询"}
+            logger.info("快速模式，跳过 Critic 评估")
+            pipeline_log["critic"] = {"skipped": True, "reason": "快速模式"}
         else:
             max_refine = self._max_refine_rounds(plan)
             for evaluation_round in range(max_refine + 1):
@@ -484,7 +493,7 @@ class Orchestrator:
                     break
 
                 if (
-                    not critic_score.should_refine
+                    not self._should_refine_report(critic_score)
                     or refine_count >= max_refine
                 ):
                     pipeline_log["critic"] = {
@@ -675,10 +684,12 @@ class Orchestrator:
             # try/finally because clients can disconnect during startup.
             await asyncio.sleep(0)
             deadline = time.monotonic() + self._settings.agent.research_timeout
+            overall_timed_out = False
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise asyncio.TimeoutError
+                    overall_timed_out = True
+                    break
                 try:
                     event = await asyncio.wait_for(
                         event_queue.get(),
@@ -696,13 +707,14 @@ class Orchestrator:
                 if not isinstance(event, dict):
                     raise RuntimeError("Research stream produced an invalid event.")
                 yield event
-        except asyncio.TimeoutError:
-            yield {
-                "type": "error",
-                "content": (
-                    f"研究任务超过 {self._settings.agent.research_timeout} 秒，已终止。"
-                ),
-            }
+            if overall_timed_out:
+                yield {
+                    "type": "error",
+                    "content": (
+                        "研究任务超过 "
+                        f"{self._settings.agent.research_timeout} 秒，已终止。"
+                    ),
+                }
         finally:
             if pipeline_task is not None and not pipeline_task.done():
                 pipeline_task.cancel()
@@ -918,14 +930,16 @@ class Orchestrator:
             return
 
         # --- Step 4: Critic + refine ---
-        current_draft = draft_result.output
+        current_draft = self._strip_unbacked_citations(
+            draft_result.output,
+            all_sources,
+        )
         final_critic: Optional[CriticScore] = None
         refine_count = 0
         refinement_failure: str | None = None
 
-        # 用 Researcher 原始输出判断复杂度（Synthesizer 会把简单内容扩写成报告）
         if not self._should_run_critic(task, plan):
-            logger.info("简单查询，跳过 Critic 评估（提速）")
+            logger.info("快速模式，跳过 Critic 评估")
         else:
             max_refine = self._max_refine_rounds(plan)
             for evaluation_round in range(max_refine + 1):
@@ -963,7 +977,7 @@ class Orchestrator:
                     break
 
                 if (
-                    not critic_score.should_refine
+                    not self._should_refine_report(critic_score)
                     or refine_count >= max_refine
                 ):
                     break
@@ -1090,11 +1104,14 @@ class Orchestrator:
         normalized = re.sub(r"\s+", " ", task).strip().casefold()
         if not normalized or len(normalized) > 160:
             return False
-        if PlannerAgent._minimum_subtask_count(task) > 1:
-            return False
         if any(marker in normalized for marker in cls._DEEP_RESEARCH_MARKERS):
             return False
         if PlannerAgent._is_comparison_task(task):
+            if PlannerAgent._comparison_subjects(task) is None:
+                return False
+            sentence_breaks = len(re.findall(r"[。！？!?;\n]", normalized))
+            return sentence_breaks <= 1
+        if PlannerAgent._minimum_subtask_count(task) > 1:
             return False
         sentence_breaks = len(re.findall(r"[。！？!?;\n]", normalized))
         return sentence_breaks <= 2
@@ -1103,10 +1120,11 @@ class Orchestrator:
         if self._planner_injected:
             return await self._planner.run(task)
         mode = self._research_mode()
+        max_subtasks = getattr(self._settings.agent, "max_subtasks", 5)
         if mode == "fast" or (
             mode == "balanced"
             and (
-                getattr(self._settings.agent, "max_subtasks", 5) == 1
+                max_subtasks == 1
                 or self._can_use_direct_plan(task)
             )
         ):
@@ -1129,28 +1147,80 @@ class Orchestrator:
                 ),
                 planner_status="direct",
             )
+        if mode == "balanced" and max_subtasks >= 2:
+            comparison_plan = self._create_direct_comparison_plan(task)
+            if comparison_plan is not None:
+                return comparison_plan
         return await self._planner.run(task)
+
+    @staticmethod
+    def _create_direct_comparison_plan(
+        task: str,
+    ) -> ResearchPlan | None:
+        subjects = PlannerAgent._comparison_subjects(task)
+        if subjects is None:
+            return None
+
+        subtasks: list[SubTask] = []
+        for index, subject in enumerate(subjects, 1):
+            subtasks.append(
+                SubTask(
+                    task_id=f"t{index}",
+                    description=(
+                        f"围绕原问题“{task}”评估 {subject}，"
+                        "收集其优势、限制、适用条件和关键依据。"
+                    ),
+                    task_type="research",
+                    dependencies=[],
+                    priority=1,
+                    subtopics=[
+                        f"{subject} 的核心优势与限制",
+                        f"{subject} 的生态与工程成熟度",
+                        f"{subject} 的性能、部署与运维条件",
+                        f"{subject} 的典型适用场景",
+                    ],
+                )
+            )
+
+        return ResearchPlan(
+            plan_id=f"compare-{int(time.time() * 1000):x}"[-12:],
+            original_task=task,
+            subtasks=subtasks,
+            reasoning=(
+                "该问题包含两个明确的比较对象，分别收集证据后由 "
+                "Synthesizer 统一完成对比和选型结论，无需增加重复的汇总子任务。"
+            ),
+            planner_status="direct",
+        )
 
     def _should_run_critic(
         self,
         task: str,
         plan: ResearchPlan,
     ) -> bool:
-        mode = self._research_mode()
-        if mode == "fast":
-            return False
-        if mode == "deep":
-            return True
-        return len(plan.subtasks) > 1 or not self._is_simple_task(task)
+        del task, plan
+        return self._research_mode() != "fast"
 
     def _max_refine_rounds(self, plan: ResearchPlan) -> int:
-        configured = max(0, self._settings.agent.max_refine_rounds)
-        if (
-            self._research_mode() == "balanced"
-            and len(plan.subtasks) == 1
-        ):
-            return 0
-        return configured
+        del plan
+        return max(0, self._settings.agent.max_refine_rounds)
+
+    def _should_refine_report(self, score: CriticScore) -> bool:
+        if self._research_mode() == "balanced":
+            threshold = float(
+                getattr(self._settings.agent, "critic_threshold", 7.0)
+            )
+            if score.overall >= threshold:
+                return False
+            return any(
+                value < threshold
+                for value in (
+                    score.completeness,
+                    score.depth,
+                    score.clarity,
+                )
+            )
+        return score.should_refine
 
     def _get_tracer(self) -> Any:
         observability = getattr(self._settings, "observability", None)
@@ -1324,6 +1394,7 @@ class Orchestrator:
                     mode = self._research_mode()
                     researcher_kwargs["task_type"] = subtask.task_type
                     researcher_kwargs["subtopics"] = subtask.subtopics
+                    researcher_kwargs["total_subtasks"] = len(plan.subtasks)
                     researcher_kwargs["deadline"] = (
                         time.perf_counter() + timeout
                     )
@@ -1638,6 +1709,11 @@ class Orchestrator:
                 and cached_plan.get("planner_status") == "fallback"
             ):
                 return None
+            if (
+                result.metadata.get("research_cache_fingerprint")
+                != self._research_cache_fingerprint()
+            ):
+                return None
             cached_generation_usage = dict(result.token_usage)
             cached_generation_cost_usd = result.cost_usd
             cached_generation_cost_status = result.cost_status
@@ -1693,6 +1769,95 @@ class Orchestrator:
             and "ws_call_id=" in str(source.get("url") or "")
             for source in sources
         )
+
+    def _research_cache_fingerprint(self) -> str:
+        """Identify the execution strategy that produced a cached report."""
+        settings = self._settings
+        llm = getattr(settings, "llm", None)
+        agent = getattr(settings, "agent", None)
+        web_search = getattr(settings, "web_search", None)
+        provider = str(getattr(llm, "llm_provider", "") or "").strip().lower()
+
+        def call_llm(method_name: str, *args: Any) -> Any:
+            method = getattr(llm, method_name, None)
+            if not callable(method):
+                return None
+            try:
+                return method(*args)
+            except (AttributeError, TypeError, ValueError):
+                return None
+
+        models = {
+            role: (
+                call_llm("get_model", role, provider)
+                or getattr(llm, f"{role}_model", "")
+                or ""
+            )
+            for role in ("planner", "researcher", "synthesizer", "critic")
+        }
+        payload = {
+            "schema": _RESEARCH_CACHE_SCHEMA_VERSION,
+            "llm": {
+                "provider": provider,
+                "base_url": call_llm("get_base_url", provider),
+                "models": models,
+                "supports_tools": call_llm("supports_tools", provider),
+                "supports_json_mode": call_llm(
+                    "supports_json_mode",
+                    provider,
+                ),
+                "supports_json_schema": call_llm(
+                    "supports_json_schema",
+                    provider,
+                ),
+                "native_web_search_protocol": call_llm(
+                    "get_native_web_search_protocol",
+                    provider,
+                ),
+                "native_web_search_endpoint": call_llm(
+                    "get_native_web_search_endpoint",
+                    provider,
+                ),
+            },
+            "agent": {
+                name: getattr(agent, name, None)
+                for name in (
+                    "research_mode",
+                    "source_policy",
+                    "fallback_enabled",
+                    "max_iterations",
+                    "max_subtasks",
+                    "max_refine_rounds",
+                    "critic_threshold",
+                    "llm_request_timeout",
+                    "subtask_timeout",
+                    "research_timeout",
+                    "research_context_max_chars",
+                    "synthesis_context_max_chars",
+                    "critic_source_context_max_chars",
+                    "critic_report_context_max_chars",
+                )
+            },
+            "web_search": {
+                name: getattr(web_search, name, None)
+                for name in (
+                    "native_enabled",
+                    "duckduckgo_enabled",
+                    "model_only_fallback",
+                    "max_results",
+                    "native_max_output_tokens",
+                    "native_timeout_seconds",
+                    "native_failure_cooldown_seconds",
+                )
+            },
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     async def _create_working_memory(
         self,
@@ -1777,6 +1942,12 @@ class Orchestrator:
         )
         if self._episodic_memory is not None and is_complete_success:
             try:
+                result.metadata = {
+                    **result.metadata,
+                    "research_cache_fingerprint": (
+                        self._research_cache_fingerprint()
+                    ),
+                }
                 await self._episodic_memory.store(task, result)
             except Exception as exc:
                 logger.warning("Episodic memory store failed: %s", exc)
@@ -1869,6 +2040,22 @@ class Orchestrator:
                     else ""
                 )
             )
+        if (
+            final_critic is not None
+            and final_critic.evaluation_status == "evaluated"
+            and final_critic.overall
+            < float(
+                getattr(
+                    getattr(self._settings, "agent", None),
+                    "critic_threshold",
+                    7.0,
+                )
+            )
+        ):
+            degradation_reasons.append(
+                "报告质量评分 "
+                f"{final_critic.overall:.1f}/10 未达到验收阈值。"
+            )
         if refinement_failure:
             degradation_reasons.append(
                 "报告精炼未完成，当前展示最后一个有效版本。"
@@ -1958,16 +2145,9 @@ class Orchestrator:
                 else ("grounded" if sources else "not_required")
             ),
             "citation_status": (
-                "unavailable"
-                if any(
-                    item.get("grounding_status") == "model_only"
-                    for item in subtask_outputs
-                )
-                else (
-                    citation_verification.get("status", "not_applicable")
-                    if citation_verification is not None
-                    else "not_applicable"
-                )
+                citation_verification.get("status", "not_applicable")
+                if citation_verification is not None
+                else "not_applicable"
             ),
         }
         if failure_reason:
@@ -2160,6 +2340,19 @@ class Orchestrator:
         data["valid"] = verification.success
         data["status"] = "valid" if verification.success else "invalid"
         return data
+
+    @staticmethod
+    def _strip_unbacked_citations(
+        report: str,
+        sources: list[dict[str, Any]],
+    ) -> str:
+        if sources:
+            return report
+        return re.sub(
+            r"\s*\[([1-9]\d*)\](?!\()",
+            "",
+            report,
+        )
 
     @staticmethod
     def _format_citation_failure(

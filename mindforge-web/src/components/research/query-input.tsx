@@ -38,12 +38,20 @@ export function QueryInput({
       <div className="relative rounded-xl border border-border bg-surface shadow-sm transition-shadow focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50">
         <textarea
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          readOnly={isRunning}
+          aria-readonly={isRunning}
+          onChange={(e) => {
+            if (!isRunning) {
+              onChange(e.target.value);
+            }
+          }}
           placeholder="输入你的研究问题… 例如：量子计算在药物研发中的应用前景如何？"
           rows={3}
-          className="w-full resize-none rounded-xl border-0 bg-transparent px-5 py-4 text-base text-text placeholder:text-text-muted/60 focus:ring-0 focus:outline-none"
+          className={`w-full resize-none rounded-xl border-0 bg-transparent px-5 py-4 text-base text-text placeholder:text-text-muted/60 focus:ring-0 focus:outline-none ${
+            isRunning ? "cursor-not-allowed opacity-80" : ""
+          }`}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (!isRunning && e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
             }

@@ -105,6 +105,9 @@ interface SettingsPayload {
   subtask_timeout?: number;
   research_timeout?: number;
   llm_request_timeout?: number;
+  queue_timeout?: number;
+  native_web_search_timeout_seconds?: number;
+  sandbox_timeout?: number;
   max_subtasks?: number;
   max_tool_calls_total?: number;
   max_history_entries?: number;
@@ -145,6 +148,9 @@ export interface SettingsState {
   subtaskTimeout: number;
   researchTimeout: number;
   llmRequestTimeout: number;
+  queueTimeout: number;
+  nativeWebSearchTimeoutSeconds: number;
+  sandboxTimeout: number;
   maxSubtasks: number;
   maxToolCallsTotal: number;
   maxHistoryEntries: number;
@@ -187,6 +193,9 @@ export interface SettingsState {
   setSubtaskTimeout: (value: number) => void;
   setResearchTimeout: (value: number) => void;
   setLLMRequestTimeout: (value: number) => void;
+  setQueueTimeout: (value: number) => void;
+  setNativeWebSearchTimeoutSeconds: (value: number) => void;
+  setSandboxTimeout: (value: number) => void;
   setMaxSubtasks: (value: number) => void;
   setMaxToolCallsTotal: (value: number) => void;
   setMaxHistoryEntries: (value: number) => void;
@@ -394,6 +403,14 @@ function validateSettings(state: SettingsState): string | null {
     [state.subtaskTimeout, 10, 600, "子任务超时"],
     [state.researchTimeout, 30, 3600, "研究总超时"],
     [state.llmRequestTimeout, 5, 600, "单次模型调用超时"],
+    [state.queueTimeout, 1, 600, "工具排队超时"],
+    [
+      state.nativeWebSearchTimeoutSeconds,
+      5,
+      120,
+      "原生联网搜索超时",
+    ],
+    [state.sandboxTimeout, 5, 60, "代码执行超时"],
     [state.maxSubtasks, 1, 20, "最大子任务数"],
     [state.maxToolCallsTotal, 1, 100, "工具调用总预算"],
     [state.maxHistoryEntries, 0, 100_000, "历史记录上限"],
@@ -409,6 +426,15 @@ function validateSettings(state: SettingsState): string | null {
   }
   if (state.subtaskTimeout > state.researchTimeout) {
     return "子任务超时不能大于研究总超时。";
+  }
+  if (state.queueTimeout > state.researchTimeout) {
+    return "工具排队超时不能大于研究总超时。";
+  }
+  if (state.nativeWebSearchTimeoutSeconds > state.subtaskTimeout) {
+    return "原生联网搜索超时不能大于子任务超时。";
+  }
+  if (state.sandboxTimeout > state.subtaskTimeout) {
+    return "代码执行超时不能大于子任务超时。";
   }
   return null;
 }
@@ -432,9 +458,12 @@ export const useSettingsStore = create<SettingsState>()(
       maxIterations: 3,
       maxRefineRounds: 1,
       criticThreshold: 7,
-      subtaskTimeout: 60,
-      researchTimeout: 180,
+      subtaskTimeout: 120,
+      researchTimeout: 300,
       llmRequestTimeout: 45,
+      queueTimeout: 30,
+      nativeWebSearchTimeoutSeconds: 30,
+      sandboxTimeout: 15,
       maxSubtasks: 5,
       maxToolCallsTotal: 12,
       maxHistoryEntries: 0,
@@ -523,6 +552,10 @@ export const useSettingsStore = create<SettingsState>()(
       setSubtaskTimeout: (value) => set({ subtaskTimeout: value }),
       setResearchTimeout: (value) => set({ researchTimeout: value }),
       setLLMRequestTimeout: (value) => set({ llmRequestTimeout: value }),
+      setQueueTimeout: (value) => set({ queueTimeout: value }),
+      setNativeWebSearchTimeoutSeconds: (value) =>
+        set({ nativeWebSearchTimeoutSeconds: value }),
+      setSandboxTimeout: (value) => set({ sandboxTimeout: value }),
       setMaxSubtasks: (value) => set({ maxSubtasks: value }),
       setMaxToolCallsTotal: (value) => set({ maxToolCallsTotal: value }),
       setMaxHistoryEntries: (value) => set({ maxHistoryEntries: value }),
@@ -549,9 +582,12 @@ export const useSettingsStore = create<SettingsState>()(
             maxIterations: 3,
             maxRefineRounds: 1,
             criticThreshold: 7,
-            subtaskTimeout: 60,
-            researchTimeout: 180,
+            subtaskTimeout: 120,
+            researchTimeout: 300,
             llmRequestTimeout: 45,
+            queueTimeout: 30,
+            nativeWebSearchTimeoutSeconds: 30,
+            sandboxTimeout: 15,
             maxSubtasks: 5,
             maxToolCallsTotal: 12,
             maxHistoryEntries: 0,
@@ -615,9 +651,13 @@ export const useSettingsStore = create<SettingsState>()(
             maxIterations: data.max_iterations ?? 3,
             maxRefineRounds: data.max_refine_rounds ?? 1,
             criticThreshold: data.critic_threshold ?? 7,
-            subtaskTimeout: data.subtask_timeout ?? 60,
-            researchTimeout: data.research_timeout ?? 180,
+            subtaskTimeout: data.subtask_timeout ?? 120,
+            researchTimeout: data.research_timeout ?? 300,
             llmRequestTimeout: data.llm_request_timeout ?? 45,
+            queueTimeout: data.queue_timeout ?? 30,
+            nativeWebSearchTimeoutSeconds:
+              data.native_web_search_timeout_seconds ?? 30,
+            sandboxTimeout: data.sandbox_timeout ?? 15,
             maxSubtasks: data.max_subtasks ?? 5,
             maxToolCallsTotal: data.max_tool_calls_total ?? 12,
             maxHistoryEntries: data.max_history_entries ?? 0,
@@ -685,6 +725,10 @@ export const useSettingsStore = create<SettingsState>()(
           subtask_timeout: state.subtaskTimeout,
           research_timeout: state.researchTimeout,
           llm_request_timeout: state.llmRequestTimeout,
+          queue_timeout: state.queueTimeout,
+          native_web_search_timeout_seconds:
+            state.nativeWebSearchTimeoutSeconds,
+          sandbox_timeout: state.sandboxTimeout,
           max_subtasks: state.maxSubtasks,
           max_tool_calls_total: state.maxToolCallsTotal,
           max_history_entries: state.maxHistoryEntries,
@@ -765,6 +809,10 @@ export const useSettingsStore = create<SettingsState>()(
         subtaskTimeout: state.subtaskTimeout,
         researchTimeout: state.researchTimeout,
         llmRequestTimeout: state.llmRequestTimeout,
+        queueTimeout: state.queueTimeout,
+        nativeWebSearchTimeoutSeconds:
+          state.nativeWebSearchTimeoutSeconds,
+        sandboxTimeout: state.sandboxTimeout,
         maxSubtasks: state.maxSubtasks,
         maxToolCallsTotal: state.maxToolCallsTotal,
         maxHistoryEntries: state.maxHistoryEntries,

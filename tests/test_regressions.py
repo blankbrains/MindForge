@@ -923,6 +923,33 @@ class _ProbeAgent(BaseAgent):
         return "Return a useful answer."
 
 
+@pytest.mark.asyncio
+async def test_llm_timeout_skips_retry_without_full_budget() -> None:
+    class SlowLLM:
+        _model = "slow"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *_args, **_kwargs) -> ChatResult:
+            self.calls += 1
+            await asyncio.sleep(1)
+            return ChatResult(content="late")
+
+    llm = SlowLLM()
+    agent = _ProbeAgent(llm=llm)
+    object.__setattr__(agent._settings.agent, "llm_request_timeout", 0.02)
+
+    with pytest.raises(RuntimeError, match="after 1 attempt"):
+        await agent._chat(
+            [],
+            max_attempts=3,
+            deadline=time.perf_counter() + 0.035,
+        )
+
+    assert llm.calls == 1
+
+
 def test_llm_adapters_reject_missing_api_keys_as_configuration_errors() -> None:
     with pytest.raises(LLMConfigurationError):
         DeepSeekAdapter(api_key="")
@@ -1070,6 +1097,7 @@ async def test_agent_assigns_global_citation_numbers_across_tool_calls() -> None
 @pytest.mark.asyncio
 async def test_researcher_fetches_sources_when_model_answers_directly() -> None:
     tool_calls: list[str] = []
+    exposed_tool_names: list[list[str]] = []
 
     class SourceTool:
         def __init__(self, name: str, *, has_sources: bool) -> None:
@@ -1113,11 +1141,17 @@ async def test_researcher_fetches_sources_when_model_answers_directly() -> None:
     class DirectThenGroundedLLM:
         _model = "research-model"
 
-        async def chat(self, messages, **_kwargs) -> ChatResult:
+        async def chat(self, messages, *, tools=None, **_kwargs) -> ChatResult:
             assert any(
                 message.role == "user"
                 and "Global citation mapping" in message.content
                 for message in messages
+            )
+            exposed_tool_names.append(
+                [
+                    str(schema["function"]["name"])
+                    for schema in (tools or [])
+                ]
             )
             return ChatResult(content="Grounded answer [1].")
 
@@ -1134,8 +1168,61 @@ async def test_researcher_fetches_sources_when_model_answers_directly() -> None:
     assert result.success is True
     assert result.output == "Grounded answer [1]."
     assert tool_calls == ["search_knowledge_base", "web_search"]
+    assert exposed_tool_names == [[]]
     assert result.data["citation_status"] == "available"
     assert result.data["sources"][0]["index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_automatic_knowledge_base_probe_uses_direct_hybrid_mode() -> None:
+    received_arguments: list[dict[str, object]] = []
+
+    class KnowledgeBaseTool:
+        name = "search_knowledge_base"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "mode": {"type": "string"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, **kwargs) -> ToolResult:
+            received_arguments.append(kwargs)
+            return ToolResult(
+                success=True,
+                output="No relevant result.",
+                data={"sources": [], "total": 0},
+            )
+
+    class ModelOnlyLLM:
+        _model = "research-model"
+
+        async def chat(self, *_args, **_kwargs) -> ChatResult:
+            return ChatResult(content="模型已有知识回答")
+
+    result = await ResearcherAgent(
+        llm=ModelOnlyLLM(),
+        tools=[KnowledgeBaseTool()],
+    ).run("Python 与 Java 在 Agent 应用中的选型依据", max_rounds=1)
+
+    assert result.success is True
+    assert received_arguments == [
+        {
+            "query": "Python 与 Java 在 Agent 应用中的选型依据",
+            "mode": "hybrid",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1507,6 +1594,84 @@ async def test_researcher_uses_grounded_native_answer_without_extra_chat() -> No
 
 
 @pytest.mark.asyncio
+async def test_researcher_generates_final_answer_from_native_search_evidence() -> None:
+    class NativeEvidenceTool:
+        name = "web_search"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            return ToolResult(
+                success=True,
+                output=f"Evidence for {query}",
+                data={
+                    "answer_ready": False,
+                    "answer": "Intermediate evidence only.",
+                    "sources": [
+                        {
+                            "index": 1,
+                            "title": "Source",
+                            "url": "https://example.com/source",
+                            "content": "Python and Java evidence.",
+                        }
+                    ],
+                },
+            )
+
+    class FinalAnswerLLM:
+        _model = "research-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.tools = "not-called"
+
+        async def chat(self, *_args, **kwargs) -> ChatResult:
+            self.calls += 1
+            self.tools = kwargs.get("tools")
+            return ChatResult(content="Complete comparison report [1].")
+
+    class UnusedTool:
+        name = "code_executor"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "unused",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+
+        async def execute_async(self, **_kwargs) -> ToolResult:
+            raise AssertionError("tool should not run after source preflight")
+
+    llm = FinalAnswerLLM()
+    result = await ResearcherAgent(
+        llm=llm,
+        tools=[NativeEvidenceTool(), UnusedTool()],
+    ).run("Python and Java comparison", max_rounds=1)
+
+    assert llm.calls == 1
+    assert llm.tools is None
+    assert result.success is True
+    assert result.output == "Complete comparison report [1]."
+    assert result.data["rounds"] == 1
+
+
+@pytest.mark.asyncio
 async def test_researcher_rewrites_sourced_answer_without_markers() -> None:
     class SourceTool:
         name = "web_search"
@@ -1635,7 +1800,11 @@ async def test_synthesizer_stream_honors_llm_request_timeout() -> None:
     class SlowStreamingLLM:
         _model = "slow-stream"
 
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def chat(self, *_args, **_kwargs):
+            self.calls += 1
             await asyncio.sleep(0.05)
 
             async def events():
@@ -1643,10 +1812,11 @@ async def test_synthesizer_stream_honors_llm_request_timeout() -> None:
 
             return events()
 
-    agent = SynthesizerAgent(llm=SlowStreamingLLM())
+    llm = SlowStreamingLLM()
+    agent = SynthesizerAgent(llm=llm)
     object.__setattr__(agent._settings.agent, "llm_request_timeout", 0.01)
 
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(RuntimeError, match="LLM stream timed out"):
         _ = [
             event
             async for event in agent.synthesize_stream(
@@ -1658,9 +1828,48 @@ async def test_synthesizer_stream_honors_llm_request_timeout() -> None:
                         "output": "finding",
                     }
                 ],
-                max_attempts=1,
+                max_attempts=3,
             )
         ]
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_synthesizer_stream_timeout_is_idle_not_total_duration() -> None:
+    class ActiveStreamingLLM:
+        _model = "active-stream"
+
+        async def chat(self, *_args, **_kwargs):
+            async def events():
+                for _ in range(3):
+                    await asyncio.sleep(0.02)
+                    yield StreamEvent(type="heartbeat")
+                yield StreamEvent(type="chunk", content="answer")
+                yield StreamEvent(type="done")
+
+            return events()
+
+    agent = SynthesizerAgent(llm=ActiveStreamingLLM())
+    object.__setattr__(agent._settings.agent, "llm_request_timeout", 0.03)
+
+    events = [
+        event
+        async for event in agent.synthesize_stream(
+            task="test",
+            subtask_results=[
+                {
+                    "task_id": "one",
+                    "description": "one",
+                    "output": "finding",
+                }
+            ],
+            max_attempts=1,
+        )
+    ]
+
+    assert events[-1].type == "done"
+    assert events[-1].result is not None
+    assert events[-1].result.output == "answer"
 
 
 def test_web_search_validates_runtime_arguments() -> None:
@@ -1768,6 +1977,38 @@ async def test_native_web_search_timeout_returns_bounded_failure() -> None:
     assert result.data["terminal_for_run"] is True
     assert "timed out" in result.error
     assert time.perf_counter() - started < 0.1
+
+
+@pytest.mark.asyncio
+async def test_native_search_circuit_skips_repeated_timeout_waits() -> None:
+    class SlowNativeLLM:
+        supports_native_web_search = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search_web(self, *_args, **_kwargs):
+            self.calls += 1
+            await asyncio.sleep(0.2)
+            return NativeWebSearchResult(text="late")
+
+    llm = SlowNativeLLM()
+    tool = WebSearchTool(
+        native_llm=llm,
+        tavily_api_key="",
+        duckduckgo_enabled=False,
+        native_timeout_seconds=0.01,
+        native_failure_cooldown_seconds=60,
+    )
+
+    first = await tool.execute_async(query="first timeout")
+    started = time.perf_counter()
+    second = await tool.execute_async(query="second timeout")
+
+    assert first.data["failure_type"] == "native_timeout"
+    assert second.data["failure_type"] == "native_circuit_open"
+    assert llm.calls == 1
+    assert time.perf_counter() - started < 0.05
 
 
 def test_orchestrator_registers_native_search_without_tavily(
@@ -2161,6 +2402,32 @@ async def test_streaming_orchestrator_releases_slot_when_cancelled_during_startu
 
 
 @pytest.mark.asyncio
+async def test_streaming_orchestrator_does_not_relabel_pipeline_timeout() -> None:
+    orchestrator = object.__new__(routes.Orchestrator)
+    orchestrator._research_semaphore = asyncio.Semaphore(1)
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            queue_timeout=1,
+            research_timeout=10,
+            sse_heartbeat_seconds=1,
+        )
+    )
+
+    async def failing_stream(_task: str):
+        raise asyncio.TimeoutError("inner pipeline timeout")
+        if False:
+            yield {}
+
+    orchestrator._stream_pipeline = failing_stream
+
+    with pytest.raises(asyncio.TimeoutError, match="inner pipeline timeout"):
+        _ = [
+            event
+            async for event in orchestrator._stream_run_with_limit("timeout")
+        ]
+
+
+@pytest.mark.asyncio
 async def test_streaming_orchestrator_emits_planning_and_heartbeat() -> None:
     class SlowPlanner:
         async def run(self, task: str):
@@ -2192,6 +2459,7 @@ async def test_streaming_orchestrator_emits_planning_and_heartbeat() -> None:
     )
     orchestrator._settings = SimpleNamespace(
         agent=SimpleNamespace(
+            research_mode="fast",
             research_timeout=1,
             subtask_timeout=1,
             queue_timeout=1,
@@ -2758,6 +3026,55 @@ def test_citation_verifier_accepts_lexically_supported_claim() -> None:
 
     assert result.success is True
     assert result.data["validity_score"] == 1.0
+
+
+def test_citation_verifier_accepts_provider_native_source_mapping() -> None:
+    result = CitationVerifier().execute(
+        report_text="Python 更适合快速验证 Agent 原型 [1]。",
+        sources=[
+            {
+                "index": 1,
+                "title": "Provider native web result",
+                "url": "https://example.com/agent-python",
+                "content": "",
+                "verification_mode": "provider_native",
+            }
+        ],
+        strict_unused=False,
+    )
+
+    assert result.success is True
+    assert result.data["validity_score"] == 1.0
+
+
+def test_native_answer_moves_source_only_links_to_citation_markers() -> None:
+    source = {
+        "index": 1,
+        "title": "Agent language comparison",
+        "url": "https://example.com/agent-language",
+    }
+    source_indices = {BaseAgent._source_identity(source): 1}
+    answer = (
+        "我来搜索相关资料。让我打开关键来源。"
+        "### 生态对比\n"
+        "- Python 的 Agent 生态更成熟。\n"
+        "- Java 更适合存量企业系统。\n"
+        "- 来源：[Agent language comparison]"
+        "(https://example.com/agent-language)\n"
+    )
+
+    grounded = BaseAgent._ground_native_answer(
+        answer,
+        [source],
+        source_indices,
+    )
+
+    assert "来源：" not in grounded
+    assert "我来搜索" not in grounded
+    assert grounded.startswith("### 生态对比")
+    assert "https://example.com/agent-language" not in grounded
+    assert "Python 的 Agent 生态更成熟。 [1]" in grounded
+    assert "Java 更适合存量企业系统。 [1]" in grounded
 
 
 @pytest.mark.asyncio
@@ -3506,7 +3823,16 @@ def test_settings_response_exposes_unified_provider_configs(
             critic_threshold=7.0,
             subtask_timeout=30,
             research_timeout=180,
+            llm_request_timeout=25,
+            queue_timeout=20,
         ),
+        web_search=SimpleNamespace(
+            native_enabled=True,
+            duckduckgo_enabled=False,
+            model_only_fallback=True,
+            native_timeout_seconds=35.0,
+        ),
+        sandbox=SimpleNamespace(sandbox_timeout=25),
     )
     monkeypatch.setitem(sys.modules, "mindforge.db", fake_db)
     monkeypatch.setattr(
@@ -3541,6 +3867,10 @@ def test_settings_response_exposes_unified_provider_configs(
         == "kimi_builtin"
     )
     assert response.model_only_fallback_enabled is True
+    assert response.llm_request_timeout == 25
+    assert response.queue_timeout == 20
+    assert response.native_web_search_timeout_seconds == 35.0
+    assert response.sandbox_timeout == 25
 
 
 def test_settings_update_persists_multiple_provider_configs_atomically(
@@ -3613,6 +3943,9 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
         "LLM_LOCAL_MODEL",
         "LLM_LOCAL_API_KEY_REQUIRED",
         "LLM_LLM_PROVIDER",
+        "AGENT_QUEUE_TIMEOUT",
+        "WEB_SEARCH_NATIVE_TIMEOUT_SECONDS",
+        "SANDBOX_SANDBOX_TIMEOUT",
     }
     for key in environment_keys:
         monkeypatch.setenv(key, "previous")
@@ -3646,6 +3979,9 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
     result = routes._update_settings_locked(
         SettingsUpdateRequest(
             llm_provider="local",
+            queue_timeout=40,
+            native_web_search_timeout_seconds=30,
+            sandbox_timeout=20,
             llm_provider_configs=[
                 LLMProviderUpdate(
                     provider="kimi",
@@ -3718,6 +4054,9 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
     assert captured["LLM_LOCAL_BASE_URL"] == "http://host.docker.internal:8001/v1"
     assert captured["LLM_LOCAL_MODEL"] == "qwen3"
     assert captured["LLM_LOCAL_API_KEY_REQUIRED"] == "false"
+    assert captured["AGENT_QUEUE_TIMEOUT"] == "40"
+    assert captured["WEB_SEARCH_NATIVE_TIMEOUT_SECONDS"] == "30.0"
+    assert captured["SANDBOX_SANDBOX_TIMEOUT"] == "20"
     assert reset_scopes == [
         {
             "reset_orchestrator": True,

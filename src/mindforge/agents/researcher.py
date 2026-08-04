@@ -6,7 +6,10 @@ import re
 from typing import Literal, Optional
 
 from mindforge.agents.base import AgentResult, BaseAgent
-from mindforge.agents.response_guidance import build_response_guidance
+from mindforge.agents.response_guidance import (
+    build_response_guidance,
+    response_profile,
+)
 
 # ---------------------------------------------------------------------------
 # ResearcherAgent
@@ -173,7 +176,25 @@ class ResearcherAgent(BaseAgent):
         *,
         task_type: str = "research",
         subtask_count: int = 1,
+        total_subtasks: int = 1,
     ) -> str:
+        profile = response_profile(
+            task,
+            task_type=task_type,
+            subtask_count=subtask_count,
+        )
+        if total_subtasks > 1 and profile.depth not in {"concise", "code"}:
+            budget = (
+                "1200-2200"
+                if profile.depth == "deep"
+                else "800-1600"
+            )
+            return (
+                "这是最终综合报告的一个证据子任务。只输出可供 Synthesizer "
+                "使用的高密度事实、依据、适用条件、限制和必要例外，不写执行摘要、"
+                "总括结论或重复背景；使用与证据结构匹配的小节或列表。"
+                f"正文通常控制在 {budget} 个中文字符，信息完整后立即停止。"
+            )
         return build_response_guidance(
             task,
             task_type=task_type,
@@ -212,6 +233,7 @@ class ResearcherAgent(BaseAgent):
         max_rounds: Optional[int] = None,
         task_type: str = "research",
         subtopics: Optional[list[str]] = None,
+        total_subtasks: int = 1,
         deadline: float | None = None,
     ) -> AgentResult:
         """Execute a research subtask via the ReAct tool-calling loop.
@@ -247,7 +269,8 @@ class ResearcherAgent(BaseAgent):
         depth_guidance = self.response_length_guidance(
             task,
             task_type=task_type,
-            subtask_count=max(1, len(normalized_subtopics)),
+            subtask_count=1,
+            total_subtasks=total_subtasks,
         )
         execution_context = [
             f"## 子任务类型\n\n{task_type}: {guidance}",

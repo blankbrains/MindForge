@@ -219,7 +219,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
           className="research-sources"
           aria-labelledby="research-sources-title"
         >
-          <h2 id="research-sources-title">来源</h2>
+          <h2 id="research-sources-title">参考文献</h2>
           <ol>
             {normalizedSources.map((source) => (
               <li

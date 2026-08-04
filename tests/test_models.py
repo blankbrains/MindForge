@@ -15,6 +15,7 @@ from mindforge.models.base import (
     LLMFactory,
     is_llm_configured,
 )
+from mindforge.models.deepseek_adapter import DeepSeekAdapter
 from mindforge.models.openai_compatible_adapter import (
     OpenAICompatibleAdapter,
 )
@@ -256,6 +257,97 @@ def test_responses_search_normalizes_structured_and_markdown_sources() -> None:
         "https://docs.python.org/3/",
     ]
     assert result.usage["input_tokens"] == 12
+    assert result.answer_ready is False
+
+
+def test_responses_search_keeps_source_specific_evidence() -> None:
+    response = SimpleNamespace(
+        output_text=(
+            "Python evidence from "
+            "[Python docs](https://docs.python.org/3/).\n\n"
+            "Java evidence from "
+            "[Java docs](https://docs.oracle.com/en/java/)."
+        ),
+        model_dump=lambda **_kwargs: {
+            "model": "search-model",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [
+                            {
+                                "title": "Python docs",
+                                "url": "https://docs.python.org/3/",
+                            },
+                            {
+                                "title": "Java docs",
+                                "url": "https://docs.oracle.com/en/java/",
+                            },
+                        ]
+                    },
+                }
+            ],
+        },
+    )
+
+    result = normalize_responses_web_search(
+        response,
+        provider="test",
+        max_results=5,
+    )
+
+    assert "Python evidence" in result.sources[0]["content"]
+    assert "Java evidence" not in result.sources[0]["content"]
+    assert "Java evidence" in result.sources[1]["content"]
+    assert "Python evidence" not in result.sources[1]["content"]
+
+
+def test_responses_search_upgrades_generic_titles_from_markdown() -> None:
+    url = "https://example.com/java-or-python-for-agents.html"
+    response = SimpleNamespace(
+        output_text=f"[Java or Python for agents]({url})",
+        model_dump=lambda **_kwargs: {
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [
+                            {
+                                "title": "Web source",
+                                "url": url,
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+    )
+
+    result = normalize_responses_web_search(
+        response,
+        provider="test",
+        max_results=5,
+    )
+
+    assert result.sources[0]["title"] == "Java or Python for agents"
+
+
+def test_responses_search_derives_title_when_provider_has_none() -> None:
+    url = "https://example.com/agent-framework-comparison.html"
+    response = SimpleNamespace(
+        output_text=url,
+        model_dump=lambda **_kwargs: {"output": []},
+    )
+
+    result = normalize_responses_web_search(
+        response,
+        provider="test",
+        max_results=5,
+    )
+
+    assert result.sources[0]["title"] == (
+        "example.com - agent framework comparison"
+    )
 
 
 @pytest.mark.asyncio
@@ -637,3 +729,95 @@ async def test_streaming_usage_is_returned_when_supported() -> None:
         "completion_tokens": 4,
         "total_tokens": 16,
     }
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_exposes_reasoning_as_internal_heartbeat() -> None:
+    async def chunks():
+        yield SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        reasoning_content="internal reasoning",
+                        tool_calls=None,
+                    )
+                )
+            ],
+            usage=None,
+        )
+        yield SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content="answer",
+                        reasoning_content=None,
+                        tool_calls=None,
+                    )
+                )
+            ],
+            usage=None,
+        )
+
+    class Completions:
+        async def create(self, **kwargs):
+            assert kwargs["stream"] is True
+            return chunks()
+
+    adapter = DeepSeekAdapter(
+        model="deepseek-reasoner",
+        api_key="test-key",
+    )
+    adapter.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+
+    stream = await adapter.chat(
+        [ChatMessage(role="user", content="test")],
+        stream=True,
+    )
+    events = [event async for event in stream]
+
+    assert [event.type for event in events] == [
+        "heartbeat",
+        "chunk",
+        "done",
+    ]
+    assert events[1].content == "answer"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_structured_response_uses_valid_reasoning_json() -> None:
+    message = SimpleNamespace(
+        content=None,
+        reasoning_content=(
+            "Internal analysis before the payload.\n"
+            '{"scores": {"overall": 8}}'
+        ),
+        tool_calls=None,
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=message)],
+        usage=None,
+    )
+
+    class Completions:
+        async def create(self, **kwargs):
+            assert kwargs["response_format"] == {"type": "json_object"}
+            return response
+
+    adapter = DeepSeekAdapter(
+        model="deepseek-reasoner",
+        api_key="test-key",
+    )
+    adapter.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+
+    result = await adapter.chat(
+        [ChatMessage(role="user", content="test")],
+        response_format={"type": "json_object"},
+    )
+
+    assert isinstance(result, ChatResult)
+    assert result.content == '{"scores": {"overall": 8}}'

@@ -58,6 +58,9 @@ function statusStyle(status: TraceStatus): string {
   if (status === "success") {
     return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300";
   }
+  if (status === "warning") {
+    return "bg-yellow-100 text-yellow-800 dark:bg-yellow-950 dark:text-yellow-200";
+  }
   if (status === "degraded") {
     return "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200";
   }
@@ -69,9 +72,17 @@ function statusStyle(status: TraceStatus): string {
 
 function statusLabel(status: TraceStatus): string {
   if (status === "success") return "成功";
+  if (status === "warning") return "成功（有告警）";
   if (status === "degraded") return "降级";
   if (status === "cancelled") return "已取消";
   return "失败";
+}
+
+function effectiveTraceStatus(trace: TraceSummary): TraceStatus {
+  if (trace.status === "success" && trace.failure_count > 0) {
+    return "warning";
+  }
+  return trace.status;
 }
 
 function observationLabel(name: string): string {
@@ -137,6 +148,7 @@ function TraceListItem({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const displayStatus = effectiveTraceStatus(trace);
   return (
     <button
       type="button"
@@ -163,10 +175,10 @@ function TraceListItem({
         <span
           className={cn(
             "shrink-0 rounded px-2 py-1 text-[11px] font-semibold",
-            statusStyle(trace.status),
+            statusStyle(displayStatus),
           )}
         >
-          {statusLabel(trace.status)}
+          {statusLabel(displayStatus)}
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
@@ -267,6 +279,9 @@ export function ObservabilityPage() {
     summary?.failure_summary
     ?? summary?.error
     ?? null;
+  const selectedTraceStatus = summary
+    ? effectiveTraceStatus(summary)
+    : "error";
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-5">
@@ -391,6 +406,7 @@ export function ObservabilityPage() {
               >
                 <option value="">全部状态</option>
                 <option value="success">成功</option>
+                <option value="warning">成功（有告警）</option>
                 <option value="degraded">降级</option>
                 <option value="error">失败</option>
                 <option value="cancelled">已取消</option>
@@ -474,10 +490,10 @@ export function ObservabilityPage() {
                       <span
                         className={cn(
                           "rounded px-2 py-1 text-xs font-semibold",
-                          statusStyle(summary.status),
+                          statusStyle(selectedTraceStatus),
                         )}
                       >
-                        {statusLabel(summary.status)}
+                        {statusLabel(selectedTraceStatus)}
                       </span>
                     </div>
                     <div className="mt-2 flex items-center gap-2">
@@ -527,17 +543,19 @@ export function ObservabilityPage() {
                   <div
                     className={cn(
                       "mt-4 border px-4 py-3 text-sm",
-                      summary.status === "degraded"
-                      || summary.status === "success"
+                       selectedTraceStatus === "degraded"
+                       || selectedTraceStatus === "warning"
+                       || selectedTraceStatus === "success"
                         ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
                         : "border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300",
                     )}
                   >
                     <span className="font-semibold">
-                      {summary.status === "degraded"
-                        ? "降级原因汇总："
-                        : summary.status === "success"
-                          ? "链路异常汇总（最终已恢复）："
+                       {selectedTraceStatus === "degraded"
+                         ? "降级原因汇总："
+                         : selectedTraceStatus === "warning"
+                           || selectedTraceStatus === "success"
+                           ? "链路异常汇总（最终已恢复）："
                           : "失败原因汇总："}
                     </span>
                     {failureSummary}

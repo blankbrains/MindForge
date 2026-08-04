@@ -1,6 +1,8 @@
 """模型抽象接口 — 支持多种 LLM 和 Embedding 提供者"""
 from __future__ import annotations
 
+import json
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -85,6 +87,50 @@ def normalize_token_usage(usage: Any) -> dict[str, int]:
     if cached_tokens and "prompt_cache_hit_tokens" not in normalized:
         normalized["prompt_cache_hit_tokens"] = cached_tokens
     return normalized
+
+
+def has_reasoning_delta(delta: Any) -> bool:
+    """Return whether a provider stream delta contains hidden reasoning."""
+    for attribute in ("reasoning_content", "reasoning"):
+        if getattr(delta, attribute, None):
+            return True
+    model_extra = getattr(delta, "model_extra", None)
+    if isinstance(model_extra, dict):
+        return bool(
+            model_extra.get("reasoning_content")
+            or model_extra.get("reasoning")
+        )
+    return False
+
+
+def extract_json_object_from_reasoning(message: Any) -> str:
+    """Extract one valid JSON object from a provider reasoning field."""
+    candidates = [
+        getattr(message, "reasoning_content", None),
+        getattr(message, "reasoning", None),
+    ]
+    model_extra = getattr(message, "model_extra", None)
+    if isinstance(model_extra, dict):
+        candidates.extend(
+            [
+                model_extra.get("reasoning_content"),
+                model_extra.get("reasoning"),
+            ]
+        )
+
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        text = candidate.strip()
+        for match in re.finditer(r"\{", text):
+            try:
+                value, end = decoder.raw_decode(text[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return text[match.start(): match.start() + end]
+    return ""
 
 
 class BaseLLM(ABC):

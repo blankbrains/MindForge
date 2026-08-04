@@ -11,6 +11,8 @@ from mindforge.models.base import (
     LLMConfigurationError,
     NativeWebSearchResult,
     StreamEvent,
+    extract_json_object_from_reasoning,
+    has_reasoning_delta,
     normalize_token_usage,
 )
 from mindforge.models.native_search import create_native_search_adapter
@@ -106,8 +108,16 @@ class OpenAIAdapter(BaseLLM):
                 for tc in msg.tool_calls
             ]
 
+        content = msg.content or ""
+        if (
+            not content
+            and response_format
+            and response_format.get("type") == "json_object"
+        ):
+            content = extract_json_object_from_reasoning(msg)
+
         return ChatResult(
-            content=msg.content or "",
+            content=content,
             tool_calls=tool_calls,
             usage=normalize_token_usage(resp.usage),
             model=self.model,
@@ -133,6 +143,8 @@ class OpenAIAdapter(BaseLLM):
             delta = chunk.choices[0].delta
             if delta.content:
                 yield StreamEvent(type="chunk", content=delta.content)
+            elif has_reasoning_delta(delta):
+                yield StreamEvent(type="heartbeat")
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index if tc.index is not None else 0

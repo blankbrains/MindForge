@@ -2131,6 +2131,17 @@ def get_settings_api():
             subtask_timeout=s.agent.subtask_timeout,
             research_timeout=s.agent.research_timeout,
             llm_request_timeout=getattr(s.agent, "llm_request_timeout", 45),
+            queue_timeout=getattr(s.agent, "queue_timeout", 30),
+            native_web_search_timeout_seconds=getattr(
+                web_search_config,
+                "native_timeout_seconds",
+                30.0,
+            ),
+            sandbox_timeout=getattr(
+                getattr(s, "sandbox", None),
+                "sandbox_timeout",
+                15,
+            ),
             max_subtasks=getattr(s.agent, "max_subtasks", 5),
             max_tool_calls_total=getattr(
                 s.agent,
@@ -2274,12 +2285,29 @@ def _update_settings_locked(body: SettingsUpdateRequest):
     effective_subtask_timeout = (
         body.subtask_timeout
         if body.subtask_timeout is not None
-        else getattr(current_agent, "subtask_timeout", 60)
+        else getattr(current_agent, "subtask_timeout", 120)
     )
     effective_research_timeout = (
         body.research_timeout
         if body.research_timeout is not None
-        else getattr(current_agent, "research_timeout", 180)
+        else getattr(current_agent, "research_timeout", 300)
+    )
+    effective_queue_timeout = (
+        body.queue_timeout
+        if body.queue_timeout is not None
+        else getattr(current_agent, "queue_timeout", 30)
+    )
+    current_web_search = getattr(current_settings, "web_search", None)
+    effective_native_web_search_timeout = (
+        body.native_web_search_timeout_seconds
+        if body.native_web_search_timeout_seconds is not None
+        else getattr(current_web_search, "native_timeout_seconds", 30.0)
+    )
+    current_sandbox = getattr(current_settings, "sandbox", None)
+    effective_sandbox_timeout = (
+        body.sandbox_timeout
+        if body.sandbox_timeout is not None
+        else getattr(current_sandbox, "sandbox_timeout", 15)
     )
     timeout_update_requested = any(
         value is not None
@@ -2287,6 +2315,9 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             body.llm_request_timeout,
             body.subtask_timeout,
             body.research_timeout,
+            body.queue_timeout,
+            body.native_web_search_timeout_seconds,
+            body.sandbox_timeout,
         )
     )
     if timeout_update_requested and effective_llm_timeout > effective_subtask_timeout:
@@ -2301,6 +2332,37 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             status_code=422,
             detail=(
                 "The subtask timeout must not exceed the research timeout."
+            ),
+        )
+    if (
+        timeout_update_requested
+        and effective_queue_timeout > effective_research_timeout
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The tool queue timeout must not exceed the research timeout."
+            ),
+        )
+    if (
+        timeout_update_requested
+        and effective_native_web_search_timeout > effective_subtask_timeout
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The native web-search timeout must not exceed the "
+                "subtask timeout."
+            ),
+        )
+    if (
+        timeout_update_requested
+        and effective_sandbox_timeout > effective_subtask_timeout
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The sandbox timeout must not exceed the subtask timeout."
             ),
         )
     embedding_provider_changed = (
@@ -2672,6 +2734,16 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             env_updates["AGENT_LLM_REQUEST_TIMEOUT"] = str(
                 body.llm_request_timeout
             )
+        if body.queue_timeout is not None:
+            env_updates["AGENT_QUEUE_TIMEOUT"] = str(body.queue_timeout)
+        if body.native_web_search_timeout_seconds is not None:
+            env_updates["WEB_SEARCH_NATIVE_TIMEOUT_SECONDS"] = str(
+                body.native_web_search_timeout_seconds
+            )
+        if body.sandbox_timeout is not None:
+            env_updates["SANDBOX_SANDBOX_TIMEOUT"] = str(
+                body.sandbox_timeout
+            )
         if body.max_subtasks is not None:
             env_updates["AGENT_MAX_SUBTASKS"] = str(body.max_subtasks)
         if body.max_tool_calls_total is not None:
@@ -2841,12 +2913,33 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     getattr(current_agent, "llm_request_timeout", None),
                 ),
                 (
+                    body.queue_timeout,
+                    getattr(current_agent, "queue_timeout", None),
+                ),
+                (
                     body.max_subtasks,
                     getattr(current_agent, "max_subtasks", None),
                 ),
                 (
                     body.max_tool_calls_total,
                     getattr(current_agent, "max_tool_calls_total", None),
+                ),
+            )
+        )
+        research_tool_changed = any(
+            value is not None and value != current
+            for value, current in (
+                (
+                    body.native_web_search_timeout_seconds,
+                    getattr(
+                        current_web_search,
+                        "native_timeout_seconds",
+                        None,
+                    ),
+                ),
+                (
+                    body.sandbox_timeout,
+                    getattr(current_sandbox, "sandbox_timeout", None),
                 ),
             )
         )
@@ -2865,7 +2958,9 @@ def _update_settings_locked(body: SettingsUpdateRequest):
 
             close_tracer()
         reset_runtime_components(
-            reset_orchestrator=llm_changed or agent_changed,
+            reset_orchestrator=(
+                llm_changed or agent_changed or research_tool_changed
+            ),
             reset_embedder=embedding_provider_changed,
             reset_vector_store=False,
             reset_retrieval=(
@@ -2948,9 +3043,14 @@ def get_observability_status():
 def list_observability_traces(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    status: Literal["success", "degraded", "error", "cancelled"] | None = Query(
-        None
-    ),
+    status: Literal[
+        "success",
+        "warning",
+        "degraded",
+        "error",
+        "cancelled",
+    ]
+    | None = Query(None),
     search: str = Query("", max_length=200),
 ):
     """Return bounded local trace summaries for the operations UI."""

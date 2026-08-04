@@ -237,6 +237,7 @@ class BaseAgent(ABC):
         response_format: Optional[dict] = None,
         temperature: Optional[float] = None,
         max_attempts: int = 3,
+        deadline: float | None = None,
         _llm_override: Any = None,
     ) -> ChatResult:
         """Call the LLM with 3-attempt retry and exponential backoff."""
@@ -247,7 +248,17 @@ class BaseAgent(ABC):
             getattr(self._settings.agent, "llm_request_timeout", 45)
         )
 
-        async def call_llm() -> ChatResult:
+        def attempt_timeout() -> float:
+            if deadline is None:
+                return request_timeout
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(
+                    "LLM request deadline was exhausted."
+                )
+            return min(request_timeout, remaining)
+
+        async def call_llm(timeout_seconds: float) -> ChatResult:
             return await asyncio.wait_for(
                 llm.chat(
                     messages=messages,
@@ -255,15 +266,18 @@ class BaseAgent(ABC):
                     response_format=response_format,
                     temperature=temp,
                 ),
-                timeout=request_timeout,
+                timeout=timeout_seconds,
             )
 
         attempts = max(1, min(int(max_attempts), 3))
+        attempts_made = 0
         for attempt in range(attempts):
+            attempts_made = attempt + 1
+            timeout_seconds = attempt_timeout()
             try:
                 tracer = self._get_tracer()
                 if tracer is None:
-                    return await call_llm()
+                    return await call_llm(timeout_seconds)
                 model_name = getattr(
                     llm,
                     "_model",
@@ -277,7 +291,7 @@ class BaseAgent(ABC):
                         "provider": self._provider_name,
                         "attempt": attempt + 1,
                         "stage": "llm_request",
-                        "timeout_seconds": request_timeout,
+                        "timeout_seconds": timeout_seconds,
                     },
                 ) as span:
                     span.input = {
@@ -294,7 +308,7 @@ class BaseAgent(ABC):
                         ],
                     }
                     try:
-                        result = await call_llm()
+                        result = await call_llm(timeout_seconds)
                     except asyncio.TimeoutError:
                         span.metadata.update(
                             {
@@ -305,7 +319,7 @@ class BaseAgent(ABC):
                         )
                         span.error = (
                             "LLM request timed out after "
-                            f"{request_timeout:g} seconds."
+                            f"{timeout_seconds:g} seconds."
                         )
                         raise
                     except asyncio.CancelledError:
@@ -348,6 +362,17 @@ class BaseAgent(ABC):
                     raise
                 if attempt < attempts - 1:
                     wait = 2.0**attempt * 1.0
+                    if deadline is not None:
+                        remaining_after_wait = (
+                            deadline - time.perf_counter() - wait
+                        )
+                        if (
+                            isinstance(exc, asyncio.TimeoutError)
+                            and remaining_after_wait < request_timeout
+                        ):
+                            break
+                        if remaining_after_wait <= 0:
+                            break
                     await asyncio.sleep(wait)
 
         detail = (
@@ -360,7 +385,7 @@ class BaseAgent(ABC):
             else "unknown error"
         )
         raise RuntimeError(
-            f"LLM chat failed after {attempts} attempt(s): {detail}"
+            f"LLM chat failed after {attempts_made} attempt(s): {detail}"
         ) from last_exc
 
     async def _chat_stream(
@@ -418,7 +443,6 @@ class BaseAgent(ABC):
                             ],
                             "stream": True,
                         }
-                    deadline = asyncio.get_running_loop().time() + request_timeout
                     stream = await asyncio.wait_for(
                         llm.chat(
                             messages=messages,
@@ -430,13 +454,10 @@ class BaseAgent(ABC):
                     iterator = stream.__aiter__()
                     event_count = 0
                     while True:
-                        remaining = deadline - asyncio.get_running_loop().time()
-                        if remaining <= 0:
-                            raise asyncio.TimeoutError
                         try:
                             event = await asyncio.wait_for(
                                 anext(iterator),
-                                timeout=remaining,
+                                timeout=request_timeout,
                             )
                         except StopAsyncIteration:
                             break
@@ -459,8 +480,8 @@ class BaseAgent(ABC):
                 raise
             except Exception as exc:
                 last_exc = exc
+                is_timeout = isinstance(exc, asyncio.TimeoutError)
                 if span is not None:
-                    is_timeout = isinstance(exc, asyncio.TimeoutError)
                     span.metadata.update(
                         {
                             "status": "error",
@@ -480,6 +501,11 @@ class BaseAgent(ABC):
                             f"{tracer.describe_exception(exc)}"
                         )
                     )
+                if is_timeout:
+                    raise RuntimeError(
+                        "LLM stream timed out after "
+                        f"{request_timeout:g} seconds."
+                    ) from exc
                 status = getattr(exc, "status_code", None)
                 if (
                     emitted_event
@@ -783,6 +809,7 @@ class BaseAgent(ABC):
         automatic_source_search_attempted = False
         citation_rewrite_requested = False
         force_model_only_generation = False
+        force_text_generation = False
         native_answer_candidate = ""
         collected_sources: list[
             dict[str, Any]
@@ -873,6 +900,7 @@ class BaseAgent(ABC):
                     self._chat(
                         conv,
                         tools=tools,
+                        deadline=deadline,
                         _llm_override=_llm_override,
                     ),
                     timeout=remaining,
@@ -1018,12 +1046,25 @@ class BaseAgent(ABC):
                     "type": "function",
                     "function": {
                         "name": source_tool_name,
-                        "arguments": json.dumps(
-                            {"query": task},
-                            ensure_ascii=False,
-                        ),
+                        "arguments": "",
                     },
                 }
+                arguments: dict[str, Any] = {"query": task}
+                if source_tool_name == "search_knowledge_base":
+                    tool = self._tool_dict.get(source_tool_name)
+                    if tool is not None:
+                        function_schema = tool.to_openai_function()
+                        properties = (
+                            function_schema.get("function", {})
+                            .get("parameters", {})
+                            .get("properties", {})
+                        )
+                        if "mode" in properties:
+                            arguments["mode"] = "hybrid"
+                tool_call["function"]["arguments"] = json.dumps(
+                    arguments,
+                    ensure_ascii=False,
+                )
                 tool_calls_made += 1
                 exec_result = await execute_tool_call(tool_call)
                 tool_output = register_tool_result(
@@ -1048,7 +1089,20 @@ class BaseAgent(ABC):
         # for an ungrounded draft that would immediately be discarded.
         if require_sources:
             await collect_required_sources()
-            if not collected_sources and model_only_fallback:
+            active_tool_names.discard("verify_citation")
+            if collected_sources:
+                active_tool_names.difference_update(source_tool_name_set)
+                force_text_generation = True
+                conv.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            "证据收集已经完成。不要再调用任何工具；"
+                            "请直接基于现有证据生成完整最终答案。"
+                        ),
+                    )
+                )
+            elif model_only_fallback:
                 force_model_only_generation = True
                 active_tool_names.difference_update(source_tool_name_set)
                 conv.append(
@@ -1074,7 +1128,7 @@ class BaseAgent(ABC):
             rounds_completed = round_idx + 1
             round_tool_schemas = (
                 []
-                if force_model_only_generation
+                if force_model_only_generation or force_text_generation
                 else self._get_tool_schemas(active_tool_names)
             )
             result = await chat_with_deadline(
@@ -1431,6 +1485,20 @@ class BaseAgent(ABC):
         source_indices: dict[str, int],
     ) -> str:
         rendered = answer.strip()
+        heading_match = re.search(r"#{1,6}\s+\S", rendered)
+        if heading_match is not None:
+            prefix = rendered[:heading_match.start()]
+            progress_markers = (
+                "我来搜索",
+                "让我搜索",
+                "让我打开",
+                "我将搜索",
+                "接下来搜索",
+                "再验证",
+                "正在搜索",
+            )
+            if any(marker in prefix for marker in progress_markers):
+                rendered = rendered[heading_match.start():].lstrip()
         available_indices: list[int] = []
         url_indices: dict[str, int] = {}
         for source in sources:
@@ -1445,6 +1513,52 @@ class BaseAgent(ABC):
                 continue
             url_indices[cls._canonical_citation_url(url)] = global_index
 
+        markdown_link_pattern = re.compile(
+            r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+            re.IGNORECASE,
+        )
+        raw_url_pattern = re.compile(
+            r"https?://[^\s<>()\[\]{}\"']+",
+            re.IGNORECASE,
+        )
+        source_line_pattern = re.compile(
+            r"^\s*(?:[-*+]\s*)?"
+            r"(?:来源|参考来源|参考资料|sources?)\s*[:：]\s*(.+?)\s*$",
+            re.IGNORECASE,
+        )
+
+        def indices_in_text(value: str) -> list[int]:
+            indices: list[int] = []
+            for match in markdown_link_pattern.finditer(value):
+                index = url_indices.get(
+                    cls._canonical_citation_url(match.group(2))
+                )
+                if index is not None:
+                    indices.append(index)
+            for match in raw_url_pattern.finditer(value):
+                index = url_indices.get(
+                    cls._canonical_citation_url(match.group(0))
+                )
+                if index is not None:
+                    indices.append(index)
+            indices.extend(
+                int(value)
+                for value in re.findall(r"\[([1-9]\d*)\]", value)
+                if int(value) in available_indices
+            )
+            return list(dict.fromkeys(indices))
+
+        def append_markers(line: str, indices: list[int]) -> str:
+            missing = [
+                index
+                for index in indices
+                if f"[{index}]" not in line
+            ]
+            if not missing:
+                return line
+            markers = "".join(f"[{index}]" for index in missing)
+            return f"{line.rstrip()} {markers}"
+
         def replace_markdown_link(match: re.Match[str]) -> str:
             index = url_indices.get(
                 cls._canonical_citation_url(match.group(2))
@@ -1453,34 +1567,75 @@ class BaseAgent(ABC):
                 return match.group(0)
             return f"{match.group(1)} [{index}]"
 
-        rendered = re.sub(
-            r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
-            replace_markdown_link,
-            rendered,
-            flags=re.IGNORECASE,
-        )
-
         def replace_raw_url(match: re.Match[str]) -> str:
             index = url_indices.get(
                 cls._canonical_citation_url(match.group(0))
             )
             return f"[{index}]" if index is not None else match.group(0)
 
-        rendered = re.sub(
-            r"https?://[^\s<>()\[\]{}\"']+",
-            replace_raw_url,
-            rendered,
-            flags=re.IGNORECASE,
-        )
+        normalized_lines: list[str] = []
+        for line in rendered.splitlines():
+            source_match = source_line_pattern.match(line)
+            if source_match is not None:
+                indices = indices_in_text(source_match.group(1))
+                if indices:
+                    cursor = len(normalized_lines) - 1
+                    while cursor >= 0 and not normalized_lines[cursor].strip():
+                        cursor -= 1
+                    bullet_indices: list[int] = []
+                    while (
+                        cursor >= 0
+                        and re.match(
+                            r"^\s*[-*+]\s+",
+                            normalized_lines[cursor],
+                        )
+                    ):
+                        bullet_indices.append(cursor)
+                        cursor -= 1
+                    targets = (
+                        list(reversed(bullet_indices))
+                        if bullet_indices
+                        else (
+                            [cursor]
+                            if cursor >= 0
+                            and not normalized_lines[cursor].lstrip().startswith("#")
+                            else []
+                        )
+                    )
+                    for target in targets:
+                        normalized_lines[target] = append_markers(
+                            normalized_lines[target],
+                            indices,
+                        )
+                    continue
+
+            normalized = markdown_link_pattern.sub(
+                replace_markdown_link,
+                line,
+            )
+            normalized = raw_url_pattern.sub(
+                replace_raw_url,
+                normalized,
+            )
+            normalized_lines.append(normalized)
+
+        rendered = "\n".join(normalized_lines).strip()
         if (
             rendered
             and available_indices
             and not cls._contains_citation_marker(rendered)
         ):
-            markers = " ".join(
-                f"[{index}]" for index in dict.fromkeys(available_indices)
-            )
-            rendered = f"{rendered}\n\n来源：{markers}"
+            indices = list(dict.fromkeys(available_indices))
+            lines = rendered.splitlines()
+            cursor = len(lines) - 1
+            while cursor >= 0 and (
+                not lines[cursor].strip()
+                or lines[cursor].lstrip().startswith("#")
+            ):
+                cursor -= 1
+            if cursor >= 0:
+                lines[cursor] = append_markers(lines[cursor], indices)
+                rendered = "\n".join(lines)
         return rendered
 
     @staticmethod

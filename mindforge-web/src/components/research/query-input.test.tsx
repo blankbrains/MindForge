@@ -69,7 +69,7 @@ describe("QueryInput", () => {
     expect(onSubmit).toHaveBeenCalledWith("MindForge");
   });
 
-  it("keeps the editor available and cancels an active research task", () => {
+  it("locks the editor and still cancels an active research task", () => {
     const onCancel = vi.fn();
     const onChange = vi.fn();
     render(
@@ -83,11 +83,12 @@ describe("QueryInput", () => {
     );
 
     const input = screen.getByRole("textbox");
+    expect(input).toHaveProperty("readOnly", true);
     expect(input).not.toHaveProperty("disabled", true);
     fireEvent.change(input, { target: { value: "新的草稿" } });
     fireEvent.click(screen.getByRole("button", { name: "停止研究" }));
 
-    expect(onChange).toHaveBeenCalledWith("新的草稿");
+    expect(onChange).not.toHaveBeenCalled();
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
@@ -103,5 +104,6 @@ describe("QueryInput", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(stopButton.getAttribute("type")).toBe("button");
     expect(screen.getByRole("button", { name: "开始研究" })).toBeTruthy();
+    expect(screen.getByRole("textbox")).toHaveProperty("readOnly", false);
   });
 });

@@ -11,7 +11,10 @@ from mindforge.agents.base import (
     _estimate_cost_details,
 )
 from mindforge.agents.critic import CriticScore
-from mindforge.agents.response_guidance import build_response_guidance
+from mindforge.agents.response_guidance import (
+    build_response_guidance,
+    response_profile,
+)
 from mindforge.models.base import ChatMessage
 
 
@@ -30,6 +33,9 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 - 先回答用户真正提出的问题，再决定需要哪些章节；不得机械套用固定报告模板。
 - 简短或范围集中的问题不写执行摘要、关键发现、局限性等重复章节。
 - 多维研究可使用执行摘要、详细分析、风险、建议等章节，但只保留有内容的部分。
+- 根据问题复杂度动态选择章节数量：范围集中的研究通常 3-5 节，推荐、对比或
+  多角度分析通常 4-7 节，深度研究通常 6-10 节；这些范围不是硬性模板，
+  信息维度不足时宁可少一节，也不得创建空章节或重复拆分同一观点。
 - 只有实际提供来源时才生成参考文献；没有数据时不要创建“数据与证据”空章节。
 - 使用标准 Markdown 结构化内容：标题之间、段落之间、列表前后保留空行。
 - 每段聚焦一个主题，避免把多个观点挤在一个超长段落中。
@@ -73,6 +79,23 @@ def _per_subtask_budget(
     return max(100, (max(200, total_budget) // count) - 300)
 
 
+def _effective_synthesis_context_budget(
+    configured_budget: int,
+    task: str,
+    *,
+    subtask_count: int,
+) -> int:
+    profile = response_profile(
+        task,
+        subtask_count=subtask_count,
+        final_report=True,
+    )
+    if profile.max_chars is None:
+        return configured_budget
+    adaptive_budget = max(8_000, profile.max_chars * 3)
+    return min(configured_budget, adaptive_budget)
+
+
 def _synthesis_output_instruction(
     task: str,
     *,
@@ -94,6 +117,8 @@ def _synthesis_output_instruction(
         f"{depth_guidance}\n\n"
         "请将发现综合成直接回应原始问题的最终答案，按实际内容选择章节，"
         "不要重复子任务原文，也不要为了显得完整而填充固定模板。"
+        "完成前检查结论、关键依据、适用条件、限制和可执行建议是否已经充分覆盖；"
+        "除非原始问题明确要求简短，否则不得在核心内容仍明显不足时提前结束。"
         f"{citation_instruction}输出语言必须是中文。"
     )
 
@@ -148,6 +173,11 @@ class SynthesizerAgent(BaseAgent):
                 "synthesis_context_max_chars",
                 60_000,
             )
+        )
+        synthesis_context_max_chars = _effective_synthesis_context_budget(
+            synthesis_context_max_chars,
+            task,
+            subtask_count=len(subtask_results),
         )
         per_subtask_chars = _per_subtask_budget(
             synthesis_context_max_chars,
@@ -300,6 +330,11 @@ class SynthesizerAgent(BaseAgent):
                 "synthesis_context_max_chars",
                 60_000,
             )
+        )
+        synthesis_context_max_chars = _effective_synthesis_context_budget(
+            synthesis_context_max_chars,
+            task,
+            subtask_count=len(subtask_results),
         )
         per_subtask_chars = _per_subtask_budget(
             synthesis_context_max_chars,

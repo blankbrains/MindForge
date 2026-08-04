@@ -132,7 +132,9 @@ describe("StreamingAnswerPanel", () => {
     );
     expect(citation.getAttribute("target")).toBe("_blank");
     expect(citation.getAttribute("rel")).toBe("noreferrer noopener");
-    expect(screen.getByRole("heading", { name: "来源" })).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: "参考文献" }),
+    ).toBeTruthy();
     expect(
       screen.getByRole("link", { name: "Example source" }),
     ).toBeTruthy();

@@ -721,6 +721,68 @@ def test_trace_detail_aggregates_structured_failure_causes(
     assert failures["llm_request_cancelled"]["attempt"] == 1
 
 
+def test_recovered_child_failure_uses_warning_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from mindforge.observability import store as store_module
+    from mindforge.observability import tracer as tracer_module
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(tracer_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(store_module, "get_settings", lambda: settings)
+    tracer = tracer_module.Tracer()
+
+    with tracer.span(
+        "orchestrator.research",
+        metadata={"display_name": "recovered trace"},
+    ) as root:
+        with tracer.span(
+            "llm.chat",
+            metadata={
+                "agent": "researcher",
+                "model": "test-model",
+                "attempt": 1,
+                "stage": "llm_request",
+                "status": "error",
+                "error_code": "llm_request_failed",
+                "error_type": "InternalServerError",
+            },
+        ) as first_attempt:
+            first_attempt.error = "Provider returned 503."
+        with tracer.span(
+            "llm.chat",
+            metadata={
+                "agent": "researcher",
+                "model": "test-model",
+                "attempt": 2,
+            },
+        ) as second_attempt:
+            second_attempt.output = {"content": "Recovered answer."}
+        root.metadata["status"] = "success"
+        root.output = {"success": True, "outcome": "success"}
+
+    repository = store_module.TraceRepository(tmp_path)
+    detail = repository.get_trace(root.trace_id)
+    warning_listing = repository.list_traces(
+        limit=20,
+        offset=0,
+        status="warning",
+    )
+    success_listing = repository.list_traces(
+        limit=20,
+        offset=0,
+        status="success",
+    )
+
+    assert detail is not None
+    assert detail["summary"]["status"] == "warning"
+    assert detail["summary"]["failure_count"] == 1
+    assert warning_listing["total"] == 1
+    assert warning_listing["traces"][0]["trace_id"] == root.trace_id
+    assert success_listing["total"] == 0
+
+
 def test_tracer_records_non_empty_timeout_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

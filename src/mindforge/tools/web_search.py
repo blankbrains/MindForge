@@ -83,6 +83,7 @@ class WebSearchTool(BaseTool):
         duckduckgo_enabled: Optional[bool] = None,
         native_max_output_tokens: Optional[int] = None,
         native_timeout_seconds: Optional[float] = None,
+        native_failure_cooldown_seconds: Optional[float] = None,
     ) -> None:
         super().__init__()
         from mindforge.config import get_settings
@@ -111,6 +112,12 @@ class WebSearchTool(BaseTool):
             if native_timeout_seconds is None
             else native_timeout_seconds
         )
+        self._native_failure_cooldown_seconds = (
+            settings.native_failure_cooldown_seconds
+            if native_failure_cooldown_seconds is None
+            else native_failure_cooldown_seconds
+        )
+        self._native_disabled_until = 0.0
         self._default_max_results = settings.max_results
         self.parameters_schema = copy.deepcopy(type(self).parameters_schema)
         self.parameters_schema["properties"]["max_results"]["default"] = (
@@ -120,6 +127,12 @@ class WebSearchTool(BaseTool):
     @property
     def native_available(self) -> bool:
         return bool(
+            self._native_configured()
+            and time.monotonic() >= self._native_disabled_until
+        )
+
+    def _native_configured(self) -> bool:
+        return bool(
             self._native_enabled
             and self._native_llm is not None
             and getattr(
@@ -127,6 +140,36 @@ class WebSearchTool(BaseTool):
                 "supports_native_web_search",
                 False,
             )
+        )
+
+    def _open_native_circuit(self) -> None:
+        cooldown = max(0.0, self._native_failure_cooldown_seconds)
+        self._native_disabled_until = time.monotonic() + cooldown
+
+    def _native_circuit_failure(self) -> ToolResult | None:
+        if (
+            not self._native_configured()
+            or time.monotonic() >= self._native_disabled_until
+        ):
+            return None
+        return ToolResult(
+            success=False,
+            output=(
+                "Provider-native web search is temporarily skipped after "
+                "a recent timeout or failure."
+            ),
+            error=(
+                "Provider-native web search is temporarily unavailable "
+                "during its failure cooldown."
+            ),
+            data={
+                "backend": self._native_backend_name(),
+                "failure_type": "native_circuit_open",
+                "retryable": True,
+                "terminal_for_run": True,
+                "sources": [],
+                "total": 0,
+            },
         )
 
     @property
@@ -534,7 +577,7 @@ class WebSearchTool(BaseTool):
             )
 
         native_result: ToolResult | None = None
-        native_failure: ToolResult | None = None
+        native_failure = self._native_circuit_failure()
         if self.native_available:
             try:
                 native_result = await self._search_native(
@@ -559,6 +602,7 @@ class WebSearchTool(BaseTool):
                         "total": 0,
                     },
                 )
+                self._open_native_circuit()
                 logger.warning(
                     "Provider-native web search timed out; trying auxiliary "
                     "backends."
@@ -582,6 +626,7 @@ class WebSearchTool(BaseTool):
                         "total": 0,
                     },
                 )
+                self._open_native_circuit()
                 logger.warning(
                     "Provider-native web search failed; trying auxiliary "
                     "backends: %s",
@@ -591,6 +636,7 @@ class WebSearchTool(BaseTool):
                 if native_result is not None and (
                     native_result.data or {}
                 ).get("sources"):
+                    self._native_disabled_until = 0.0
                     native_result.execution_time_ms = (
                         time.perf_counter() - start
                     ) * 1000

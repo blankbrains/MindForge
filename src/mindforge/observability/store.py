@@ -14,6 +14,13 @@ from mindforge.observability.tracer import resolve_traces_dir
 _TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{16}(?:[0-9a-f]{16})?$")
 _LEGACY_DUPLICATE_START_TOLERANCE_SECONDS = 0.001
 _LEGACY_DUPLICATE_DURATION_TOLERANCE_MS = 5.0
+_TRACE_STATUSES = {
+    "success",
+    "warning",
+    "degraded",
+    "error",
+    "cancelled",
+}
 
 
 def _public_url(value: str) -> str:
@@ -233,9 +240,14 @@ class TraceRepository:
         if summary is None:
             summary = self._derive_summary(trace_id, observations)
         failures = self._collect_failures(observations)
+        failure_count = len(failures)
         summary = {
             **summary,
-            "failure_count": len(failures),
+            "status": self._effective_status(
+                summary,
+                failure_count=failure_count,
+            ),
+            "failure_count": failure_count,
             "failure_summary": self._summarize_failures(failures),
         }
         return {
@@ -637,7 +649,42 @@ class TraceRepository:
         trace_id = value.get("trace_id")
         if not isinstance(trace_id, str) or not _TRACE_ID_PATTERN.fullmatch(trace_id):
             return None
+        value["status"] = self._effective_status(value)
         return value
+
+    @staticmethod
+    def _effective_status(
+        summary: dict[str, Any],
+        *,
+        failure_count: int | None = None,
+    ) -> str:
+        status = str(summary.get("status") or "").strip().lower()
+        if status not in _TRACE_STATUSES:
+            output = summary.get("output")
+            success = (
+                output.get("success")
+                if isinstance(output, dict)
+                else None
+            )
+            status = (
+                "error"
+                if summary.get("error") or success is False
+                else "success"
+            )
+        if failure_count is None:
+            raw_failure_count = summary.get("failure_count", 0)
+            raw_error_count = summary.get("error_count", 0)
+            failure_count = max(
+                int(raw_failure_count)
+                if isinstance(raw_failure_count, (int, float))
+                else 0,
+                int(raw_error_count)
+                if isinstance(raw_error_count, (int, float))
+                else 0,
+            )
+        if status == "success" and failure_count > 0:
+            return "warning"
+        return status
 
     @staticmethod
     def _derive_summary(
@@ -656,12 +703,7 @@ class TraceRepository:
         success = output.get("success") if isinstance(output, dict) else None
         metadata = root.get("metadata") or {}
         configured_status = str(metadata.get("status") or "").strip().lower()
-        if configured_status not in {
-            "success",
-            "degraded",
-            "error",
-            "cancelled",
-        }:
+        if configured_status not in _TRACE_STATUSES:
             configured_status = (
                 "error"
                 if root.get("error") or success is False

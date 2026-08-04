@@ -273,6 +273,12 @@ class CitationVerifier(BaseTool):
                             ),
                         )
                     )
+                elif (
+                    src.get("verification_mode") == "provider_native"
+                    and (title or url)
+                ):
+                    summary.valid_markers += 1
+                    summary.sources_used.add(marker.index)
                 elif not self._source_supports_marker(
                     report_text,
                     marker,

@@ -140,6 +140,15 @@ export function RetrievalSettingsPanel() {
           step={0.05}
           onChange={state.setKeywordMinCoverage}
         />
+        <NumberField
+          id="native-web-search-timeout"
+          label="原生联网搜索超时（秒）"
+          detail="模型供应商原生联网请求的最长等待时间"
+          value={state.nativeWebSearchTimeoutSeconds}
+          min={5}
+          max={120}
+          onChange={state.setNativeWebSearchTimeoutSeconds}
+        />
       </div>
     </section>
   );
@@ -185,6 +194,7 @@ function NumberField({
   min,
   max,
   step,
+  detail,
   onChange,
 }: {
   id: string;
@@ -193,11 +203,18 @@ function NumberField({
   min: number;
   max: number;
   step?: number;
+  detail?: string;
   onChange: (value: number) => void;
 }) {
+  const descriptionId = detail ? `${id}-description` : undefined;
   return (
-    <label htmlFor={id} className="block">
-      <span className="mb-1.5 block text-sm font-medium">{label}</span>
+    <div className="block">
+      <label
+        htmlFor={id}
+        className="mb-1.5 block text-sm font-medium"
+      >
+        {label}
+      </label>
       <input
         id={id}
         type="number"
@@ -206,8 +223,17 @@ function NumberField({
         max={max}
         step={step}
         onChange={(event) => onChange(Number(event.target.value))}
+        aria-describedby={descriptionId}
         className={inputClassName}
       />
-    </label>
+      {detail && (
+        <span
+          id={descriptionId}
+          className="mt-1 block text-xs leading-5 text-text-muted"
+        >
+          {detail}
+        </span>
+      )}
+    </div>
   );
 }

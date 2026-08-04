@@ -26,7 +26,9 @@ class ResponseProfile:
             budget = (
                 f"正文通常控制在 {self.min_chars}-{self.max_chars} 个中文字符。"
                 "这是软目标：信息完整后立即停止，不得为了达到下限重复结论、"
-                "堆砌背景或增加无关章节；确有必要时可以适度超出上限。"
+                "堆砌背景或增加无关章节；除非用户明确要求简短，否则在核心问题、"
+                "证据、关键条件、例外或实践建议尚未覆盖时不得提前结束。"
+                "确有必要时可以适度超出上限。"
             )
         return f"{self.structure}{budget}"
 
@@ -209,33 +211,37 @@ def response_profile(
     if depth == "focused":
         return ResponseProfile(
             depth=depth,
-            min_chars=500,
-            max_chars=1000,
+            min_chars=1000,
+            max_chars=1800,
             structure=(
-                "先给直接结论，再解释核心原理、关键条件和一个必要例外；"
-                "使用少量自然小节，不展开与问题无关的背景。"
+                "先给直接结论，再解释核心原理、关键条件、典型应用或例子以及必要限制；"
+                "通常使用 3-5 个有实际内容的自然小节，不展开与问题无关的背景。"
+                "章节数量是指导范围，不得创建空章节。"
             ),
         )
     if depth == "standard":
         if final_report and subtask_count >= 2:
-            min_chars, max_chars = 1500, 2800
+            min_chars, max_chars = 2400, 4200
         else:
-            min_chars, max_chars = 900, 1600
+            min_chars, max_chars = 1600, 2800
         return ResponseProfile(
             depth=depth,
             min_chars=min_chars,
             max_chars=max_chars,
             structure=(
                 "先给结论，再按判断标准、关键理由、对比或实施步骤展开，"
-                "最后说明适用条件和例外；只有信息天然具有行列关系时才使用表格。"
+                "最后说明适用条件、例外和可执行建议；通常使用 4-7 个有实际内容的"
+                "章节，章节数量是指导范围，不得为凑数量拆分重复观点。"
+                "只有信息天然具有行列关系时才使用表格。"
             ),
         )
     return ResponseProfile(
         depth=depth,
-        min_chars=3000 if final_report else 2500,
-        max_chars=6000 if final_report else 5000,
+        min_chars=4000 if final_report else 3200,
+        max_chars=8000 if final_report else 6000,
         structure=(
             "先给执行摘要，再按主要维度展开证据、分析、取舍、风险和建议；"
+            "通常使用 6-10 个有实际内容的章节，章节数量是指导范围；"
             "章节必须服务于问题，不得为填充模板创建空章节或重复章节。"
         ),
     )

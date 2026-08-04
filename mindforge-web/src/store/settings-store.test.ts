@@ -160,6 +160,9 @@ function settingsResponse(
       llm_provider: provider,
       llm_configured: configs[provider].configured,
       llm_providers: Object.values(configs).map(apiProvider),
+      queue_timeout: 44,
+      native_web_search_timeout_seconds: 22,
+      sandbox_timeout: 18,
     }),
     {
       status: 200,
@@ -194,9 +197,12 @@ describe("settings store", () => {
       maxIterations: 3,
       maxRefineRounds: 1,
       criticThreshold: 7,
-      subtaskTimeout: 60,
-      researchTimeout: 180,
+      subtaskTimeout: 120,
+      researchTimeout: 300,
       llmRequestTimeout: 45,
+      queueTimeout: 30,
+      nativeWebSearchTimeoutSeconds: 30,
+      sandboxTimeout: 15,
       loaded: true,
       loadError: null,
       saveError: null,
@@ -218,6 +224,9 @@ describe("settings store", () => {
     >;
     expect(payload.llm_provider).toBe("openai");
     expect(payload.embedding_provider).toBe("bge");
+    expect(payload.queue_timeout).toBe(30);
+    expect(payload.native_web_search_timeout_seconds).toBe(30);
+    expect(payload.sandbox_timeout).toBe(15);
     expect(useSettingsStore.getState().embeddingProvider).toBe("bge");
   });
 
@@ -345,6 +354,9 @@ describe("settings store", () => {
     expect(state.llmProvider).toBe("local");
     expect(state.hasLLMKey).toBe(true);
     expect(state.providerConfigs.local.apiKey).toBe("");
+    expect(state.queueTimeout).toBe(44);
+    expect(state.nativeWebSearchTimeoutSeconds).toBe(22);
+    expect(state.sandboxTimeout).toBe(18);
   });
 
   it("deletes only the selected provider API key", async () => {
@@ -395,7 +407,11 @@ describe("settings store", () => {
     expect(state.dirtyProviders).toContain("local");
     expect(state.retrievalTopK).toBe(20);
     expect(state.maxIterations).toBe(3);
-    expect(state.subtaskTimeout).toBe(60);
+    expect(state.subtaskTimeout).toBe(120);
+    expect(state.researchTimeout).toBe(300);
+    expect(state.queueTimeout).toBe(30);
+    expect(state.nativeWebSearchTimeoutSeconds).toBe(30);
+    expect(state.sandboxTimeout).toBe(15);
   });
 
   it("rejects contradictory timeout budgets", async () => {
@@ -411,5 +427,34 @@ describe("settings store", () => {
     expect(useSettingsStore.getState().saveError).toContain(
       "单次模型调用超时不能大于子任务超时",
     );
+  });
+
+  it.each([
+    [
+      { queueTimeout: 301 },
+      "工具排队超时不能大于研究总超时",
+    ],
+    [
+      {
+        nativeWebSearchTimeoutSeconds: 61,
+        subtaskTimeout: 60,
+      },
+      "原生联网搜索超时不能大于子任务超时",
+    ],
+    [
+      {
+        llmRequestTimeout: 30,
+        sandboxTimeout: 60,
+        subtaskTimeout: 30,
+      },
+      "代码执行超时不能大于子任务超时",
+    ],
+  ])("rejects invalid nested timeout budgets", async (update, message) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    useSettingsStore.setState(update);
+
+    expect(await useSettingsStore.getState().saveSettings()).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(useSettingsStore.getState().saveError).toContain(message);
   });
 });

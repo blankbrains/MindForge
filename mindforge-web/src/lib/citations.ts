@@ -1,6 +1,12 @@
 import type { CitationSource } from "@/types/research";
 
 const MAX_SOURCES = 200;
+const GENERIC_SOURCE_TITLES = new Set([
+  "",
+  "untitled",
+  "web",
+  "web source",
+]);
 
 function boundedString(value: unknown, maxLength: number): string {
   return typeof value === "string"
@@ -18,6 +24,35 @@ export function safeHttpUrl(value: unknown): string {
       : "";
   } catch {
     return "";
+  }
+}
+
+function isGenericSourceTitle(value: string): boolean {
+  return GENERIC_SOURCE_TITLES.has(value.trim().toLocaleLowerCase());
+}
+
+function titleFromUrl(value: string, index: number): string {
+  if (!value) return `来源 ${index}`;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./i, "");
+    const pathParts = url.pathname
+      .split("/")
+      .map((part) => decodeURIComponent(part).trim())
+      .filter(Boolean);
+    const rawSlug = pathParts.at(-1) ?? "";
+    const slug = rawSlug.replace(/\.(?:html?|php|aspx?)$/i, "");
+    if (
+      !slug
+      || /^(?:article|detail|index|page)$/i.test(slug)
+      || /^\d+$/.test(slug)
+    ) {
+      return host || `来源 ${index}`;
+    }
+    const readable = slug.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+    return readable ? `${host} - ${readable}` : host;
+  } catch {
+    return `来源 ${index}`;
   }
 }
 
@@ -47,14 +82,17 @@ export function normalizeCitationSources(value: unknown): CitationSource[] {
       record.doc_id ?? record.document_id,
       512,
     );
+    const url = safeHttpUrl(record.url);
+    const rawTitle = boundedString(record.title, 1_000);
+    const rawSource = boundedString(record.source, 200);
     sources.push({
       index,
       title:
-        boundedString(record.title, 1_000)
-        || boundedString(record.source, 200)
-        || `来源 ${index}`,
-      url: safeHttpUrl(record.url),
-      source: boundedString(record.source, 200),
+        (!isGenericSourceTitle(rawTitle) ? rawTitle : "")
+        || (!isGenericSourceTitle(rawSource) ? rawSource : "")
+        || titleFromUrl(url, index),
+      url,
+      source: rawSource,
       ...(chunkId ? { chunk_id: chunkId } : {}),
       ...(docId ? { doc_id: docId } : {}),
     });

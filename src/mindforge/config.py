@@ -621,9 +621,9 @@ class AgentConfig(BaseSettings):
         le=5,
         description="Critic 精炼最大轮次。设为 1 可减少一轮评估+重写，显著提速。",
     )
-    subtask_timeout: int = Field(default=60, ge=10, description="单个子任务超时（秒）")
+    subtask_timeout: int = Field(default=120, ge=10, description="单个子任务超时（秒）")
     research_timeout: int = Field(
-        default=180,
+        default=300,
         ge=30,
         description="研究全流程超时（秒）。Set via AGENT_RESEARCH_TIMEOUT env var.",
     )
@@ -674,8 +674,13 @@ class WebSearchConfig(BaseSettings):
     duckduckgo_enabled: bool = Field(default=False)
     model_only_fallback: bool = Field(default=True)
     max_results: int = Field(default=5, ge=1, le=20)
-    native_max_output_tokens: int = Field(default=1200, ge=128, le=8192)
-    native_timeout_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    native_max_output_tokens: int = Field(default=512, ge=128, le=8192)
+    native_timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+    native_failure_cooldown_seconds: float = Field(
+        default=300.0,
+        ge=0.0,
+        le=3600.0,
+    )
     model_config = SettingsConfigDict(
         env_prefix="WEB_SEARCH_",
         extra="ignore",

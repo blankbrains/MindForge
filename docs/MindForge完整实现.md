@@ -530,8 +530,8 @@ VECTOR_COLLECTION_NAME=mindforge_docs
 # AGENT_SOURCE_POLICY=auto            # auto | knowledge_base | web
 # AGENT_FALLBACK_ENABLED=true
 # AGENT_LLM_REQUEST_TIMEOUT=45        # 单次模型调用超时（秒）
-# AGENT_SUBTASK_TIMEOUT=60            # 子任务超时（秒）
-# AGENT_RESEARCH_TIMEOUT=180          # 全流程超时（秒）
+# AGENT_SUBTASK_TIMEOUT=120           # 子任务超时（秒）
+# AGENT_RESEARCH_TIMEOUT=300          # 全流程超时（秒）
 # AGENT_CRITIC_THRESHOLD=7.0
 
 # ── 缓存 ──
@@ -7319,15 +7319,15 @@ A:  ① .env 和 *.env 加入 .gitignore，避免代码仓库泄露
 Q20: 如果 LLM API 挂了，整个系统会崩溃吗？
 A:  不会直接崩溃。非流式 Agent 失败会进入知识库纯检索 fallback；
     fallback 也失败时返回 503，而不是伪装成成功报告。Orchestrator 有由
-    `AGENT_RESEARCH_TIMEOUT` 控制的总超时，默认 180s，
+    `AGENT_RESEARCH_TIMEOUT` 控制的总超时，默认 300s，
     超时返回明确失败结果而不是
     无响应；BaseAgent._chat() 还有限次重试。
 
 Q21: 前端研究任务超时了怎么处理？
-A:  use-research-session.ts 优先读取设置接口中的运行时研究超时（默认 180s），
+A:  use-research-session.ts 优先读取设置接口中的运行时研究超时（默认 300s），
     `VITE_RESEARCH_TIMEOUT_MS` 只作构建时回退，
     超时后自动 abort SSE 连接并设置 status="error"。后端 orchestrator.run()
-    也有默认 180s 的总超时，超时返回含超时说明的 AgentResult。
+    也有默认 300s 的总超时，超时返回含超时说明的 AgentResult。
     每个请求还有 generation id，旧连接的迟到回调不会污染新会话。
 ```
 

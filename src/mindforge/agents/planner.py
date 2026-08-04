@@ -334,6 +334,19 @@ class PlannerAgent(BaseAgent):
         r"\s*(?:和|与|跟|及|vs\.?|versus)\s*",
         re.IGNORECASE,
     )
+    _DECISION_SUFFIX_RE = re.compile(
+        r"(?:应该)?(?:怎么|如何)选(?:择)?"
+        r"|(?:应该)?选(?:择)?(?:哪一个|哪个)"
+        r"|(?:哪一个|哪个)(?:更|最)?(?:合适|适合|好)"
+        r"[？?。.！!]*$",
+        re.IGNORECASE,
+    )
+    _SELECTION_CRITERIA_SUFFIX_RE = re.compile(
+        r"\s*(?:(?:在|用于|应用于).+?)?的?"
+        r"(?:选型|选择)(?:依据|标准|条件|建议|策略|原则)?"
+        r"[？?。.！!]*$",
+        re.IGNORECASE,
+    )
     @property
     def name(self) -> str:
         return "planner"
@@ -346,6 +359,11 @@ class PlannerAgent(BaseAgent):
     def _is_comparison_task(cls, task: str) -> bool:
         normalized = f" {' '.join(task.casefold().split())} "
         if normalized.strip().startswith(("比较 ", "比较一下 ")):
+            return True
+        if (
+            cls._COMPARISON_CONNECTOR_RE.search(task) is not None
+            and cls._DECISION_SUFFIX_RE.search(task.strip()) is not None
+        ):
             return True
         if any(
             marker in normalized
@@ -367,12 +385,21 @@ class PlannerAgent(BaseAgent):
             return None
         text = cls._COMPARISON_PREFIX_RE.sub("", text)
         text = cls._COMPARISON_SUFFIX_RE.sub("", text).strip()
+        decision_task = cls._DECISION_SUFFIX_RE.search(text) is not None
+        text = cls._DECISION_SUFFIX_RE.sub("", text).strip()
+        text = cls._SELECTION_CRITERIA_SUFFIX_RE.sub("", text).strip()
         parts = cls._COMPARISON_CONNECTOR_RE.split(text, maxsplit=1)
         if len(parts) != 2:
             return None
 
         left = parts[0].strip(" ，,、:：")
         right = parts[1].strip(" ，,、:：的")
+        if decision_task:
+            right = re.sub(
+                r"\s*(?:在|用于|应用于).+$",
+                "",
+                right,
+            ).strip(" ，,、:：的")
         if not left or not right:
             return None
         shared_suffix = re.search(r"(的[^，,、:：]+)$", parts[1].strip())

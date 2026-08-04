@@ -359,9 +359,12 @@ class SettingsResponse(BaseModel):
     max_iterations: int = 3
     max_refine_rounds: int = 1
     critic_threshold: float = 7.0
-    subtask_timeout: int = 60
-    research_timeout: int = 180
+    subtask_timeout: int = 120
+    research_timeout: int = 300
     llm_request_timeout: int = 45
+    queue_timeout: int = 30
+    native_web_search_timeout_seconds: float = 30.0
+    sandbox_timeout: int = 15
     max_subtasks: int = 5
     max_tool_calls_total: int = 12
     max_history_entries: int = 0
@@ -409,6 +412,13 @@ class SettingsUpdateRequest(BaseModel):
     subtask_timeout: int | None = Field(None, ge=10, le=600)
     research_timeout: int | None = Field(None, ge=30, le=3600)
     llm_request_timeout: int | None = Field(None, ge=5, le=600)
+    queue_timeout: int | None = Field(None, ge=1, le=600)
+    native_web_search_timeout_seconds: float | None = Field(
+        None,
+        ge=5.0,
+        le=120.0,
+    )
+    sandbox_timeout: int | None = Field(None, ge=5, le=60)
     max_subtasks: int | None = Field(None, ge=1, le=20)
     max_tool_calls_total: int | None = Field(None, ge=1, le=100)
     max_history_entries: int | None = Field(None, ge=0, le=100_000)
@@ -565,7 +575,13 @@ class TraceSummary(BaseModel):
     start_time: float
     end_time: float | None = None
     duration_ms: float = 0.0
-    status: Literal["success", "degraded", "error", "cancelled"]
+    status: Literal[
+        "success",
+        "warning",
+        "degraded",
+        "error",
+        "cancelled",
+    ]
     display_name: str | None = None
     error: str | None = None
     failure_summary: str | None = None
