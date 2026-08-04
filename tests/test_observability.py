@@ -578,6 +578,87 @@ def test_trace_summary_uses_research_task_as_display_name(
     assert listing["traces"][0]["display_name"] == "Python 和 Java 有什么区别"
 
 
+def test_trace_list_keeps_richer_legacy_duplicate_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from mindforge.observability import store as store_module
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(store_module, "get_settings", lambda: settings)
+
+    def write_summary(
+        trace_id: str,
+        *,
+        start_time: float,
+        duration_ms: float,
+        span_count: int,
+        generation_count: int,
+        total_tokens: int,
+    ) -> None:
+        summary = {
+            "trace_id": trace_id,
+            "name": "orchestrator.research",
+            "display_name": "Compare Python and Go concurrency",
+            "start_time": start_time,
+            "end_time": start_time + duration_ms / 1000,
+            "duration_ms": duration_ms,
+            "status": "success",
+            "metadata": {"transport": "sse"},
+            "span_count": span_count,
+            "generation_count": generation_count,
+            "tool_count": 0,
+            "error_count": 0,
+            "total_tokens": total_tokens,
+            "cost_usd": 0.001,
+            "cost_status": "estimated",
+        }
+        (tmp_path / f"trace_{trace_id}.summary.json").write_text(
+            json.dumps(summary),
+            encoding="utf-8",
+        )
+
+    simple_id = "1" * 32
+    detailed_id = "2" * 32
+    later_id = "3" * 32
+    write_summary(
+        simple_id,
+        start_time=100.0,
+        duration_ms=34_827.1,
+        span_count=1,
+        generation_count=0,
+        total_tokens=0,
+    )
+    write_summary(
+        detailed_id,
+        start_time=100.000_04,
+        duration_ms=34_826.9,
+        span_count=6,
+        generation_count=2,
+        total_tokens=7423,
+    )
+    write_summary(
+        later_id,
+        start_time=100.1,
+        duration_ms=34_827.0,
+        span_count=5,
+        generation_count=2,
+        total_tokens=7000,
+    )
+
+    listing = store_module.TraceRepository(tmp_path).list_traces(
+        limit=20,
+        offset=0,
+    )
+
+    listed_ids = {item["trace_id"] for item in listing["traces"]}
+    assert listing["total"] == 2
+    assert detailed_id in listed_ids
+    assert later_id in listed_ids
+    assert simple_id not in listed_ids
+    assert (tmp_path / f"trace_{simple_id}.summary.json").is_file()
+
+
 def test_trace_detail_aggregates_structured_failure_causes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

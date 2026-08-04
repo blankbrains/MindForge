@@ -71,18 +71,68 @@ def require_environment_variable(name: str) -> str:
     return value
 
 
+_CONFIGURABLE_LLM_PREFIXES = {
+    "kimi": "kimi",
+    "glm": "glm",
+    "openai_compatible": "compatible",
+    "local": "local",
+}
+
+
 class LLMConfig(BaseSettings):
     """Unified cloud and self-hosted LLM provider configuration."""
 
     llm_provider: str = Field(
         default="openai",
-        description="openai | deepseek | openai_compatible | local",
+        description=(
+            "openai | deepseek | kimi | glm | openai_compatible | local"
+        ),
     )
     embedding_provider: str = Field(default="openai", description="openai | bge")
     openai_api_key: str = Field(default="")
     openai_base_url: str = Field(default="https://api.openai.com/v1")
     deepseek_api_key: str = Field(default="")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
+    kimi_api_key: str = Field(default="")
+    kimi_base_url: str = Field(default="https://api.moonshot.cn/v1")
+    kimi_api_key_required: bool = Field(default=True)
+    kimi_model: str = Field(default="")
+    kimi_planner_model: str = Field(default="")
+    kimi_researcher_model: str = Field(default="")
+    kimi_critic_model: str = Field(default="")
+    kimi_synthesizer_model: str = Field(default="")
+    kimi_supports_tools: bool = Field(default=True)
+    kimi_supports_json_mode: bool = Field(default=True)
+    kimi_supports_json_schema: bool = Field(default=False)
+    kimi_supports_stream_usage: bool = Field(default=False)
+    kimi_native_web_search_protocol: Literal[
+        "none",
+        "openai_responses",
+        "kimi_builtin",
+        "glm_web_search",
+    ] = "kimi_builtin"
+    kimi_native_web_search_endpoint: str = Field(default="")
+    glm_api_key: str = Field(default="")
+    glm_base_url: str = Field(
+        default="https://open.bigmodel.cn/api/paas/v4"
+    )
+    glm_api_key_required: bool = Field(default=True)
+    glm_model: str = Field(default="")
+    glm_planner_model: str = Field(default="")
+    glm_researcher_model: str = Field(default="")
+    glm_critic_model: str = Field(default="")
+    glm_synthesizer_model: str = Field(default="")
+    glm_supports_tools: bool = Field(default=True)
+    glm_supports_json_mode: bool = Field(default=True)
+    glm_supports_json_schema: bool = Field(default=False)
+    glm_supports_stream_usage: bool = Field(default=False)
+    glm_native_web_search_protocol: Literal[
+        "none",
+        "openai_responses",
+        "kimi_builtin",
+        "glm_web_search",
+    ] = "glm_web_search"
+    glm_native_web_search_endpoint: str = Field(default="")
     model_pricing: dict[str, dict[str, float]] = Field(
         default_factory=dict,
         description=(
@@ -103,6 +153,13 @@ class LLMConfig(BaseSettings):
     compatible_supports_json_mode: bool = Field(default=True)
     compatible_supports_json_schema: bool = Field(default=False)
     compatible_supports_stream_usage: bool = Field(default=False)
+    compatible_native_web_search_protocol: Literal[
+        "none",
+        "openai_responses",
+        "kimi_builtin",
+        "glm_web_search",
+    ] = "none"
+    compatible_native_web_search_endpoint: str = Field(default="")
     local_api_key: str = Field(default="")
     local_base_url: str = Field(default="http://host.docker.internal:11434/v1")
     local_api_key_required: bool = Field(default=False)
@@ -115,6 +172,13 @@ class LLMConfig(BaseSettings):
     local_supports_json_mode: bool = Field(default=True)
     local_supports_json_schema: bool = Field(default=False)
     local_supports_stream_usage: bool = Field(default=False)
+    local_native_web_search_protocol: Literal[
+        "none",
+        "openai_responses",
+        "kimi_builtin",
+        "glm_web_search",
+    ] = "none"
+    local_native_web_search_endpoint: str = Field(default="")
     planner_model: str = "gpt-4o"
     researcher_model: str = "gpt-4o-mini"
     critic_model: str = "gpt-4o"
@@ -150,8 +214,8 @@ class LLMConfig(BaseSettings):
                 "synthesizer": self.deepseek_synthesizer,
             }
             return mapping.get(role, self.deepseek_researcher)
-        if provider in {"openai_compatible", "local"}:
-            prefix = "compatible" if provider == "openai_compatible" else "local"
+        if provider in _CONFIGURABLE_LLM_PREFIXES:
+            prefix = _CONFIGURABLE_LLM_PREFIXES[provider]
             default_model = getattr(self, f"{prefix}_model")
             role_model = getattr(self, f"{prefix}_{role}_model", "")
             return role_model or default_model
@@ -162,6 +226,8 @@ class LLMConfig(BaseSettings):
         mapping = {
             "openai": self.openai_api_key,
             "deepseek": self.deepseek_api_key,
+            "kimi": self.kimi_api_key,
+            "glm": self.glm_api_key,
             "openai_compatible": self.compatible_api_key,
             "local": self.local_api_key,
         }
@@ -172,6 +238,8 @@ class LLMConfig(BaseSettings):
         mapping = {
             "openai": self.openai_base_url,
             "deepseek": self.deepseek_base_url,
+            "kimi": self.kimi_base_url,
+            "glm": self.glm_base_url,
             "openai_compatible": self.compatible_base_url,
             "local": self.local_base_url,
         }
@@ -188,47 +256,118 @@ class LLMConfig(BaseSettings):
         selected = (provider or self.llm_provider).lower()
         if selected in {"openai", "deepseek"}:
             return True
-        if selected == "openai_compatible":
-            return self.compatible_api_key_required
-        if selected == "local":
-            return self.local_api_key_required
+        if selected in _CONFIGURABLE_LLM_PREFIXES:
+            return bool(
+                getattr(
+                    self,
+                    (
+                        f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                        "_api_key_required"
+                    ),
+                )
+            )
         return True
 
     def supports_tools(self, provider: str | None = None) -> bool:
         selected = (provider or self.llm_provider).lower()
-        if selected == "openai_compatible":
-            return self.compatible_supports_tools
-        if selected == "local":
-            return self.local_supports_tools
+        if selected in _CONFIGURABLE_LLM_PREFIXES:
+            return bool(
+                getattr(
+                    self,
+                    (
+                        f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                        "_supports_tools"
+                    ),
+                )
+            )
         return True
 
     def supports_json_mode(self, provider: str | None = None) -> bool:
         selected = (provider or self.llm_provider).lower()
-        if selected == "openai_compatible":
-            return self.compatible_supports_json_mode
-        if selected == "local":
-            return self.local_supports_json_mode
+        if selected in _CONFIGURABLE_LLM_PREFIXES:
+            return bool(
+                getattr(
+                    self,
+                    (
+                        f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                        "_supports_json_mode"
+                    ),
+                )
+            )
         return True
 
     def supports_json_schema(self, provider: str | None = None) -> bool:
         selected = (provider or self.llm_provider).lower()
         if selected == "openai":
             return True
-        if selected == "openai_compatible":
-            return self.compatible_supports_json_schema
-        if selected == "local":
-            return self.local_supports_json_schema
+        if selected in _CONFIGURABLE_LLM_PREFIXES:
+            return bool(
+                getattr(
+                    self,
+                    (
+                        f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                        "_supports_json_schema"
+                    ),
+                )
+            )
         return False
 
     def supports_stream_usage(self, provider: str | None = None) -> bool:
         selected = (provider or self.llm_provider).lower()
         if selected in {"openai", "deepseek"}:
             return True
-        if selected == "openai_compatible":
-            return self.compatible_supports_stream_usage
-        if selected == "local":
-            return self.local_supports_stream_usage
+        if selected in _CONFIGURABLE_LLM_PREFIXES:
+            return bool(
+                getattr(
+                    self,
+                    (
+                        f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                        "_supports_stream_usage"
+                    ),
+                )
+            )
         return False
+
+    def get_native_web_search_protocol(
+        self,
+        provider: str | None = None,
+    ) -> str:
+        selected = (provider or self.llm_provider).lower()
+        if selected in {"openai", "deepseek"}:
+            return "openai_responses"
+        if selected in _CONFIGURABLE_LLM_PREFIXES:
+            return str(
+                getattr(
+                    self,
+                    (
+                        f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                        "_native_web_search_protocol"
+                    ),
+                )
+            )
+        return "none"
+
+    def supports_native_web_search(
+        self,
+        provider: str | None = None,
+    ) -> bool:
+        return self.get_native_web_search_protocol(provider) != "none"
+
+    def get_native_web_search_endpoint(
+        self,
+        provider: str | None = None,
+    ) -> str | None:
+        selected = (provider or self.llm_provider).lower()
+        if selected not in _CONFIGURABLE_LLM_PREFIXES:
+            return None
+        value = getattr(
+            self,
+            (
+                f"{_CONFIGURABLE_LLM_PREFIXES[selected]}"
+                "_native_web_search_endpoint"
+            ),
+        )
+        return value.strip() or None
 
     def get_model_pricing(
         self,
@@ -261,6 +400,7 @@ class APIConfig(BaseSettings):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8000, ge=1, le=65535)
     access_token: str = Field(default="", max_length=4096)
+    allow_insecure_remote_access: bool = Field(default=False)
     cors_origins: str = Field(default="http://localhost:5173")
     max_upload_mb: int = Field(default=200, ge=1, le=2048)
     max_text_file_mb: int = Field(default=20, ge=1, le=512)
@@ -477,6 +617,8 @@ class AgentConfig(BaseSettings):
     critic_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
     max_refine_rounds: int = Field(
         default=1,
+        ge=0,
+        le=5,
         description="Critic 精炼最大轮次。设为 1 可减少一轮评估+重写，显著提速。",
     )
     subtask_timeout: int = Field(default=60, ge=10, description="单个子任务超时（秒）")
@@ -506,7 +648,38 @@ class AgentConfig(BaseSettings):
         le=100_000,
         description="Maximum shared-memory context passed to one research subtask.",
     )
+    synthesis_context_max_chars: int = Field(
+        default=60_000,
+        ge=2_000,
+        le=500_000,
+        description="Maximum combined subtask context passed to Synthesizer.",
+    )
+    critic_source_context_max_chars: int = Field(
+        default=12_000,
+        ge=1_000,
+        le=100_000,
+        description="Maximum source evidence context passed to Critic.",
+    )
+    critic_report_context_max_chars: int = Field(
+        default=60_000,
+        ge=2_000,
+        le=500_000,
+        description="Maximum report context passed to Critic.",
+    )
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
+
+
+class WebSearchConfig(BaseSettings):
+    native_enabled: bool = Field(default=True)
+    duckduckgo_enabled: bool = Field(default=False)
+    model_only_fallback: bool = Field(default=True)
+    max_results: int = Field(default=5, ge=1, le=20)
+    native_max_output_tokens: int = Field(default=1200, ge=128, le=8192)
+    native_timeout_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    model_config = SettingsConfigDict(
+        env_prefix="WEB_SEARCH_",
+        extra="ignore",
+    )
 
 
 class CacheConfig(BaseSettings):
@@ -628,6 +801,7 @@ class Settings(BaseSettings):
     raptor: RAPTORConfig = Field(default_factory=RAPTORConfig)
     graphrag: GraphRAGConfig = Field(default_factory=GraphRAGConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

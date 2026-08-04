@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   friendlyError,
+  updateDocumentEnabled,
   uploadIndexJob,
 } from "@/hooks/use-documents";
 
@@ -77,6 +78,42 @@ describe("friendlyError", () => {
       total: 10,
       percent: 100,
     });
+  });
+
+  it("updates document retrieval availability through the typed endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          doc_id: "doc-1",
+          filename: "document.pdf",
+          chunk_count: 10,
+          status: "indexed",
+          enabled: false,
+          index_strategy: "auto",
+          use_raptor: false,
+          use_graphrag: false,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      updateDocumentEnabled({ docId: "doc-1", enabled: false }),
+    ).resolves.toMatchObject({
+      doc_id: "doc-1",
+      enabled: false,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/documents/doc-1/enabled"),
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
   });
 
   it("aborts the active upload through AbortSignal", async () => {

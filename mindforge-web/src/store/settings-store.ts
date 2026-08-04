@@ -5,6 +5,8 @@ import { API_BASE } from "@/lib/constants";
 export const LLM_PROVIDERS = [
   "openai",
   "deepseek",
+  "kimi",
+  "glm",
   "openai_compatible",
   "local",
 ] as const;
@@ -13,6 +15,11 @@ export type LLMProvider = (typeof LLM_PROVIDERS)[number];
 export type ResearchMode = "fast" | "balanced" | "deep";
 export type SourcePolicy = "auto" | "knowledge_base" | "web";
 export type EmbeddingProvider = "openai" | "bge";
+export type NativeWebSearchProtocol =
+  | "none"
+  | "openai_responses"
+  | "kimi_builtin"
+  | "glm_web_search";
 
 export interface LLMProviderConfig {
   provider: LLMProvider;
@@ -28,6 +35,8 @@ export interface LLMProviderConfig {
   supportsTools: boolean;
   supportsJsonMode: boolean;
   supportsJsonSchema: boolean;
+  nativeWebSearchProtocol: NativeWebSearchProtocol;
+  nativeWebSearchEndpoint: string;
   configured: boolean;
 }
 
@@ -51,6 +60,8 @@ interface ProviderConfigPayload {
   supports_tools: boolean;
   supports_json_mode: boolean;
   supports_json_schema: boolean;
+  native_web_search_protocol: NativeWebSearchProtocol;
+  native_web_search_endpoint: string;
   configured: boolean;
 }
 
@@ -67,6 +78,8 @@ interface ProviderUpdatePayload {
   supports_tools: boolean;
   supports_json_mode: boolean;
   supports_json_schema: boolean;
+  native_web_search_protocol: NativeWebSearchProtocol;
+  native_web_search_endpoint: string;
 }
 
 interface SettingsPayload {
@@ -101,6 +114,12 @@ interface SettingsPayload {
   observability_capture_content?: boolean;
   trace_retention_days?: number;
   tavily_configured?: boolean;
+  native_web_search_enabled?: boolean;
+  native_web_search_protocol?: NativeWebSearchProtocol;
+  native_web_search_supported?: boolean;
+  duckduckgo_enabled?: boolean;
+  model_only_fallback_enabled?: boolean;
+  web_search_available?: boolean;
   reranker_configured?: boolean;
   reranker_available?: boolean;
   reranker_load_failed?: boolean;
@@ -135,6 +154,12 @@ export interface SettingsState {
   observabilityCaptureContent: boolean;
   traceRetentionDays: number;
   tavilyConfigured: boolean;
+  nativeWebSearchEnabled: boolean;
+  nativeWebSearchProtocol: NativeWebSearchProtocol;
+  nativeWebSearchSupported: boolean;
+  duckDuckGoEnabled: boolean;
+  modelOnlyFallbackEnabled: boolean;
+  webSearchAvailable: boolean;
   rerankerConfigured: boolean;
   rerankerAvailable: boolean;
   rerankerLoadFailed: boolean;
@@ -191,6 +216,8 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
     supportsTools: true,
     supportsJsonMode: true,
     supportsJsonSchema: true,
+    nativeWebSearchProtocol: "openai_responses",
+    nativeWebSearchEndpoint: "",
     configured: false,
   },
   deepseek: {
@@ -207,11 +234,49 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
     supportsTools: true,
     supportsJsonMode: true,
     supportsJsonSchema: false,
+    nativeWebSearchProtocol: "openai_responses",
+    nativeWebSearchEndpoint: "",
+    configured: false,
+  },
+  kimi: {
+    provider: "kimi",
+    label: "Kimi",
+    baseUrl: "https://api.moonshot.cn/v1",
+    apiKey: "",
+    apiKeyRequired: true,
+    defaultModel: "",
+    plannerModel: "",
+    researcherModel: "",
+    criticModel: "",
+    synthesizerModel: "",
+    supportsTools: true,
+    supportsJsonMode: true,
+    supportsJsonSchema: false,
+    nativeWebSearchProtocol: "kimi_builtin",
+    nativeWebSearchEndpoint: "",
+    configured: false,
+  },
+  glm: {
+    provider: "glm",
+    label: "GLM",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    apiKey: "",
+    apiKeyRequired: true,
+    defaultModel: "",
+    plannerModel: "",
+    researcherModel: "",
+    criticModel: "",
+    synthesizerModel: "",
+    supportsTools: true,
+    supportsJsonMode: true,
+    supportsJsonSchema: false,
+    nativeWebSearchProtocol: "glm_web_search",
+    nativeWebSearchEndpoint: "",
     configured: false,
   },
   openai_compatible: {
     provider: "openai_compatible",
-    label: "OpenAI 兼容云 API",
+    label: "通用接口",
     baseUrl: "",
     apiKey: "",
     apiKeyRequired: true,
@@ -223,6 +288,8 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
     supportsTools: true,
     supportsJsonMode: true,
     supportsJsonSchema: false,
+    nativeWebSearchProtocol: "none",
+    nativeWebSearchEndpoint: "",
     configured: false,
   },
   local: {
@@ -239,6 +306,8 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
     supportsTools: true,
     supportsJsonMode: true,
     supportsJsonSchema: false,
+    nativeWebSearchProtocol: "none",
+    nativeWebSearchEndpoint: "",
     configured: false,
   },
 };
@@ -273,6 +342,10 @@ function providerFromPayload(
     supportsTools: payload.supports_tools,
     supportsJsonMode: payload.supports_json_mode,
     supportsJsonSchema: payload.supports_json_schema,
+    nativeWebSearchProtocol:
+      payload.native_web_search_protocol ?? "none",
+    nativeWebSearchEndpoint:
+      payload.native_web_search_endpoint ?? "",
     configured: payload.configured,
   };
 }
@@ -293,6 +366,8 @@ function providerToPayload(
     supports_tools: config.supportsTools,
     supports_json_mode: config.supportsJsonMode,
     supports_json_schema: config.supportsJsonSchema,
+    native_web_search_protocol: config.nativeWebSearchProtocol,
+    native_web_search_endpoint: config.nativeWebSearchEndpoint,
   };
 }
 
@@ -369,6 +444,12 @@ export const useSettingsStore = create<SettingsState>()(
       observabilityCaptureContent: false,
       traceRetentionDays: 0,
       tavilyConfigured: false,
+      nativeWebSearchEnabled: true,
+      nativeWebSearchProtocol: "none",
+      nativeWebSearchSupported: false,
+      duckDuckGoEnabled: false,
+      modelOnlyFallbackEnabled: true,
+      webSearchAvailable: false,
       rerankerConfigured: false,
       rerankerAvailable: false,
       rerankerLoadFailed: false,
@@ -548,6 +629,16 @@ export const useSettingsStore = create<SettingsState>()(
               data.observability_capture_content ?? false,
             traceRetentionDays: data.trace_retention_days ?? 0,
             tavilyConfigured: data.tavily_configured ?? false,
+            nativeWebSearchEnabled:
+              data.native_web_search_enabled ?? true,
+            nativeWebSearchProtocol:
+              data.native_web_search_protocol ?? "none",
+            nativeWebSearchSupported:
+              data.native_web_search_supported ?? false,
+            duckDuckGoEnabled: data.duckduckgo_enabled ?? false,
+            modelOnlyFallbackEnabled:
+              data.model_only_fallback_enabled ?? true,
+            webSearchAvailable: data.web_search_available ?? false,
             rerankerConfigured: data.reranker_configured ?? false,
             rerankerAvailable: data.reranker_available ?? false,
             rerankerLoadFailed: data.reranker_load_failed ?? false,
@@ -635,13 +726,14 @@ export const useSettingsStore = create<SettingsState>()(
 
       deleteLLMApiKey: async (providerOverride) => {
         const provider = providerOverride ?? get().llmProvider;
-        const payload: SettingsPayload = {};
-        if (provider === "openai") payload.openai_api_key = "";
-        if (provider === "deepseek") payload.deepseek_api_key = "";
-        if (provider === "openai_compatible") {
-          payload.compatible_api_key = "";
-        }
-        if (provider === "local") payload.local_api_key = "";
+        const payload: SettingsPayload = {
+          llm_provider_configs: [
+            {
+              ...providerToPayload(get().providerConfigs[provider]),
+              api_key: "",
+            },
+          ],
+        };
         try {
           const response = await fetch(`${API_BASE}/settings`, {
             method: "PUT",

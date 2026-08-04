@@ -31,9 +31,14 @@ class SubTask:
 
     task_id: str
     description: str
-    task_type: str = "research"  # "research" | "analysis" | "code" | "verify"
+    task_type: Literal["research", "analysis", "code", "verify"] = "research"
     dependencies: list[str] = field(default_factory=list)
-    status: str = "pending"  # "pending" | "in_progress" | "completed" | "failed"
+    status: Literal[
+        "pending",
+        "in_progress",
+        "completed",
+        "failed",
+    ] = "pending"
     priority: int = 5
     result: Optional[AgentResult] = None
     subtopics: list[str] = field(default_factory=list)
@@ -67,7 +72,7 @@ class ResearchPlan:
                 continue
             if all(dep in completed_ids for dep in st.dependencies):
                 ready.append(st)
-        return ready
+        return sorted(ready, key=lambda task: (task.priority, task.task_id))
 
     # ------------------------------------------------------------------
     def is_complete(self) -> bool:
@@ -83,7 +88,7 @@ class ResearchPlan:
                 f"1-{max_subtasks}."
             )
         task_ids = [task.task_id for task in self.subtasks]
-        if any(not task_id for task_id in task_ids):
+        if any(not isinstance(task_id, str) or not task_id.strip() for task_id in task_ids):
             raise ValueError("Planner returned an empty task_id.")
         if len(task_ids) != len(set(task_ids)):
             raise ValueError("Planner returned duplicate task_id values.")
@@ -94,6 +99,42 @@ class ResearchPlan:
             task_id: [] for task_id in task_ids
         }
         for task in self.subtasks:
+            if not isinstance(task.description, str) or not task.description.strip():
+                raise ValueError(
+                    f"Task {task.task_id} has an empty description."
+                )
+            if task.task_type not in {
+                "research",
+                "analysis",
+                "code",
+                "verify",
+            }:
+                raise ValueError(
+                    f"Task {task.task_id} has unsupported task_type "
+                    f"{task.task_type!r}."
+                )
+            if (
+                isinstance(task.priority, bool)
+                or not isinstance(task.priority, int)
+                or not 1 <= task.priority <= 10
+            ):
+                raise ValueError(
+                    f"Task {task.task_id} priority must be an integer from 1 to 10."
+                )
+            if not isinstance(task.dependencies, list) or any(
+                not isinstance(dependency, str) or not dependency.strip()
+                for dependency in task.dependencies
+            ):
+                raise ValueError(
+                    f"Task {task.task_id} dependencies must be non-empty strings."
+                )
+            if not isinstance(task.subtopics, list) or any(
+                not isinstance(subtopic, str) or not subtopic.strip()
+                for subtopic in task.subtopics
+            ):
+                raise ValueError(
+                    f"Task {task.task_id} subtopics must be non-empty strings."
+                )
             normalized = list(dict.fromkeys(task.dependencies))
             task.dependencies = normalized
             for dependency in normalized:
@@ -150,17 +191,22 @@ class ResearchPlan:
     # ------------------------------------------------------------------
     @classmethod
     def from_dict(cls, data: dict) -> ResearchPlan:
+        raw_subtasks = data.get("subtasks", [])
+        if not isinstance(raw_subtasks, list):
+            raw_subtasks = []
         subtasks = [
             SubTask(
                 task_id=s.get("task_id", str(uuid.uuid4())[:8]),
                 description=s.get("description", ""),
                 task_type=s.get("task_type", "research"),
                 dependencies=s.get("dependencies", []),
-                status=s.get("status", "pending"),
+                # Planner output describes work; it never controls runtime state.
+                status="pending",
                 priority=s.get("priority", 5),
                 subtopics=s.get("subtopics", []),
             )
-            for s in data.get("subtasks", [])
+            for s in raw_subtasks
+            if isinstance(s, dict)
         ]
         return cls(
             plan_id=data.get("plan_id", str(uuid.uuid4())[:8]),
@@ -188,11 +234,10 @@ _PLANNER_SYSTEM_PROMPT = """你是一名专业的研究规划师。你的任务�
 
 规则：
 1. **极简问题不回退**：如果问题极其简单（如"你好""1+1等于几""hello world"），直接创建 1 个 research 类型子任务即可，不要创建 code 类型。
-2. 将任务分解为 1-5 个子任务（简单定义或单一事实问题 1 个即可）。
+2. 遵守用户消息给出的子任务数量上限（简单定义或单一事实问题 1 个即可）。
 3. 根据问题中的独立信息需求进行拆分，而不是套用固定数量：
    - 单一事实或定义问题通常 1 个子任务；
-   - 比较、区别、优缺点或选型问题，应分别获取各对象/维度的证据，再设置依赖
-     前置研究结果的综合比较任务；
+   - 比较、区别、优缺点或选型问题，应分别获取各对象或维度的证据；
    - 多问、诊断、方案设计或需要验证的问题，应覆盖各独立目标，并按真实数据流
      设置依赖关系。
 4. 每个子任务必须有清晰的描述和类型（research / analysis / code / verify）。
@@ -203,6 +248,8 @@ _PLANNER_SYSTEM_PROMPT = """你是一名专业的研究规划师。你的任务�
 9. 检查所有子任务合起来是否完整覆盖原问题，既不能遗漏，也不能重复。
 10. 只返回合法的 JSON——不要加 markdown、代码块或注释。
 11. 所有 description、reasoning 文本必须使用中文。
+12. 不要创建“汇总全部结果”“生成最终报告”之类的收尾任务，最终综合由
+    Synthesizer 统一负责。
 
 输出 JSON 格式：
 {
@@ -298,9 +345,19 @@ class PlannerAgent(BaseAgent):
     @classmethod
     def _is_comparison_task(cls, task: str) -> bool:
         normalized = f" {' '.join(task.casefold().split())} "
+        if normalized.strip().startswith(("比较 ", "比较一下 ")):
+            return True
+        if any(
+            marker in normalized
+            for marker in cls._COMPARISON_MARKERS
+            if marker != "比较"
+        ):
+            return True
+        if "比较" not in normalized:
+            return False
         return (
-            normalized.strip().startswith(("比较 ", "比较一下 "))
-            or any(marker in normalized for marker in cls._COMPARISON_MARKERS)
+            cls._COMPARISON_CONNECTOR_RE.search(task) is not None
+            and cls._comparison_subjects(task) is not None
         )
 
     @classmethod
@@ -330,7 +387,7 @@ class PlannerAgent(BaseAgent):
     def _minimum_subtask_count(cls, task: str) -> int:
         normalized = " ".join(task.casefold().split())
         if cls._is_comparison_task(task):
-            return 3
+            return 2
         if any(marker in normalized for marker in cls._COMPLEX_MARKERS):
             return 3
         question_count = len(re.findall(r"[？?]", task))
@@ -353,6 +410,8 @@ class PlannerAgent(BaseAgent):
         cls,
         task: str,
         plan: ResearchPlan,
+        *,
+        max_subtasks: int | None = None,
     ) -> list[str]:
         errors: list[str] = []
         descriptions = [
@@ -371,6 +430,9 @@ class PlannerAgent(BaseAgent):
         )
         question_count = len(re.findall(r"[？?]", task))
         minimum_subtasks = cls._minimum_subtask_count(task)
+        if max_subtasks is not None:
+            minimum_subtasks = min(minimum_subtasks, max_subtasks)
+        requires_decomposition = minimum_subtasks > 1
         if len(plan.subtasks) < minimum_subtasks:
             errors.append(
                 f"该问题至少需要 {minimum_subtasks} 个独立子任务，"
@@ -380,38 +442,31 @@ class PlannerAgent(BaseAgent):
             description = descriptions[0] if descriptions else ""
             if (
                 description == normalized_task
+                and requires_decomposition
                 and (comparison_task or complex_task or question_count > 1)
             ):
                 errors.append("唯一子任务只是原问题的原样复述。")
-            if comparison_task:
+            if comparison_task and requires_decomposition:
                 errors.append(
-                    "比较类问题需要独立获取比较对象或维度的证据，"
-                    "并设置综合比较任务，不能只有一个子任务。"
+                    "比较类问题需要通过独立子任务获取比较对象或维度的证据，"
+                    "不能只有一个研究子任务。"
                 )
-            if complex_task:
+            if complex_task and requires_decomposition:
                 errors.append("复杂研究目标没有被拆分为可独立执行的步骤。")
 
         if comparison_task:
             root_tasks = [
                 subtask for subtask in plan.subtasks if not subtask.dependencies
             ]
-            synthesis_tasks = [
-                subtask
-                for subtask in plan.subtasks
-                if len(subtask.dependencies) >= 2
-            ]
-            if len(plan.subtasks) < 3:
+            if len(plan.subtasks) < minimum_subtasks:
                 errors.append(
-                    "比较计划至少需要两个独立证据任务和一个综合任务。"
+                    "比较计划缺少独立的证据获取任务。"
                 )
-            if len(root_tasks) < 2:
+            required_root_tasks = min(2, minimum_subtasks)
+            if len(root_tasks) < required_root_tasks:
                 errors.append("比较计划缺少可并行执行的独立证据任务。")
-            if not synthesis_tasks:
-                errors.append(
-                    "比较计划缺少依赖至少两个前置结果的综合分析任务。"
-                )
             subjects = cls._comparison_subjects(task)
-            if subjects is not None:
+            if subjects is not None and required_root_tasks >= 2:
                 left, right = subjects
                 left_key = left.split("的", 1)[0].strip().casefold()
                 right_key = right.split("的", 1)[0].strip().casefold()
@@ -427,14 +482,6 @@ class PlannerAgent(BaseAgent):
                 }
                 if not left_ids or not right_ids:
                     errors.append("比较计划没有分别覆盖两个比较对象。")
-                elif not any(
-                    bool(set(subtask.dependencies) & left_ids)
-                    and bool(set(subtask.dependencies) & right_ids)
-                    for subtask in synthesis_tasks
-                ):
-                    errors.append(
-                        "综合比较任务没有同时依赖两个对象的研究结果。"
-                    )
 
         return errors
 
@@ -459,7 +506,6 @@ class PlannerAgent(BaseAgent):
         result: ChatResult | None = None
         total_usage: dict[str, int] = {}
         last_error = ""
-        last_structural_plan: ResearchPlan | None = None
         model_used = self._model_name
         for attempt in range(3):
             try:
@@ -482,8 +528,11 @@ class PlannerAgent(BaseAgent):
 
                 plan = ResearchPlan.from_dict(plan_dict)
                 plan.validate(max_subtasks=settings.agent.max_subtasks)
-                last_structural_plan = plan
-                quality_errors = self._quality_errors(task, plan)
+                quality_errors = self._quality_errors(
+                    task,
+                    plan,
+                    max_subtasks=settings.agent.max_subtasks,
+                )
                 if quality_errors:
                     raise ValueError("；".join(quality_errors))
 
@@ -532,7 +581,7 @@ class PlannerAgent(BaseAgent):
             total_usage,
             self._provider_name,
         )
-        fallback = last_structural_plan or ResearchPlan(
+        fallback = ResearchPlan(
             plan_id=uuid.uuid4().hex[:12],
             original_task=task,
             subtasks=[
@@ -546,8 +595,7 @@ class PlannerAgent(BaseAgent):
             ],
             reasoning=(
                 "Planner 未能返回通过结构与语义质量校验的计划；"
-                "当前仅保留模型返回的结构合法计划或最小可执行任务，"
-                "不由代码伪造问题语义。"
+                "当前退回到保留原始问题语义的最小可执行任务。"
             ),
         )
         fallback.planner_status = "fallback"

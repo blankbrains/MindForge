@@ -1,14 +1,19 @@
 # LLM Provider 配置与运维
 
 MindForge 的 Agent、RAPTOR、GraphRAG 和 QA 生成统一通过 `LLMFactory` 调用模型。
-当前内置四种 Provider：
+当前内置六种 Provider：
 
 | Provider | 用途 | API Key | Base URL | 模型配置 |
 |----------|------|---------|----------|----------|
 | `openai` | OpenAI 原生 API | 必填 | 默认 `https://api.openai.com/v1` | 四个角色模型 |
 | `deepseek` | DeepSeek 原生 API | 必填 | 默认 `https://api.deepseek.com` | 四个角色模型 |
+| `kimi` | Kimi / Moonshot API | 必填 | 默认 `https://api.moonshot.cn/v1` | 默认模型 + 可选角色覆盖 |
+| `glm` | 智谱 GLM API | 必填 | 默认 `https://open.bigmodel.cn/api/paas/v4` | 默认模型 + 可选角色覆盖 |
 | `openai_compatible` | 兼容 OpenAI Chat Completions 的云端 API | 默认必填 | 必填 | 默认模型 + 可选角色覆盖 |
 | `local` | 服务器上的 vLLM、Ollama、LM Studio 等服务 | 默认可选 | 必填 | 默认模型 + 可选角色覆盖 |
+
+六个 Provider 的 Base URL、API Key 和模型路由相互独立。Kimi、GLM 与通用接口
+在实现层复用兼容适配器，但不会共享配置或密钥。
 
 ## 一、通过设置页配置
 
@@ -51,6 +56,13 @@ http://<服务器地址>:<API_PORT>/settings
 
 Base URL 必须是绝对 HTTP(S) URL，不能包含用户名、密码、查询参数或 fragment。
 
+#### Kimi 与 GLM
+
+Kimi 和 GLM 在设置页有独立入口。Kimi 默认使用 `kimi_builtin` 原生联网协议；
+GLM 默认使用 `glm_web_search`，联网 Endpoint 留空时使用
+`<Base URL>/web_search`。两者的 Key、模型和高级能力设置不会写入
+`openai_compatible`。
+
 #### 本地模型
 
 MindForge 容器通过宿主机网关访问本地推理服务。常用 Base URL：
@@ -71,7 +83,7 @@ http://127.0.0.1:<模型服务端口>/v1
 
 ### 3. 拉取模型列表
 
-填写 Base URL 和 API Key 后点击“拉取模型”。后端会使用当前表单草稿请求该
+填写 Base URL 和 API Key 后点击“检测连接并拉取模型”。后端会使用当前表单草稿请求该
 Base URL 下的标准 `/models` 端点，去重后把模型 ID 返回设置页：
 
 - OpenAI、DeepSeek、OpenAI-compatible 云 API 和提供 `/v1/models` 的本地服务
@@ -96,12 +108,12 @@ Base URL 下的标准 `/models` 端点，去重后把模型 ID 返回设置页�
 | Critic | 质量评分与反馈 | 需要稳定 JSON 输出 |
 | Synthesizer | 汇总并生成报告 | 优先选择上下文较长的模型 |
 
-`openai_compatible` 和 `local` 可以只填写“默认模型”，四个角色留空时会继承默认
-模型。OpenAI 和 DeepSeek 使用各自的角色模型字段。
+`kimi`、`glm`、`openai_compatible` 和 `local` 可以只填写“默认模型”，
+四个角色留空时会继承默认模型。OpenAI 和 DeepSeek 使用各自的角色模型字段。
 
 ### 5. 设置接口能力
 
-兼容云 API 和本地模型需要按真实能力配置：
+Kimi、GLM、通用接口和本地模型可在“高级接口设置”中按真实能力配置：
 
 | 开关 | 开启条件 | 关闭后的行为 |
 |------|----------|--------------|
@@ -246,6 +258,35 @@ LLM_COMPATIBLE_SUPPORTS_TOOLS=true
 LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
 LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA=false
 LLM_COMPATIBLE_SUPPORTS_STREAM_USAGE=false
+```
+
+### Kimi
+
+```dotenv
+LLM_LLM_PROVIDER=kimi
+LLM_KIMI_API_KEY=<your-key>
+LLM_KIMI_BASE_URL=https://api.moonshot.cn/v1
+LLM_KIMI_MODEL=<model-id>
+LLM_KIMI_PLANNER_MODEL=
+LLM_KIMI_RESEARCHER_MODEL=
+LLM_KIMI_CRITIC_MODEL=
+LLM_KIMI_SYNTHESIZER_MODEL=
+LLM_KIMI_NATIVE_WEB_SEARCH_PROTOCOL=kimi_builtin
+```
+
+### GLM
+
+```dotenv
+LLM_LLM_PROVIDER=glm
+LLM_GLM_API_KEY=<your-key>
+LLM_GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+LLM_GLM_MODEL=<model-id>
+LLM_GLM_PLANNER_MODEL=
+LLM_GLM_RESEARCHER_MODEL=
+LLM_GLM_CRITIC_MODEL=
+LLM_GLM_SYNTHESIZER_MODEL=
+LLM_GLM_NATIVE_WEB_SEARCH_PROTOCOL=glm_web_search
+LLM_GLM_NATIVE_WEB_SEARCH_ENDPOINT=
 ```
 
 ### 本地模型

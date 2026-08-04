@@ -50,7 +50,12 @@ from mindforge.retrieval.hybrid import HybridRetriever
 from mindforge.services.health import HealthMonitor, HealthSnapshot
 from mindforge.services import indexing as indexing_service
 from mindforge.services import index_jobs as index_job_service
-from mindforge.models.base import ChatResult, LLMConfigurationError, StreamEvent
+from mindforge.models.base import (
+    ChatResult,
+    LLMConfigurationError,
+    NativeWebSearchResult,
+    StreamEvent,
+)
 from mindforge.models.deepseek_adapter import DeepSeekAdapter
 from mindforge.models.openai_adapter import OpenAIAdapter
 from mindforge.tools.base import ToolResult
@@ -1108,14 +1113,12 @@ async def test_researcher_fetches_sources_when_model_answers_directly() -> None:
     class DirectThenGroundedLLM:
         _model = "research-model"
 
-        def __init__(self) -> None:
-            self.calls = 0
-
         async def chat(self, messages, **_kwargs) -> ChatResult:
-            self.calls += 1
-            if self.calls == 1:
-                return ChatResult(content="Ungrounded direct answer.")
-            assert any(message.role == "tool" for message in messages)
+            assert any(
+                message.role == "user"
+                and "Global citation mapping" in message.content
+                for message in messages
+            )
             return ChatResult(content="Grounded answer [1].")
 
     agent = ResearcherAgent(
@@ -1133,6 +1136,63 @@ async def test_researcher_fetches_sources_when_model_answers_directly() -> None:
     assert tool_calls == ["search_knowledge_base", "web_search"]
     assert result.data["citation_status"] == "available"
     assert result.data["sources"][0]["index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_web_request_does_not_query_knowledge_base() -> None:
+    tool_calls: list[str] = []
+
+    class SourceTool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            tool_calls.append(self.name)
+            return ToolResult(
+                success=True,
+                output=query,
+                data={
+                    "sources": [
+                        {
+                            "index": 1,
+                            "title": "Official source",
+                            "url": "https://example.com/official",
+                            "content": "Current release",
+                        }
+                    ]
+                },
+            )
+
+    class GroundedLLM:
+        _model = "research-model"
+
+        async def chat(self, *_args, **_kwargs) -> ChatResult:
+            return ChatResult(content="Current release [1].")
+
+    result = await ResearcherAgent(
+        llm=GroundedLLM(),
+        tools=[
+            SourceTool("search_knowledge_base"),
+            SourceTool("web_search"),
+        ],
+    ).run("请只使用联网来源核对官网当前版本", max_rounds=1)
+
+    assert result.success is True
+    assert tool_calls == ["web_search"]
 
 
 @pytest.mark.asyncio
@@ -1171,6 +1231,279 @@ async def test_researcher_does_not_force_sources_for_greeting() -> None:
     assert result.success is True
     assert result.data["citation_status"] == "not_required"
     assert tool_called is False
+
+
+@pytest.mark.asyncio
+async def test_researcher_preserves_model_answer_without_sources() -> None:
+    class ModelOnlyLLM:
+        _model = "research-model"
+
+        async def chat(self, *_args, **_kwargs) -> ChatResult:
+            return ChatResult(content="Python 是学习 Agent 的主流选择。")
+
+    result = await ResearcherAgent(
+        llm=ModelOnlyLLM(),
+        tools=[],
+    ).run("学习 Agent 推荐什么编程语言", max_rounds=1)
+
+    assert result.success is True
+    assert result.output == "Python 是学习 Agent 的主流选择。"
+    assert result.data["outcome"] == "success"
+    assert result.data["grounding_status"] == "model_only"
+    assert result.data["citation_status"] == "unavailable"
+    assert result.data["failure_reason"] is None
+    assert result.data["source_warning"] == "sources_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_researcher_disables_timed_out_source_and_returns_model_answer() -> None:
+    tool_calls = 0
+    exposed_tool_names: list[list[str]] = []
+
+    class TimedOutWebSearch:
+        name = "web_search"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            nonlocal tool_calls
+            tool_calls += 1
+            return ToolResult(
+                success=False,
+                output="Provider-native web search timed out after 30 seconds.",
+                error="Provider-native web search timed out after 30 seconds.",
+                data={
+                    "backend": "provider:deepseek:native",
+                    "failure_type": "native_timeout",
+                    "retryable": True,
+                    "terminal_for_run": True,
+                    "sources": [],
+                    "total": 0,
+                },
+            )
+
+    class ModelOnlyLLM:
+        _model = "research-model"
+
+        async def chat(self, messages, *, tools=None, **_kwargs) -> ChatResult:
+            del messages
+            exposed_tool_names.append(
+                [
+                    str(schema["function"]["name"])
+                    for schema in (tools or [])
+                ]
+            )
+            return ChatResult(content="学习 Agent 建议优先使用 Python。")
+
+    result = await ResearcherAgent(
+        llm=ModelOnlyLLM(),
+        tools=[TimedOutWebSearch()],
+    ).run("学习 Agent 推荐什么编程语言", max_rounds=2)
+
+    assert result.success is True
+    assert result.output == "学习 Agent 建议优先使用 Python。"
+    assert result.data["outcome"] == "success"
+    assert result.data["grounding_status"] == "model_only"
+    assert result.data["failure_reason"] is None
+    assert result.data["source_warning"] == "web_search:native_timeout"
+    assert result.data["source_failures"][0]["failure_type"] == "native_timeout"
+    assert tool_calls == 1
+    assert exposed_tool_names == [[]]
+
+
+@pytest.mark.asyncio
+async def test_model_only_fallback_does_not_repeat_source_searches() -> None:
+    tool_calls: list[str] = []
+    exposed_tool_names: list[list[str]] = []
+
+    class SourceTool:
+        def __init__(self, name: str, *, timeout: bool = False) -> None:
+            self.name = name
+            self.timeout = timeout
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            del query
+            tool_calls.append(self.name)
+            if self.timeout:
+                return ToolResult(
+                    success=False,
+                    error="native timeout",
+                    data={
+                        "backend": "provider:deepseek:native",
+                        "failure_type": "native_timeout",
+                        "retryable": True,
+                        "terminal_for_run": True,
+                        "sources": [],
+                    },
+                )
+            return ToolResult(
+                success=True,
+                output="no relevant knowledge-base result",
+                data={"sources": [], "total": 0},
+            )
+
+    class ModelOnlyLLM:
+        _model = "research-model"
+
+        async def chat(self, messages, *, tools=None, **_kwargs) -> ChatResult:
+            del messages
+            exposed_tool_names.append(
+                [
+                    str(schema["function"]["name"])
+                    for schema in (tools or [])
+                ]
+            )
+            return ChatResult(content="完整的模型知识回答")
+
+    result = await ResearcherAgent(
+        llm=ModelOnlyLLM(),
+        tools=[
+            SourceTool("search_knowledge_base"),
+            SourceTool("web_search", timeout=True),
+        ],
+    ).run("学习 Agent 推荐什么编程语言", max_rounds=2)
+
+    assert result.success is True
+    assert tool_calls == ["search_knowledge_base", "web_search"]
+    assert exposed_tool_names == [[]]
+    assert result.data["source_warning"] == "web_search:native_timeout"
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_timeout_is_structured_and_cancels_tool() -> None:
+    cancelled = asyncio.Event()
+
+    class SlowTool:
+        name = "slow_tool"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "slow",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+
+        async def execute_async(self, **_kwargs) -> ToolResult:
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return ToolResult(success=True, output="late")
+
+    agent = _ProbeAgent(
+        llm=SimpleNamespace(_model="probe"),
+        tools=[SlowTool()],
+    )
+    result = await agent._execute_tool(
+        {
+            "id": "slow-1",
+            "function": {"name": "slow_tool", "arguments": "{}"},
+        },
+        timeout_seconds=0.01,
+    )
+
+    assert result["success"] is False
+    assert result["data"]["failure_type"] == "tool_timeout"
+    assert result["data"]["terminal_for_run"] is True
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_researcher_uses_grounded_native_answer_without_extra_chat() -> None:
+    class NativeAnswerTool:
+        name = "web_search"
+
+        def to_openai_function(self):
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": "source",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+
+        async def execute_async(self, query: str) -> ToolResult:
+            return ToolResult(
+                success=True,
+                output=f"Native answer for {query}",
+                data={
+                    "answer_ready": True,
+                    "answer": (
+                        "See [Downloads](https://www.python.org/downloads/) "
+                        "and [Windows](https://www.python.org/downloads/"
+                        "windows/#ws_call_id=call_123)."
+                    ),
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                    "sources": [
+                        {
+                            "index": 1,
+                            "title": "Downloads",
+                            "url": "https://www.python.org/downloads/",
+                            "content": "Official downloads",
+                        },
+                        {
+                            "index": 2,
+                            "title": "Windows",
+                            "url": (
+                                "https://www.python.org/downloads/windows/"
+                            ),
+                            "content": "Official Windows downloads",
+                        }
+                    ],
+                },
+            )
+
+    class UnexpectedLLM:
+        _model = "research-model"
+
+        async def chat(self, *_args, **_kwargs) -> ChatResult:
+            raise AssertionError("native answer should avoid another chat call")
+
+    result = await ResearcherAgent(
+        llm=UnexpectedLLM(),
+        tools=[NativeAnswerTool()],
+    ).run("Python 当前版本", max_rounds=1)
+
+    assert result.success is True
+    assert result.output == "See Downloads [1] and Windows [2]."
+    assert result.data["citation_status"] == "available"
+    assert result.token_usage["input_tokens"] == 10
+    assert result.token_usage["output_tokens"] == 5
 
 
 @pytest.mark.asyncio
@@ -1216,8 +1549,6 @@ async def test_researcher_rewrites_sourced_answer_without_markers() -> None:
         async def chat(self, messages, **_kwargs) -> ChatResult:
             self.calls += 1
             if self.calls == 1:
-                return ChatResult(content="Initial direct answer.")
-            if self.calls == 2:
                 return ChatResult(content="Sourced but unmarked answer.")
             assert "没有使用来源编号" in messages[-1].content
             return ChatResult(content="Sourced and cited answer [1].")
@@ -1370,6 +1701,98 @@ def test_web_search_uses_injected_tavily_client_without_sdk(
     assert result.success is True
     assert result.data["backend"] == "tavily"
     assert captured["max_results"] == 3
+
+
+@pytest.mark.asyncio
+async def test_web_search_prefers_provider_native_search_without_tavily() -> None:
+    class NativeLLM:
+        supports_native_web_search = True
+
+        async def search_web(self, query, **_kwargs):
+            return NativeWebSearchResult(
+                text=f"Evidence for {query}",
+                sources=[
+                    {
+                        "index": 1,
+                        "title": "Python",
+                        "url": "https://www.python.org/",
+                        "content": "Python documentation",
+                        "source": "web",
+                    }
+                ],
+                usage={"input_tokens": 8, "output_tokens": 3},
+                model="search-model",
+                backend="provider:native",
+                answer_ready=True,
+            )
+
+    tool = WebSearchTool(
+        native_llm=NativeLLM(),
+        tavily_api_key="",
+        duckduckgo_enabled=False,
+    )
+
+    result = await tool.execute_async(query="Python")
+
+    assert tool.available is True
+    assert result.success is True
+    assert result.data["backend"] == "provider:native"
+    assert result.data["sources"][0]["url"] == "https://www.python.org/"
+    assert result.data["usage"]["input_tokens"] == 8
+    assert result.data["answer_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_timeout_returns_bounded_failure() -> None:
+    class SlowNativeLLM:
+        supports_native_web_search = True
+
+        async def search_web(self, *_args, **_kwargs):
+            await asyncio.sleep(0.2)
+            return NativeWebSearchResult(text="late")
+
+    tool = WebSearchTool(
+        native_llm=SlowNativeLLM(),
+        tavily_api_key="",
+        duckduckgo_enabled=False,
+        native_timeout_seconds=0.01,
+    )
+
+    started = time.perf_counter()
+    result = await tool.execute_async(query="timeout")
+
+    assert result.success is False
+    assert result.data["backend"] == "provider:native"
+    assert result.data["failure_type"] == "native_timeout"
+    assert result.data["retryable"] is True
+    assert result.data["terminal_for_run"] is True
+    assert "timed out" in result.error
+    assert time.perf_counter() - started < 0.1
+
+
+def test_orchestrator_registers_native_search_without_tavily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.agents.orchestrator import Orchestrator
+
+    class NativeLLM:
+        _model = "native-model"
+        provider_name = "test"
+        supports_native_web_search = True
+
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "mindforge.models.base.LLMFactory.create",
+        lambda *_args, **_kwargs: NativeLLM(),
+    )
+
+    orchestrator = Orchestrator()
+
+    assert "web_search" in orchestrator._researcher._tool_dict
+    assert (
+        orchestrator._researcher._tool_dict["web_search"].native_available
+        is True
+    )
 
 
 def test_duckduckgo_parser_handles_redirect_links_and_html_entities() -> None:
@@ -1537,6 +1960,113 @@ async def test_graph_mode_runs_hybrid_and_graph_retrieval_concurrently() -> None
         "graph",
         "hybrid",
     ]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_retrieval_excludes_disabled_documents_everywhere() -> None:
+    observed: dict[str, set[str]] = {}
+    reranked_candidates: list[dict] = []
+
+    class Hybrid:
+        async def retrieve(self, **kwargs):
+            observed["hybrid"] = kwargs["excluded_doc_ids"]
+            return [
+                {
+                    "id": "disabled-chunk",
+                    "doc_id": "doc-disabled",
+                    "score": 1.0,
+                },
+                {
+                    "id": "enabled-chunk",
+                    "doc_id": "doc-enabled",
+                    "score": 0.7,
+                },
+            ]
+
+    class Graph:
+        async def query(self, **kwargs):
+            observed["graph"] = kwargs["excluded_doc_ids"]
+            return [
+                {
+                    "id": "disabled-entity",
+                    "doc_ids": ["doc-disabled"],
+                    "score": 0.9,
+                },
+                {
+                    "id": "shared-entity",
+                    "doc_ids": ["doc-disabled", "doc-enabled"],
+                    "score": 0.8,
+                },
+            ]
+
+    class Reranker:
+        def rerank(self, *, candidates, top_k, **_kwargs):
+            reranked_candidates.extend(candidates)
+            return candidates[:top_k]
+
+    retriever = AdaptiveRetriever(
+        hybrid_retriever=Hybrid(),
+        graph_engine=Graph(),
+        reranker=Reranker(),
+        disabled_document_ids_fn=lambda: {"doc-disabled"},
+    )
+
+    result = await retriever.retrieve(
+        "relationships",
+        mode=QueryMode.GRAPH,
+    )
+
+    assert observed == {
+        "hybrid": {"doc-disabled"},
+        "graph": {"doc-disabled"},
+    }
+    assert {item["id"] for item in reranked_candidates} == {
+        "enabled-chunk",
+        "shared-entity",
+    }
+    assert {
+        item["id"]
+        for results in result["raw_results"].values()
+        for item in results
+    } == {"enabled-chunk", "shared-entity"}
+
+
+@pytest.mark.asyncio
+async def test_graphrag_uses_only_enabled_document_contributions() -> None:
+    engine = GraphRAGEngine()
+    engine.entities["shared"] = Entity(
+        id="shared",
+        name="Shared",
+        type="concept",
+        description="poisoned marker",
+        metadata={
+            "doc_ids": ["doc-disabled", "doc-enabled"],
+            "legacy_doc_ids": [],
+            "document_contributions": {
+                "doc-disabled": {
+                    "name": "Shared",
+                    "type": "concept",
+                    "description": "poisoned marker",
+                },
+                "doc-enabled": {
+                    "name": "Shared",
+                    "type": "concept",
+                    "description": "clean description",
+                },
+            },
+        },
+    )
+
+    disabled_results = await engine.query(
+        "Shared",
+        excluded_doc_ids={"doc-disabled"},
+    )
+    enabled_results = await engine.query("Shared")
+
+    assert disabled_results[0]["doc_ids"] == ["doc-enabled"]
+    assert "clean description" in disabled_results[0]["text"]
+    assert "poisoned marker" not in disabled_results[0]["text"]
+    assert "poisoned marker" in enabled_results[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -1868,6 +2398,38 @@ async def test_stream_unsuccessful_agent_result_uses_retrieval_fallback(
         event.get("type") == "done" and event.get("result", {}).get("success") is False
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_non_stream_query_preserves_degraded_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DegradedOrchestrator:
+        async def run(self, _task: str) -> AgentResult:
+            return AgentResult(
+                agent_name="orchestrator",
+                success=True,
+                output="严格来源失败后的模型回答",
+                data={"sources": [], "grounding_status": "model_only"},
+                metadata={
+                    "outcome": "degraded",
+                    "failure_reason": "sources_unavailable",
+                    "quality_status": "not_evaluated",
+                },
+                cost_status="usage_unavailable",
+            )
+
+    monkeypatch.setattr(routes, "get_orchestrator", DegradedOrchestrator)
+
+    response = await routes._execute_query_non_stream(
+        QueryRequest(task="请联网核对最新版本"),
+        llm_available=True,
+        start=time.time(),
+    )
+
+    assert response.outcome == "degraded"
+    assert response.failure_reason == "sources_unavailable"
+    assert response.report == "严格来源失败后的模型回答"
 
 
 @pytest.mark.asyncio
@@ -2525,6 +3087,11 @@ async def test_remote_api_access_requires_configured_authentication(
 ) -> None:
     monkeypatch.setenv("DOCKER_API_BIND_ADDRESS", "0.0.0.0")
     monkeypatch.setattr(server._settings.api, "access_token", "")
+    monkeypatch.setattr(
+        server._settings.api,
+        "allow_insecure_remote_access",
+        False,
+    )
 
     async with AsyncClient(
         transport=ASGITransport(
@@ -2539,12 +3106,41 @@ async def test_remote_api_access_requires_configured_authentication(
 
 
 @pytest.mark.asyncio
+async def test_remote_api_access_can_be_enabled_explicitly_for_test_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOCKER_API_BIND_ADDRESS", "0.0.0.0")
+    monkeypatch.setattr(server._settings.api, "access_token", "")
+    monkeypatch.setattr(
+        server._settings.api,
+        "allow_insecure_remote_access",
+        True,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=server.app,
+            client=("203.0.113.10", 54321),
+        ),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/v1/not-a-real-endpoint")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_api_access_token_is_required_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token = "a" * 32
     monkeypatch.setenv("DOCKER_API_BIND_ADDRESS", "0.0.0.0")
     monkeypatch.setattr(server._settings.api, "access_token", token)
+    monkeypatch.setattr(
+        server._settings.api,
+        "allow_insecure_remote_access",
+        True,
+    )
 
     async with AsyncClient(
         transport=ASGITransport(
@@ -2578,6 +3174,7 @@ async def test_document_listing_preserves_index_features(
                 "filename": "research.pdf",
                 "chunk_count": 42,
                 "status": "indexed",
+                "enabled": False,
                 "index_strategy": "semantic",
                 "use_raptor": True,
                 "use_graphrag": True,
@@ -2598,11 +3195,73 @@ async def test_document_listing_preserves_index_features(
             "filename": "research.pdf",
             "chunk_count": 42,
             "status": "indexed",
+            "enabled": False,
             "index_strategy": "semantic",
             "use_raptor": True,
             "use_graphrag": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_document_availability_endpoint_updates_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.repositories import documents
+
+    observed: list[tuple[str, bool]] = []
+
+    def set_enabled(doc_id: str, *, enabled: bool):
+        observed.append((doc_id, enabled))
+        return {
+            "doc_id": doc_id,
+            "filename": "research.pdf",
+            "chunk_count": 42,
+            "status": "indexed",
+            "enabled": enabled,
+            "index_strategy": "semantic",
+            "use_raptor": True,
+            "use_graphrag": True,
+        }
+
+    monkeypatch.setattr(documents, "set_document_enabled", set_enabled)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=_api_app()),
+        base_url="http://test",
+    ) as client:
+        response = await client.patch(
+            "/api/v1/documents/doc-1/enabled",
+            json={"enabled": False},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+    assert observed == [("doc-1", False)]
+
+
+@pytest.mark.asyncio
+async def test_document_availability_endpoint_returns_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mindforge.repositories import documents
+
+    monkeypatch.setattr(
+        documents,
+        "set_document_enabled",
+        lambda _doc_id, *, enabled: None,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=_api_app()),
+        base_url="http://test",
+    ) as client:
+        response = await client.patch(
+            "/api/v1/documents/missing/enabled",
+            json={"enabled": False},
+        )
+
+    assert response.status_code == 404
 
 
 def test_health_schema_has_no_mcp_fields() -> None:
@@ -2831,11 +3490,16 @@ def test_settings_response_exposes_unified_provider_configs(
             llm_provider="local",
             compatible_base_url="https://cloud.example/v1",
             compatible_model="cloud-model",
+            compatible_native_web_search_protocol="kimi_builtin",
             local_base_url="http://host.docker.internal:11434/v1",
             local_model="qwen3",
             local_api_key_required=False,
         ),
-        retrieval=SimpleNamespace(vector_top_k=20, rerank_top_k=6),
+        retrieval=SimpleNamespace(
+            vector_top_k=20,
+            rerank_top_k=6,
+            reranker_model="",
+        ),
         agent=SimpleNamespace(
             max_iterations=3,
             max_refine_rounds=1,
@@ -2861,6 +3525,8 @@ def test_settings_response_exposes_unified_provider_configs(
     assert set(providers) == {
         "openai",
         "deepseek",
+        "kimi",
+        "glm",
         "openai_compatible",
         "local",
     }
@@ -2870,6 +3536,11 @@ def test_settings_response_exposes_unified_provider_configs(
     assert providers["local"].api_key_required is False
     assert providers["local"].default_model == "qwen3"
     assert providers["openai_compatible"].api_key == "***1234"
+    assert (
+        providers["openai_compatible"].native_web_search_protocol
+        == "kimi_builtin"
+    )
+    assert response.model_only_fallback_enabled is True
 
 
 def test_settings_update_persists_multiple_provider_configs_atomically(
@@ -2923,10 +3594,20 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
     captured: dict[str, str] = {}
     reset_scopes: list[dict[str, bool]] = []
     environment_keys = {
+        "LLM_KIMI_API_KEY",
+        "LLM_KIMI_BASE_URL",
+        "LLM_KIMI_MODEL",
+        "LLM_KIMI_NATIVE_WEB_SEARCH_PROTOCOL",
+        "LLM_GLM_API_KEY",
+        "LLM_GLM_BASE_URL",
+        "LLM_GLM_MODEL",
+        "LLM_GLM_NATIVE_WEB_SEARCH_PROTOCOL",
         "LLM_COMPATIBLE_API_KEY",
         "LLM_COMPATIBLE_BASE_URL",
         "LLM_COMPATIBLE_MODEL",
         "LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA",
+        "LLM_COMPATIBLE_NATIVE_WEB_SEARCH_PROTOCOL",
+        "LLM_COMPATIBLE_NATIVE_WEB_SEARCH_ENDPOINT",
         "LLM_LOCAL_API_KEY",
         "LLM_LOCAL_BASE_URL",
         "LLM_LOCAL_MODEL",
@@ -2967,11 +3648,29 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
             llm_provider="local",
             llm_provider_configs=[
                 LLMProviderUpdate(
+                    provider="kimi",
+                    base_url="https://api.moonshot.cn/v1",
+                    api_key="kimi-key",
+                    default_model="kimi-k2",
+                    native_web_search_protocol="kimi_builtin",
+                ),
+                LLMProviderUpdate(
+                    provider="glm",
+                    base_url="https://open.bigmodel.cn/api/paas/v4",
+                    api_key="glm-key",
+                    default_model="glm-4.5",
+                    native_web_search_protocol="glm_web_search",
+                ),
+                LLMProviderUpdate(
                     provider="openai_compatible",
                     base_url="https://cloud.example/v1",
                     api_key="cloud-key",
                     default_model="cloud-model",
                     supports_json_schema=True,
+                    native_web_search_protocol="glm_web_search",
+                    native_web_search_endpoint=(
+                        "https://cloud.example/v1/web_search"
+                    ),
                 ),
                 LLMProviderUpdate(
                     provider="local",
@@ -2986,10 +3685,35 @@ def test_settings_update_persists_multiple_provider_configs_atomically(
 
     assert result == {"status": "saved"}
     assert captured["LLM_LLM_PROVIDER"] == "local"
+    assert captured["LLM_KIMI_API_KEY"] == "kimi-key"
+    assert captured["LLM_KIMI_BASE_URL"] == "https://api.moonshot.cn/v1"
+    assert captured["LLM_KIMI_MODEL"] == "kimi-k2"
+    assert (
+        captured["LLM_KIMI_NATIVE_WEB_SEARCH_PROTOCOL"]
+        == "kimi_builtin"
+    )
+    assert captured["LLM_GLM_API_KEY"] == "glm-key"
+    assert (
+        captured["LLM_GLM_BASE_URL"]
+        == "https://open.bigmodel.cn/api/paas/v4"
+    )
+    assert captured["LLM_GLM_MODEL"] == "glm-4.5"
+    assert (
+        captured["LLM_GLM_NATIVE_WEB_SEARCH_PROTOCOL"]
+        == "glm_web_search"
+    )
     assert captured["LLM_COMPATIBLE_API_KEY"] == "cloud-key"
     assert captured["LLM_COMPATIBLE_BASE_URL"] == "https://cloud.example/v1"
     assert captured["LLM_COMPATIBLE_MODEL"] == "cloud-model"
     assert captured["LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA"] == "true"
+    assert (
+        captured["LLM_COMPATIBLE_NATIVE_WEB_SEARCH_PROTOCOL"]
+        == "glm_web_search"
+    )
+    assert (
+        captured["LLM_COMPATIBLE_NATIVE_WEB_SEARCH_ENDPOINT"]
+        == "https://cloud.example/v1/web_search"
+    )
     assert captured["LLM_LOCAL_API_KEY"] == ""
     assert captured["LLM_LOCAL_BASE_URL"] == "http://host.docker.internal:8001/v1"
     assert captured["LLM_LOCAL_MODEL"] == "qwen3"
@@ -3185,6 +3909,65 @@ async def test_stream_fallback_does_not_report_failed_retrieval_as_success(
         event.get("type") == "done" and event.get("result", {}).get("success") is True
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_preserves_primary_failure_without_kb_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = "Provider-native web search timed out after 30 seconds."
+
+    class FailedOrchestrator:
+        async def stream_run(self, _task: str, **_kwargs):
+            yield {
+                "type": "done",
+                "result": AgentResult(
+                    agent_name="orchestrator",
+                    success=False,
+                    output=failure,
+                ),
+            }
+
+    class EmptyRAG:
+        async def execute_async(self, **_kwargs) -> ToolResult:
+            return ToolResult(
+                success=True,
+                output="",
+                data={"sources": [], "total": 0},
+            )
+
+    import mindforge.tools.rag_tool as rag_module
+
+    monkeypatch.setattr(rag_module, "RAGTool", EmptyRAG)
+    monkeypatch.setattr(
+        routes,
+        "_research_trace_context",
+        lambda *_args, **_kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(fallback_enabled=True),
+        ),
+    )
+
+    chunks = [
+        chunk.decode("utf-8")
+        async for chunk in routes._stream_response_events(
+            FailedOrchestrator(),
+            "test",
+        )
+    ]
+    events = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        for chunk in chunks
+        if chunk.startswith("data: {")
+    ]
+    errors = [event for event in events if event.get("type") == "error"]
+
+    assert errors[-1]["content"] == failure
+    assert "知识库中没有检索到高度相关资料" not in errors[-1]["content"]
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,9 @@
-"""Web search tool with Tavily API (primary) and DuckDuckGo (fallback)."""
+"""Web search tool with native and optional auxiliary backends."""
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import logging
 import os
 import time
@@ -28,8 +30,8 @@ logger = logging.getLogger(__name__)
 class WebSearchTool(BaseTool):
     """Search the web for current information.
 
-    Uses Tavily API as the primary search backend with a DuckDuckGo-based
-    fallback when Tavily is unavailable or unconfigured.
+    Provider-native search is primary. Tavily and DuckDuckGo are optional
+    auxiliary backends.
     """
 
     name = "web_search"
@@ -76,10 +78,134 @@ class WebSearchTool(BaseTool):
         self,
         tavily_api_key: Optional[str] = None,
         tavily_client: Optional[Any] = None,
+        native_llm: Optional[Any] = None,
+        native_enabled: Optional[bool] = None,
+        duckduckgo_enabled: Optional[bool] = None,
+        native_max_output_tokens: Optional[int] = None,
+        native_timeout_seconds: Optional[float] = None,
     ) -> None:
         super().__init__()
+        from mindforge.config import get_settings
+
+        settings = get_settings().web_search
         self._tavily_client = tavily_client
         self._tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
+        self._native_llm = native_llm
+        self._native_enabled = (
+            settings.native_enabled
+            if native_enabled is None
+            else native_enabled
+        )
+        self._duckduckgo_enabled = (
+            settings.duckduckgo_enabled
+            if duckduckgo_enabled is None
+            else duckduckgo_enabled
+        )
+        self._native_max_output_tokens = (
+            settings.native_max_output_tokens
+            if native_max_output_tokens is None
+            else native_max_output_tokens
+        )
+        self._native_timeout_seconds = (
+            settings.native_timeout_seconds
+            if native_timeout_seconds is None
+            else native_timeout_seconds
+        )
+        self._default_max_results = settings.max_results
+        self.parameters_schema = copy.deepcopy(type(self).parameters_schema)
+        self.parameters_schema["properties"]["max_results"]["default"] = (
+            self._default_max_results
+        )
+
+    @property
+    def native_available(self) -> bool:
+        return bool(
+            self._native_enabled
+            and self._native_llm is not None
+            and getattr(
+                self._native_llm,
+                "supports_native_web_search",
+                False,
+            )
+        )
+
+    @property
+    def tavily_available(self) -> bool:
+        return bool(
+            self._tavily_client is not None
+            or (TavilyClient is not None and self._tavily_api_key)
+        )
+
+    @property
+    def duckduckgo_available(self) -> bool:
+        return bool(self._duckduckgo_enabled and requests is not None)
+
+    @property
+    def available(self) -> bool:
+        return (
+            self.native_available
+            or self.tavily_available
+            or self.duckduckgo_available
+        )
+
+    def _native_backend_name(self) -> str:
+        provider = str(
+            getattr(self._native_llm, "provider_name", "")
+        ).strip()
+        return f"provider:{provider}:native" if provider else "provider:native"
+
+    async def _search_native(
+        self,
+        query: str,
+        max_results: int,
+    ) -> ToolResult | None:
+        if not self.native_available:
+            return None
+        result = await asyncio.wait_for(
+            self._native_llm.search_web(
+                query,
+                max_results=max_results,
+                max_output_tokens=self._native_max_output_tokens,
+            ),
+            timeout=self._native_timeout_seconds,
+        )
+        lines = [
+            (
+                "Web Search Results "
+                f"(backend={result.backend}, query={query!r})"
+            ),
+            f"Found {len(result.sources)} source(s)",
+            "-" * 72,
+        ]
+        if result.text.strip():
+            lines.append(result.text.strip())
+        elif result.sources:
+            for source in result.sources:
+                lines.append(
+                    f"\n--- Result {source.get('index', '')} ---"
+                    f"\nTitle: {source.get('title', 'Untitled')}"
+                    f"\nURL:   {source.get('url', '')}"
+                    f"\n{source.get('content', '')}"
+                )
+        return ToolResult(
+            success=bool(result.text.strip() or result.sources),
+            output="\n".join(lines),
+            error=(
+                None
+                if result.text.strip() or result.sources
+                else "Native web search returned no usable result."
+            ),
+            data={
+                "results": result.sources,
+                "sources": result.sources,
+                "total": len(result.sources),
+                "backend": result.backend,
+                "usage": result.usage,
+                "model": result.model,
+                "answer": result.text,
+                "answer_ready": result.answer_ready,
+            },
+        )
 
     # --- Primary: Tavily --------------------------------------------------------
 
@@ -349,13 +475,42 @@ class WebSearchTool(BaseTool):
     def execute(
         self,
         query: str,
-        max_results: int = 5,
+        max_results: Optional[int] = None,
+        search_depth: str = "basic",
+        include_answer: bool = False,
+        include_domains: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.execute_async(
+                    query=query,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                    include_answer=include_answer,
+                    include_domains=include_domains,
+                    **kwargs,
+                )
+            )
+        return ToolResult(
+            success=False,
+            error="WebSearchTool.execute_async() is required in an event loop.",
+        )
+
+    async def execute_async(
+        self,
+        query: str,
+        max_results: Optional[int] = None,
         search_depth: str = "basic",
         include_answer: bool = False,
         include_domains: Optional[list[str]] = None,
         **kwargs: Any,
     ) -> ToolResult:
         start = time.perf_counter()
+        if max_results is None:
+            max_results = self._default_max_results
 
         try:
             (
@@ -378,14 +533,82 @@ class WebSearchTool(BaseTool):
                 execution_time_ms=(time.perf_counter() - start) * 1000,
             )
 
-        # 1. Try Tavily
+        native_result: ToolResult | None = None
+        native_failure: ToolResult | None = None
+        if self.native_available:
+            try:
+                native_result = await self._search_native(
+                    query=query,
+                    max_results=max_results,
+                )
+            except asyncio.TimeoutError:
+                message = (
+                    "Provider-native web search timed out after "
+                    f"{self._native_timeout_seconds:g} seconds."
+                )
+                native_failure = ToolResult(
+                    success=False,
+                    output=message,
+                    error=message,
+                    data={
+                        "backend": self._native_backend_name(),
+                        "failure_type": "native_timeout",
+                        "retryable": True,
+                        "terminal_for_run": True,
+                        "sources": [],
+                        "total": 0,
+                    },
+                )
+                logger.warning(
+                    "Provider-native web search timed out; trying auxiliary "
+                    "backends."
+                )
+            except Exception as exc:
+                message = (
+                    "Provider-native web search failed before returning "
+                    "results."
+                )
+                native_failure = ToolResult(
+                    success=False,
+                    output=message,
+                    error=message,
+                    data={
+                        "backend": self._native_backend_name(),
+                        "failure_type": "native_failed",
+                        "retryable": True,
+                        "terminal_for_run": True,
+                        "error_type": type(exc).__name__,
+                        "sources": [],
+                        "total": 0,
+                    },
+                )
+                logger.warning(
+                    "Provider-native web search failed; trying auxiliary "
+                    "backends: %s",
+                    type(exc).__name__,
+                )
+            else:
+                if native_result is not None and (
+                    native_result.data or {}
+                ).get("sources"):
+                    native_result.execution_time_ms = (
+                        time.perf_counter() - start
+                    ) * 1000
+                    return native_result
+
+        # 2. Try optional Tavily
         try:
-            result = self._search_tavily(
-                query=query,
-                max_results=max_results,
-                search_depth=search_depth,
-                include_answer=include_answer,
-                include_domains=include_domains,
+            result = (
+                await asyncio.to_thread(
+                    self._search_tavily,
+                    query=query,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                    include_answer=include_answer,
+                    include_domains=include_domains,
+                )
+                if self.tavily_available
+                else None
             )
         except Exception as exc:
             logger.warning(
@@ -394,10 +617,58 @@ class WebSearchTool(BaseTool):
             )
             result = None
         if result is not None:
-            result.execution_time_ms = (time.perf_counter() - start) * 1000
-            return result
+            tavily_sources = (
+                result.data.get("sources", [])
+                if isinstance(result.data, dict)
+                else []
+            )
+            if tavily_sources or (
+                native_result is None and native_failure is None
+            ):
+                result.execution_time_ms = (
+                    time.perf_counter() - start
+                ) * 1000
+                return result
 
-        # 2. Fallback to DuckDuckGo
-        result = self._search_duckduckgo(query=query, max_results=max_results)
-        result.execution_time_ms = (time.perf_counter() - start) * 1000
-        return result
+        # 3. Try opt-in DuckDuckGo HTML search.
+        if self.duckduckgo_available:
+            result = await asyncio.to_thread(
+                self._search_duckduckgo,
+                query=query,
+                max_results=max_results,
+            )
+            ddg_sources = (
+                result.data.get("sources", [])
+                if isinstance(result.data, dict)
+                else []
+            )
+            if ddg_sources or (
+                native_result is None and native_failure is None
+            ):
+                result.execution_time_ms = (
+                    time.perf_counter() - start
+                ) * 1000
+                return result
+
+        if native_result is not None:
+            native_result.execution_time_ms = (
+                time.perf_counter() - start
+            ) * 1000
+            return native_result
+
+        if native_failure is not None:
+            native_failure.execution_time_ms = (
+                time.perf_counter() - start
+            ) * 1000
+            return native_failure
+
+        return ToolResult(
+            success=False,
+            error="No web search backend is currently available.",
+            data={
+                "backend": "unavailable",
+                "sources": [],
+                "total": 0,
+            },
+            execution_time_ms=(time.perf_counter() - start) * 1000,
+        )

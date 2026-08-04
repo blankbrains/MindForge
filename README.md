@@ -14,7 +14,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 |------|------|
 | 📊 **概览 Dashboard** | 服务状态（Qdrant / Redis / PostgreSQL）+ 快捷操作入口 |
 | 🔬 **研究工作台** | 输入问题 → 实时查看 Agent DAG / 子任务进度 / Critic 雷达图 / Markdown 报告、可点击来源、Token 与估算费用 |
-| 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、文档列表、状态统计 |
+| 📚 **知识库** | 文档上传（支持 RAPTOR + GraphRAG 索引）、可逆启用/禁用、文档列表与状态统计 |
 | 🕐 **研究历史** | 自动捕获研究结果、保留可点击引用、Markdown/代码高亮预览、删除 / 清空管理 |
 | 📈 **可观测** | 以研究问题为标题查看完整 Trace、Agent/LLM/工具层级、耗时、费用与失败原因 |
 | ⚙️ **系统配置** | 模型、检索相关性、研究模式、超时预算、历史保留与 Langfuse 配置 |
@@ -23,7 +23,7 @@ MindForge 是一个基于 Multi-Agent 架构的自适应研究助理系统，由
 
 | 能力 | 说明 |
 |------|------|
-| 🧠 **智能任务分解** | Planner Agent 将复杂问题拆解为 DAG 子任务，自动识别依赖关系 |
+| 🧠 **智能任务分解** | Planner Agent 将复杂问题拆解为 DAG 子任务，输出类型、优先级、依赖和研究方向并由执行器实际采用 |
 | 🔍 **多源信息检索** | 同时检索内部知识库（Qdrant 向量库）和互联网实时信息 |
 | 🎯 **自适应检索策略** | 根据问题类型（事实/概念/比较/流程/分析/关系）自动选择最优检索策略 |
 | 🔄 **自我批评优化** | Critic Agent 从 5 个维度评分，低于阈值自动触发精炼循环 |
@@ -64,7 +64,8 @@ flowchart TD
     D2 --> E1
     subgraph E[🎯 Critic]
         E1[5 维度评分] --> E2{"≥ 7.0 分?"}
-        E2 -- ✅ 是 --> E3[输出最终报告]
+        E2 -- ✅ 是 --> E3[最终引用校验]
+        E3 --> E5[输出最终报告]
         E2 -- 🔄 否 --> E4[返回精炼 · 轮次由 .env 配置]
     end
     E4 -.-> D1
@@ -82,7 +83,7 @@ flowchart TD
 | 🏗️ **层次化检索** | RAPTOR Tree（自底向上摘要树） |
 | 🕸️ **图谱检索** | GraphRAG（跨文档实体关系发现） |
 | 🧰 **Agent 工具** | 知识库检索 · Web 搜索 · 代码执行 · 引用支持检查 |
-| 🧩 **模型** | 注册表驱动 `LLMFactory`；内置 OpenAI、DeepSeek、OpenAI-compatible 与 Local Provider |
+| 🧩 **模型** | 注册表驱动 `LLMFactory`；OpenAI、DeepSeek、Kimi、GLM、通用接口与本地模型配置相互独立 |
 | 🧠 **记忆系统** | 工作记忆 + 情节记忆 + 语义记忆 三层架构 |
 | 🔤 **Embedding** | BGE-M3 (1024维) 或 OpenAI；显式后端失败时拒绝写入不兼容向量 |
 | 📄 **文档解析** | pdfplumber + PaddleOCR 3；混合 PDF 按页处理，表格保留 Markdown + HTML + 单元格 JSON，图片与源文件具备生命周期管理 |
@@ -279,10 +280,11 @@ npm run dev     # 开发模式 → http://localhost:5173
 备份远端文件并按键合并新增配置，再执行 `docker compose config --quiet` 和
 就绪检查。
 
-LLM Provider 支持 `openai`、`deepseek`、`openai_compatible` 和 `local`。
-兼容云 API 可接入提供 OpenAI-compatible Chat Completions 的服务；本地 Provider
-用于连接同一服务器上的 vLLM、Ollama、LM Studio 等推理服务。各 Provider 独立
-保存 Base URL、API Key、默认模型、四个 Agent 角色模型和工具/JSON 能力开关。
+LLM Provider 支持 `openai`、`deepseek`、`kimi`、`glm`、
+`openai_compatible` 和 `local`。Kimi、GLM 与通用兼容接口分别保存配置，
+不会因切换供应商而覆盖 Base URL、API Key 或模型；实现层按协议复用兼容适配器。
+本地 Provider 用于连接同一服务器上的 vLLM、Ollama、LM Studio 等推理服务。
+各 Provider 独立保存连接、模型路由和接口能力配置。
 本地服务可关闭“需要 API Key”，但仍必须配置可访问的 Base URL 与模型名。
 
 ### 服务器完整操作流程
@@ -328,9 +330,10 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 
 1. 打开“系统配置”。
 2. 在“LLM 供应商”中选择 Provider，填写 Base URL 和 API Key。
-3. 点击“拉取模型”，再为 Planner、Researcher、Critic 和 Synthesizer
-   从接口返回的模型列表中选择模型；接口不提供 `/models` 时可直接填写自定义模型 ID。
-4. 按模型真实能力设置 Tool Calling、JSON Mode 和 JSON Schema。
+3. 点击“检测连接并拉取模型”，从接口返回的列表中选择主要或默认模型；
+   接口不提供 `/models` 时可直接填写自定义模型 ID。
+4. 需要分别指定 Planner、Researcher、Critic 和 Synthesizer 时展开
+   “高级模型路由”；协议和能力开关位于“高级接口设置”。
 5. 保存后确认状态为“可用”，再执行一次简单研究请求。
 
 完整字段和本地模型命令见下方
@@ -343,8 +346,10 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 3. 按需启用 RAPTOR 层次索引或 GraphRAG 图谱索引；首次验证建议先关闭两者，
    确认基础解析和检索正常后再启用。
 4. 点击“开始索引”。界面先显示文件传输进度，再显示解析、Embedding 和索引进度。
-5. 等待状态变为“已索引”，随后可查看内容或删除文档。文档卡片只标记实际完成的
-   RAPTOR/GraphRAG 索引；取消任务时系统会回滚未完成的向量、目录记录和解析资产。
+5. 等待状态变为“已索引”，随后可查看、禁用或删除文档。禁用只会阻止该文档参与
+   向量、BM25 和 GraphRAG 检索，不删除索引；重新启用后立即恢复，无需重新索引。
+   文档卡片只标记实际完成的 RAPTOR/GraphRAG 索引；取消任务时系统会回滚未完成的
+   向量、目录记录和解析资产。
 
 #### 4. 发起研究
 
@@ -357,6 +362,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
    代码高亮和引用渲染。正文 `[N]` 对应 Web 来源时在新标签页打开，对应内部
    知识库来源时跳到报告底部来源条目；GFM 表格带边框并在窄屏内横向滚动。
    成功完成后输入框自动清空，失败时保留原问题便于重试。
+5. 研究运行期间可切换到其他站内页面，返回研究工作台后继续显示原任务和实时
+   进度；只有点击“停止研究”或刷新/关闭页面才终止当前前端会话。
 
 #### 5. 日常更新、排障和停止
 
@@ -395,7 +402,9 @@ docker compose down
    |------|----------|
    | OpenAI | 直接使用 OpenAI API |
    | DeepSeek | 直接使用 DeepSeek API |
-   | OpenAI 兼容接口 | 使用提供 OpenAI-compatible API 的云服务 |
+   | Kimi | 使用独立的 Moonshot API 配置与内置联网 |
+   | GLM | 使用独立的智谱 API 配置与 Web Search |
+   | 通用接口 | 使用其他 OpenAI-compatible API |
    | 本地模型 | 连接服务器上的 vLLM、Ollama 或 LM Studio |
 
 3. 填写连接参数：
@@ -404,15 +413,20 @@ docker compose down
      `https://api.openai.com/v1`，填写 API Key 后拉取账号可用模型。
    - **DeepSeek**：填写 API Key；Base URL 默认
      `https://api.deepseek.com`；当前角色模型填写 `deepseek-v4-flash`。
-   - **兼容云 API**：填写供应商的 `/v1` Base URL、API Key 和准确模型 ID。
+   - **Kimi**：Base URL 默认 `https://api.moonshot.cn/v1`，配置独立 Key
+     和模型，默认启用 Kimi 内置联网协议。
+   - **GLM**：Base URL 默认 `https://open.bigmodel.cn/api/paas/v4`，配置
+     独立 Key 和模型，默认启用 GLM Web Search。
+   - **通用接口**：填写供应商的 `/v1` Base URL、API Key 和准确模型 ID。
    - **本地模型**：填写容器可访问的 Base URL 和模型 ID；无鉴权时关闭
      “需要 API Key”。
 
-4. 点击“拉取模型”：
+4. 点击“检测连接并拉取模型”：
 
    - 后端使用当前尚未保存的 Base URL 和新 Key 请求标准 `/models`。
    - 已保存的 Key 只在后端解密使用，不会把明文返回浏览器。
-   - 成功后四个 Agent 字段变为模型下拉框；选择“自定义模型 ID”仍可手动输入。
+   - 成功后主要或默认模型变为下拉框；展开高级模型路由后，四个 Agent
+     也可独立选择；“自定义模型 ID”仍可手动输入。
    - 兼容云或本地接口没有 `/models` 时，直接手动填写模型 ID，不影响保存和调用。
 
 5. 配置模型路由：
@@ -421,13 +435,19 @@ docker compose down
    - `Researcher`：检索和工具调用，需要 Tool Calling。
    - `Critic`：质量评分，需要稳定 JSON 输出。
    - `Synthesizer`：报告生成，建议使用长上下文模型。
-   - 兼容云 API 和本地模型只填写“默认模型”也可以，角色模型留空时自动继承。
+   - Kimi、GLM、通用接口和本地模型只填写“默认模型”也可以，角色模型
+     留空时自动继承。
 
 6. 配置接口能力：
 
    - 模型不支持 Tool Calling 时关闭“工具调用”。
    - 不支持 `json_object` 时关闭“JSON Mode”。
    - 不支持 `json_schema` 时关闭“JSON Schema”。
+   - Kimi 默认使用“原生联网协议 = Kimi 内置联网”。
+   - GLM 默认使用“原生联网协议 = GLM Web Search API”；Endpoint 留空时
+     使用 `<Base URL>/web_search`。
+   - 其他兼容接口只有确认协议匹配时才选择
+     `OpenAI Responses Web Search`，否则保持“不启用”。
    - 不确定时先全部关闭，确认普通 Chat 成功后再逐项启用。
 
 7. 点击“保存配置”。右上角显示“可用”后，进入研究页提交一个简单问题。
@@ -435,8 +455,8 @@ docker compose down
 
 8. 按需要配置其余页签：
    - “检索”：设置 Top-K、语义相关性阈值和关键词覆盖阈值。重排序状态会区分
-     正常、等待加载和加载失败；Tavily 是可选联网搜索后端，只有配置
-     `TAVILY_API_KEY` 后才会启用。
+     正常、等待加载和加载失败；联网状态会分别显示模型原生搜索与可选辅助搜索。
+     Tavily、DuckDuckGo 都不是模型 API 正常回答的前置条件。
    - “研究流程”：选择快速/均衡/深度模式、来源策略和回退开关；超时需满足
      `单次模型调用 <= 子任务 <= 研究总超时`。
    - “可观测”：可填写 Langfuse Host/公钥/私钥，并设置内容采集、Trace 和历史
@@ -492,6 +512,29 @@ LLM_COMPATIBLE_SUPPORTS_TOOLS=true
 LLM_COMPATIBLE_SUPPORTS_JSON_MODE=true
 LLM_COMPATIBLE_SUPPORTS_JSON_SCHEMA=false
 LLM_COMPATIBLE_SUPPORTS_STREAM_USAGE=false
+LLM_COMPATIBLE_NATIVE_WEB_SEARCH_PROTOCOL=none
+LLM_COMPATIBLE_NATIVE_WEB_SEARCH_ENDPOINT=
+```
+
+Kimi：
+
+```dotenv
+LLM_LLM_PROVIDER=kimi
+LLM_KIMI_API_KEY=<your-key>
+LLM_KIMI_BASE_URL=https://api.moonshot.cn/v1
+LLM_KIMI_MODEL=<接口返回的模型 ID>
+LLM_KIMI_NATIVE_WEB_SEARCH_PROTOCOL=kimi_builtin
+```
+
+GLM：
+
+```dotenv
+LLM_LLM_PROVIDER=glm
+LLM_GLM_API_KEY=<your-key>
+LLM_GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+LLM_GLM_MODEL=<接口返回的模型 ID>
+LLM_GLM_NATIVE_WEB_SEARCH_PROTOCOL=glm_web_search
+LLM_GLM_NATIVE_WEB_SEARCH_ENDPOINT=
 ```
 
 服务器本地模型：
@@ -506,7 +549,16 @@ LLM_LOCAL_SUPPORTS_TOOLS=true
 LLM_LOCAL_SUPPORTS_JSON_MODE=true
 LLM_LOCAL_SUPPORTS_JSON_SCHEMA=false
 LLM_LOCAL_SUPPORTS_STREAM_USAGE=false
+LLM_LOCAL_NATIVE_WEB_SEARCH_PROTOCOL=none
+LLM_LOCAL_NATIVE_WEB_SEARCH_ENDPOINT=
 ```
+
+联网搜索按“模型原生能力 → Tavily → DuckDuckGo”的顺序尝试。辅助后端均为可选；
+`auto` 来源策略会把普通概念和建议问题视为“来源优先”：没有可用来源时保留模型回答，
+状态仍为成功，但明确标记 `model_only / citation unavailable`。明确要求联网、最新信息、
+知识库、引用或事实核验的问题视为“来源必须”，来源不可用时才标记为 `degraded`。
+模型知识回答不会伪装成带引用结果，也不会写入可复用研究记忆。
+相关开关位于 `.env` 的 `WEB_SEARCH_*` 配置中。
 
 `LLM_MODEL_PRICING` 中的示例零值仅表示字段结构，部署时必须替换为供应商公布的
 当前价格。系统展示的是基于 API Token 用量的**估算费用**，不是账单扣费结果。
@@ -672,9 +724,12 @@ GitHub Actions 自动运行：
 
 ### 🧠 自适应 Agent 编排
 
-- **DAG 任务分解** — 复杂问题自动拆解为有依赖关系的子任务，识别哪些可并行、哪些需串行
-- **ReAct 工具循环** — Researcher Agent 遵循 Thought → Action → Observation 模式，逐步收集证据
-- **Self-Refine 精炼** — Critic 从完整性、准确性、深度、清晰度、引用质量 5 维度评分；未执行评审和评审失败会显示明确状态，不再伪装成 `0.0` 或 `5.0`
+- **DAG 任务分解** — 复杂问题自动拆解为有依赖关系的证据任务；类型、优先级、
+  研究方向和依赖均进入实际调度，最终综合统一由 Synthesizer 完成
+- **ReAct 工具循环** — Researcher 区分事实研究与翻译、改写、创作、计算和代码
+  生成；事实任务没有可核验来源时不会伪装成成功回答
+- **Self-Refine 精炼** — Critic 使用受限的报告与来源证据上下文，从完整性、准确性、
+  深度、清晰度、引用质量 5 维度评分；模型识别的严重问题不会被分数阈值覆盖
 
 ### 🛡️ 可靠性与一致性
 
@@ -685,10 +740,12 @@ GitHub Actions 自动运行：
 - **资产生命周期** — 源文件、图片裁剪与表格结构有受限路径、数据库记录和回滚/删除清理
 - **可取消解析** — 分页、OCR、表格和资产阶段协作取消，不留下部分向量或资产
 - **Embedding 隔离** — LLM 供应商与 Embedding 后端解耦，已有索引时拒绝直接切换向量空间
-- **缓存安全** — 情节记忆只复用完全相同且未过期的任务；来源和质量可复用，原生成用量保留在内部元数据中，当前缓存命中明确标记为不产生新的 API 费用
+- **缓存安全** — 情节记忆只复用完全相同、未过期且完整成功的任务；Planner 回退、
+  评审失败、精炼失败、引用无效和部分失败结果均不会进入成功缓存
 - **三层记忆接通** — 工作记忆对研究上下文设定长度上限；语义记忆只复用通过质量阈值的报告，并按原问题、词项覆盖率和相似度过滤，避免低相关长报告污染新任务
 - **引用编号统一** — 多次工具调用和多子任务使用全局来源编号，Synthesizer 会收到局部到全局的引用映射
-- **引用检查** — 除编号存在性外，还保守检查声明与来源文本是否有词汇支持
+- **引用检查** — 最终报告生成或精炼后执行确定性校验；除编号存在性外，还保守检查
+  声明与来源文本是否有词汇支持，失败时明确标记为降级
 
 ### 🔍 自适应混合检索
 

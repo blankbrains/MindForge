@@ -1,6 +1,6 @@
 import type { AgentResult } from "@/types/research";
 import { Link } from "@tanstack/react-router";
-import { Activity, AlertTriangle } from "lucide-react";
+import { Activity, AlertTriangle, Info } from "lucide-react";
 import { StreamingMarkdown } from "@/components/research/streaming-markdown";
 import { normalizeCitationSources } from "@/lib/citations";
 import {
@@ -34,6 +34,19 @@ export function ReportViewer({ result }: Props) {
   const outcome =
     typeof metadata.outcome === "string" ? metadata.outcome : "success";
   const degraded = outcome === "degraded";
+  const groundingStatus =
+    typeof metadata.grounding_status === "string"
+      ? metadata.grounding_status
+      : typeof result.data?.grounding_status === "string"
+        ? result.data.grounding_status
+        : "";
+  const modelOnly = groundingStatus === "model_only";
+  const sourceWarning =
+    typeof metadata.source_warning === "string"
+      ? metadata.source_warning
+      : typeof result.data?.source_warning === "string"
+        ? result.data.source_warning
+        : "";
   const failureReason =
     typeof metadata.failure_reason === "string"
       ? metadata.failure_reason
@@ -84,7 +97,32 @@ export function ReportViewer({ result }: Props) {
 
   return (
     <div className="space-y-4">
-      {degraded && (
+      {modelOnly && (
+        <div
+          role="status"
+          className="flex items-start gap-3 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+        >
+          {degraded ? (
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+          ) : (
+            <Info className="mt-0.5 h-5 w-5 shrink-0" />
+          )}
+          <div>
+            <p className="font-semibold">
+              {degraded
+                ? "来源检索未完成，当前为模型知识回答"
+                : "未获得可核验来源，当前为模型知识回答"}
+            </p>
+            <p className="mt-1 break-words text-xs opacity-80">
+              {degraded && failureReason
+                ? failureReason
+                : "回答未引用知识库或联网来源，请勿将其视为已核验事实。"}
+              {!degraded && sourceWarning ? `（${sourceWarning}）` : ""}
+            </p>
+          </div>
+        </div>
+      )}
+      {degraded && !modelOnly && (
         <div
           role="status"
           className="flex items-start gap-3 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"

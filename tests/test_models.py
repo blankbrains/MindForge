@@ -18,6 +18,11 @@ from mindforge.models.base import (
 from mindforge.models.openai_compatible_adapter import (
     OpenAICompatibleAdapter,
 )
+from mindforge.models.native_search import (
+    GLMWebSearchAdapter,
+    KimiBuiltinSearchAdapter,
+    normalize_responses_web_search,
+)
 from mindforge.agents.base import _estimate_cost, _estimate_cost_details
 
 
@@ -48,6 +53,8 @@ def test_factory_exposes_all_builtin_providers() -> None:
     assert set(LLMFactory.available_providers()) >= {
         "openai",
         "deepseek",
+        "kimi",
+        "glm",
         "openai_compatible",
         "local",
     }
@@ -150,8 +157,12 @@ def test_local_readiness_does_not_require_api_key(
     assert is_llm_configured("local") is True
 
 
-def test_role_model_mapping_supports_custom_and_local_defaults() -> None:
+def test_role_model_mapping_supports_independent_provider_defaults() -> None:
     config = LLMConfig(
+        kimi_model="kimi-default",
+        kimi_planner_model="kimi-planner",
+        glm_model="glm-default",
+        glm_critic_model="glm-critic",
         compatible_model="cloud-default",
         compatible_planner_model="cloud-planner",
         local_model="local-default",
@@ -166,8 +177,222 @@ def test_role_model_mapping_supports_custom_and_local_defaults() -> None:
         config.get_model("researcher", "openai_compatible")
         == "cloud-default"
     )
+    assert config.get_model("planner", "kimi") == "kimi-planner"
+    assert config.get_model("researcher", "kimi") == "kimi-default"
+    assert config.get_model("critic", "glm") == "glm-critic"
+    assert config.get_model("synthesizer", "glm") == "glm-default"
     assert config.get_model("critic", "local") == "local-critic"
     assert config.get_model("synthesizer", "local") == "local-default"
+
+
+def test_kimi_and_glm_providers_use_isolated_compatible_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        llm=LLMConfig(
+            kimi_api_key="kimi-key",
+            kimi_model="kimi-k2",
+            glm_api_key="glm-key",
+            glm_model="glm-4.5",
+        )
+    )
+    monkeypatch.setattr("mindforge.config.get_settings", lambda: settings)
+
+    kimi = LLMFactory.create("kimi", "kimi-k2")
+    glm = LLMFactory.create("glm", "glm-4.5")
+
+    assert isinstance(kimi, OpenAICompatibleAdapter)
+    assert isinstance(glm, OpenAICompatibleAdapter)
+    assert kimi.provider_name == "kimi"
+    assert glm.provider_name == "glm"
+    assert isinstance(
+        kimi._native_search_adapter,
+        KimiBuiltinSearchAdapter,
+    )
+    assert isinstance(glm._native_search_adapter, GLMWebSearchAdapter)
+    assert (
+        glm._native_search_adapter._endpoint
+        == "https://open.bigmodel.cn/api/paas/v4/web_search"
+    )
+
+
+def test_responses_search_normalizes_structured_and_markdown_sources() -> None:
+    response = SimpleNamespace(
+        output_text=(
+            "See [Python](https://www.python.org/) and "
+            "https://docs.python.org/3/"
+        ),
+        model_dump=lambda **_kwargs: {
+            "model": "search-model",
+            "usage": {"input_tokens": 12, "output_tokens": 4},
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [
+                            {
+                                "title": "Python",
+                                "url": (
+                                    "https://www.python.org/"
+                                    "#ws_call_id=call_123"
+                                ),
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+    )
+
+    result = normalize_responses_web_search(
+        response,
+        provider="test",
+        max_results=5,
+    )
+
+    assert result.text.startswith("See [Python]")
+    assert [source["url"] for source in result.sources] == [
+        "https://www.python.org/",
+        "https://docs.python.org/3/",
+    ]
+    assert result.usage["input_tokens"] == 12
+
+
+@pytest.mark.asyncio
+async def test_kimi_builtin_search_preserves_builtin_tool_protocol() -> None:
+    requests: list[dict] = []
+
+    class Completions:
+        async def create(self, **kwargs):
+            requests.append(kwargs)
+            if len(requests) == 1:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content="",
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="search-1",
+                                        type="builtin_function",
+                                        function=SimpleNamespace(
+                                            name="$web_search",
+                                            arguments=(
+                                                '{"title":"Kimi docs",'
+                                                '"url":"https://platform.'
+                                                'moonshot.cn/docs"}'
+                                            ),
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ],
+                    usage={"prompt_tokens": 10},
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                "[Kimi docs]"
+                                "(https://platform.moonshot.cn/docs)"
+                            ),
+                            tool_calls=None,
+                        )
+                    )
+                ],
+                usage={"completion_tokens": 6},
+            )
+
+    adapter = KimiBuiltinSearchAdapter(
+        client=SimpleNamespace(
+            chat=SimpleNamespace(completions=Completions())
+        ),
+        model="kimi-k2",
+        provider="openai_compatible",
+    )
+
+    result = await adapter.search(
+        "Kimi 联网搜索",
+        max_results=5,
+        max_output_tokens=300,
+    )
+
+    assert requests[1]["messages"][2]["tool_calls"][0]["type"] == (
+        "builtin_function"
+    )
+    assert requests[1]["messages"][3]["role"] == "tool"
+    assert result.sources[0]["url"] == "https://platform.moonshot.cn/docs"
+    assert result.usage["prompt_tokens"] == 10
+    assert result.usage["completion_tokens"] == 6
+
+
+@pytest.mark.asyncio
+async def test_glm_web_search_normalizes_structured_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "search_result": [
+                    {
+                        "title": "GLM docs",
+                        "link": "https://docs.bigmodel.cn/",
+                        "content": "Official documentation",
+                        "publish_date": "2026-08-01",
+                    }
+                ]
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return Response()
+
+    monkeypatch.setattr(
+        "mindforge.models.native_search.httpx.AsyncClient",
+        lambda **_kwargs: Client(),
+    )
+    adapter = GLMWebSearchAdapter(
+        api_key="key",
+        provider="openai_compatible",
+        endpoint="https://open.bigmodel.cn/api/paas/v4/web_search",
+    )
+
+    result = await adapter.search(
+        "GLM 联网搜索",
+        max_results=3,
+        max_output_tokens=300,
+    )
+
+    assert captured["url"] == (
+        "https://open.bigmodel.cn/api/paas/v4/web_search"
+    )
+    assert captured["json"]["count"] == 3
+    assert result.sources == [
+        {
+            "index": 1,
+            "title": "GLM docs",
+            "url": "https://docs.bigmodel.cn/",
+            "content": "Official documentation",
+            "source": "web",
+            "backend": "openai_compatible:native",
+            "published_at": "2026-08-01",
+        }
+    ]
 
 
 def test_cost_estimation_does_not_invent_local_or_unknown_prices(

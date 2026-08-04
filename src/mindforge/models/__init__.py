@@ -6,6 +6,7 @@ from mindforge.models.base import (
     ChatResult,
     LLMConfigurationError,
     LLMFactory,
+    NativeWebSearchResult,
     StreamEvent,
     is_llm_configured,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "DeepSeekAdapter",
     "LLMConfigurationError",
     "LLMFactory",
+    "NativeWebSearchResult",
     "OpenAIAdapter",
     "OpenAICompatibleAdapter",
     "StreamEvent",

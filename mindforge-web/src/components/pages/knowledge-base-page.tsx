@@ -46,6 +46,7 @@ export function KnowledgeBasePage() {
     upload,
     cancelJob,
     remove,
+    setEnabled,
   } = useDocuments(activeJobId);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -63,6 +64,7 @@ export function KnowledgeBasePage() {
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<{ doc_id: string; filename: string } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   // Upload cancel confirmation
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [uploadAbortController, setUploadAbortController] = useState<AbortController | null>(null);
@@ -172,6 +174,24 @@ export function KnowledgeBasePage() {
     }
   };
 
+  const handleAvailabilityChange = async (
+    docId: string,
+    filename: string,
+    enabled: boolean,
+  ) => {
+    setAvailabilityError(null);
+    try {
+      await setEnabled.mutateAsync({ docId, enabled });
+    } catch (error) {
+      const action = enabled ? "启用" : "禁用";
+      setAvailabilityError(
+        error instanceof Error
+          ? error.message
+          : `${action}文档 ${filename} 失败，请稍后重试`,
+      );
+    }
+  };
+
   const confirmCancelUpload = () => {
     if (upload.isPending) {
       uploadAbortController?.abort();
@@ -246,10 +266,22 @@ export function KnowledgeBasePage() {
         <EmptyState icon={<XCircle className="h-12 w-12" />} title="加载失败" description="无法获取文档列表，请检查后端服务是否运行" />
       ) : documents.data && documents.data.length > 0 ? (
         <div className="space-y-2">
+          {availabilityError && (
+            <div
+              role="alert"
+              className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+            >
+              {availabilityError}
+            </div>
+          )}
           {documents.data.map((doc) => (
             <div
               key={doc.doc_id}
-              className="flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-4 transition-colors hover:border-primary/30 hover:shadow-sm group"
+              className={`group flex items-center gap-2 rounded-lg border px-5 py-4 transition-colors ${
+                doc.enabled
+                  ? "border-border bg-surface hover:border-primary/30 hover:shadow-sm"
+                  : "border-dashed border-border bg-surface-alt/60"
+              }`}
             >
               <button
                 type="button"
@@ -263,6 +295,11 @@ export function KnowledgeBasePage() {
                     {doc.chunk_count} 块 · {doc.status}
                   </p>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {!doc.enabled && (
+                      <span className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+                        已禁用
+                      </span>
+                    )}
                     <span className="inline-flex items-center rounded-md border border-border bg-surface-alt px-1.5 py-0.5 text-[11px] text-text-muted">
                       基础索引
                     </span>
@@ -282,6 +319,39 @@ export function KnowledgeBasePage() {
                 </div>
                 <Eye className="h-4 w-4 text-text-muted opacity-50 group-hover:opacity-100 transition-opacity" />
               </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="hidden text-xs text-text-muted sm:inline">
+                  检索
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={doc.enabled}
+                  aria-label={`${doc.enabled ? "禁用" : "启用"}文档 ${doc.filename}`}
+                  title={doc.enabled ? "从检索中禁用" : "恢复参与检索"}
+                  disabled={
+                    setEnabled.isPending
+                    && setEnabled.variables?.docId === doc.doc_id
+                  }
+                  onClick={() =>
+                    void handleAvailabilityChange(
+                      doc.doc_id,
+                      doc.filename,
+                      !doc.enabled,
+                    )
+                  }
+                  className={`relative inline-flex h-6 w-10 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60 ${
+                    doc.enabled ? "bg-emerald-600" : "bg-border"
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                      doc.enabled ? "translate-x-5" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); setDeleteTarget({ doc_id: doc.doc_id, filename: doc.filename }); }}

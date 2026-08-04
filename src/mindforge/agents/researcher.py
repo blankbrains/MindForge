@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import re
+from typing import Literal, Optional
 
 from mindforge.agents.base import AgentResult, BaseAgent
+from mindforge.agents.response_guidance import build_response_guidance
 
 # ---------------------------------------------------------------------------
 # ResearcherAgent
@@ -23,7 +25,8 @@ _RESEARCHER_SYSTEM_PROMPT = """你是一名专业的研究助理。你可以使�
    必须至少调用一次 `search_knowledge_base` 或 `web_search` 获取真实来源。
 2. 优先搜索知识库；知识库没有高度相关资料且 `web_search` 可用时，再搜索网页。
 3. 只有寒暄、纯创作、翻译、改写或无需外部事实的计算任务可以不调用来源工具。
-4. 每次回答要**详尽、深入、结构化**——给出一次性的完整答案，包含具体细节、例证、数据。不要简短敷衍，要写到用户满意为止。复杂问题的回答应达到 800-2000 字。
+4. 回答深度必须与问题复杂度匹配：范围集中的问题先给结论，再充分说明理由、
+   选择条件、例外和实践建议；复杂研究继续展开细节、例证与数据，避免无关扩写。
 5. **输出语言必须是中文**（专业术语可保留英文）。
 6. 只要工具返回了来源，正文中的对应事实必须使用工具提供的全局 [N] 编号，
    不得省略引用，也不得编造来源。
@@ -63,6 +66,75 @@ class ResearcherAgent(BaseAgent):
             "你叫什么",
         }
     )
+    _TRANSFORMATION_RE = re.compile(
+        r"^(?:(?:请|请你|帮我|麻烦你)\s*)?"
+        r"(?:"
+        r"(?:翻译|改写|润色|重写|校对|摘要|总结|压缩|扩写|转换格式)"
+        r"(?=\s*(?:以下|下面|这|上述|[:：]))"
+        r"|(?:把|将)(?:以下|下面|这|上述).{0,80}"
+        r"(?:翻译(?:成|为)|改写(?:为|成|得)|润色|重写(?:为|成)|"
+        r"校对|摘要|总结|压缩|扩写|转换为)"
+        r")",
+        re.IGNORECASE,
+    )
+    _CREATIVE_RE = re.compile(
+        r"^(?:(?:请|请你|帮我)\s*)?"
+        r"(?:写|创作|生成|续写|起草)"
+        r".{0,30}(?:诗|故事|小说|文案|祝福|歌词|对话|标题|口号)",
+        re.IGNORECASE,
+    )
+    _CODE_GENERATION_RE = re.compile(
+        r"^(?:(?:请|请你|帮我)\s*)?"
+        r"(?:写|实现|生成|编写|补全)"
+        r".{0,40}(?:代码|函数|脚本|程序|算法|正则表达式)",
+        re.IGNORECASE,
+    )
+    _CALCULATION_RE = re.compile(
+        r"^(?:(?:请|帮我)\s*)?(?:计算|求值|算一下)\s*"
+        r"[-+*/%().\d\s×÷^]+[？?]?$",
+        re.IGNORECASE,
+    )
+    _TASK_TYPE_GUIDANCE = {
+        "research": "检索并整理可核验事实。",
+        "analysis": "基于已有证据进行分析，不重复生成最终综合报告。",
+        "code": "优先使用 code_executor 验证实现和边界条件。",
+        "verify": "核对事实、来源或引用，明确给出验证结论。",
+    }
+    _REQUIRED_SOURCE_MARKERS = (
+        "联网",
+        "网页",
+        "官网",
+        "官方网站",
+        "最新",
+        "当前版本",
+        "实时",
+        "今天",
+        "近期",
+        "新闻",
+        "发布日期",
+        "价格",
+        "行情",
+        "引用",
+        "来源",
+        "出处",
+        "核对",
+        "核验",
+        "查证",
+        "验证事实",
+        "知识库",
+        "上传的文档",
+        "根据文档",
+        "文献综述",
+        "研究报告",
+        "web only",
+        "online source",
+        "official website",
+        "latest",
+        "current version",
+        "citation",
+        "verify",
+        "fact check",
+    )
 
     @property
     def name(self) -> str:
@@ -73,9 +145,63 @@ class ResearcherAgent(BaseAgent):
         return _RESEARCHER_SYSTEM_PROMPT
 
     @classmethod
-    def requires_sources(cls, task: str) -> bool:
+    def requires_sources(
+        cls,
+        task: str,
+        *,
+        task_type: str = "research",
+    ) -> bool:
         normalized = " ".join(task.strip().casefold().split())
-        return bool(normalized) and normalized not in cls._CONVERSATIONAL_TASKS
+        if not normalized or normalized in cls._CONVERSATIONAL_TASKS:
+            return False
+        if task_type == "code":
+            return False
+        return not any(
+            pattern.search(normalized)
+            for pattern in (
+                cls._TRANSFORMATION_RE,
+                cls._CREATIVE_RE,
+                cls._CODE_GENERATION_RE,
+                cls._CALCULATION_RE,
+            )
+        )
+
+    @classmethod
+    def response_length_guidance(
+        cls,
+        task: str,
+        *,
+        task_type: str = "research",
+        subtask_count: int = 1,
+    ) -> str:
+        return build_response_guidance(
+            task,
+            task_type=task_type,
+            subtask_count=subtask_count,
+        )
+
+    @classmethod
+    def source_requirement(
+        cls,
+        task: str,
+        *,
+        task_type: str = "research",
+        source_policy: str = "auto",
+    ) -> Literal["not_required", "preferred", "required"]:
+        if not cls.requires_sources(task, task_type=task_type):
+            return "not_required"
+        normalized_policy = source_policy.strip().lower()
+        if normalized_policy in {"web", "knowledge_base"}:
+            return "required"
+        if task_type == "verify":
+            return "required"
+        normalized = " ".join(task.strip().casefold().split())
+        if any(
+            marker in normalized
+            for marker in cls._REQUIRED_SOURCE_MARKERS
+        ):
+            return "required"
+        return "preferred"
 
     # ------------------------------------------------------------------
     async def run(
@@ -84,6 +210,9 @@ class ResearcherAgent(BaseAgent):
         *,
         context: Optional[str] = None,
         max_rounds: Optional[int] = None,
+        task_type: str = "research",
+        subtopics: Optional[list[str]] = None,
+        deadline: float | None = None,
     ) -> AgentResult:
         """Execute a research subtask via the ReAct tool-calling loop.
 
@@ -95,14 +224,63 @@ class ResearcherAgent(BaseAgent):
             Extra context (e.g., retrieved documents for grounding).
         max_rounds : int, optional
             Maximum tool-calling rounds (default: config or 8).
+        task_type : str
+            Planner-provided execution type.
+        subtopics : list[str], optional
+            Planner-provided search directions or verification angles.
+        deadline : float, optional
+            Absolute ``time.perf_counter()`` deadline for this subtask.
 
         Returns
         -------
         AgentResult with the final researched answer.
         """
+        guidance = self._TASK_TYPE_GUIDANCE.get(
+            task_type,
+            self._TASK_TYPE_GUIDANCE["research"],
+        )
+        normalized_subtopics = [
+            subtopic.strip()
+            for subtopic in (subtopics or [])
+            if isinstance(subtopic, str) and subtopic.strip()
+        ]
+        depth_guidance = self.response_length_guidance(
+            task,
+            task_type=task_type,
+            subtask_count=max(1, len(normalized_subtopics)),
+        )
+        execution_context = [
+            f"## 子任务类型\n\n{task_type}: {guidance}",
+            f"## 回答深度\n\n{depth_guidance}",
+        ]
+        if normalized_subtopics:
+            execution_context.append(
+                "## 研究方向\n\n"
+                + "\n".join(f"- {subtopic}" for subtopic in normalized_subtopics)
+            )
+        if context:
+            execution_context.append(context)
+
+        requirement = self.source_requirement(
+            task,
+            task_type=task_type,
+            source_policy=str(
+                getattr(
+                    getattr(
+                        getattr(self, "_settings", None),
+                        "agent",
+                        None,
+                    ),
+                    "source_policy",
+                    "auto",
+                )
+            ),
+        )
         return await self._run_tool_loop(
             task,
-            context=context,
+            context="\n\n".join(execution_context),
             max_rounds=max_rounds,
-            require_sources=self.requires_sources(task),
+            require_sources=requirement != "not_required",
+            source_requirement=requirement,
+            deadline=deadline,
         )

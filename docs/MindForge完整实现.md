@@ -1,6 +1,6 @@
 # MindForge — 自适应研究助理系统（完整实现）
 
-> **文档同步说明（2026-07-30）：** 架构、配置、部署、安全与测试基线已按当前 `main` 分支代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
+> **文档同步说明（2026-08-03）：** 架构、配置、部署、安全与测试基线已按当前代码和自动化测试结果校正。本文保留部分历史演进代码用于讲解，具体接口和实现始终以仓库源代码、`.env.example` 与自动化测试为准。
 > **历史代码说明：** 本文后半部分的长代码块用于记录设计演进，其中出现的
 > `AgentMessage`、`DirectoryParser`、旧 Langfuse API 和语义
 > 策略统计并非当前运行时代码，不应复制回项目。
@@ -9,6 +9,11 @@
 > `$0`。研究页、流式面板和历史页共用 Markdown/GFM 渲染，表格具备边框和窄屏
 > 滚动；最终报告中的 `[N]` 可安全跳转到外部网页或内部来源条目，历史详情保留
 > 来源元数据；成功任务清空输入，失败任务保留问题。
+> **当前 Agent 行为：** Planner 的任务类型、优先级、依赖和研究方向进入真实调度，
+> 比较任务不再额外创建重复的最终综合步骤；Researcher 对事实任务强制要求可核验
+> 来源；Synthesizer 不使用模型记忆补造缺失证据；Critic 接收有界报告与来源正文。
+> 最终报告执行确定性引用校验，Planner 回退、评审失败、精炼失败和引用无效均标记
+> 为降级且不会进入成功记忆缓存。
 > **当前可观测行为：** 每次研究创建一个以问题为显示标题的顶层 Trace，内部
 > `orchestrator.research`、四个 Agent、LLM 与工具调用按父子关系挂载；Trace ID
 > 贯穿 REST、SSE、研究结果和历史记录。失败和检索降级保留原始原因，前端不接触
@@ -159,7 +164,7 @@ MindForge/                                       # main 分支（全栈 Web 平�
 │   │   ├── __init__.py
 │   │   ├── base.py                              # 工具基类
 │   │   ├── rag_tool.py                          # RAG 检索（完整依赖链 + 无 LLM 可工作）
-│   │   ├── web_search.py                        # 网络搜索（Tavily + DuckDuckGo 回退）
+│   │   ├── web_search.py                        # 原生联网 + 可选辅助搜索
 │   │   ├── code_executor.py                     # 代码执行（加固沙箱 + 词边界匹配）
 │   │   └── citation_verifier.py                 # 引用验证
 │   │
@@ -265,13 +270,21 @@ class LLMConfig(BaseSettings):
     """统一云端与本地 LLM Provider 配置。"""
     llm_provider: str = Field(
         default="openai",
-        description="openai | deepseek | openai_compatible | local",
+        description="openai | deepseek | kimi | glm | openai_compatible | local",
     )
     embedding_provider: str = Field(default="openai", description="openai | bge")
     openai_api_key: str = Field(default="")
     openai_base_url: Optional[str] = Field(default=None)
     deepseek_api_key: str = Field(default="")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
+    kimi_api_key: str = ""
+    kimi_base_url: str = "https://api.moonshot.cn/v1"
+    kimi_model: str = ""
+    kimi_native_web_search_protocol: str = "kimi_builtin"
+    glm_api_key: str = ""
+    glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    glm_model: str = ""
+    glm_native_web_search_protocol: str = "glm_web_search"
     compatible_api_key: str = ""
     compatible_base_url: str = ""
     compatible_api_key_required: bool = True
@@ -311,8 +324,14 @@ class LLMConfig(BaseSettings):
                 "embedding": self.deepseek_embedding,
             }
             return mapping.get(role, self.deepseek_researcher)
-        if provider in {"openai_compatible", "local"}:
-            prefix = "compatible" if provider == "openai_compatible" else "local"
+        configurable_prefixes = {
+            "kimi": "kimi",
+            "glm": "glm",
+            "openai_compatible": "compatible",
+            "local": "local",
+        }
+        if provider in configurable_prefixes:
+            prefix = configurable_prefixes[provider]
             return (
                 getattr(self, f"{prefix}_{role}_model", "")
                 or getattr(self, f"{prefix}_model")
@@ -3291,127 +3310,32 @@ class RAGTool(BaseTool):
 
 ### 6.3 网络搜索工具
 
-```python
-# src/mindforge/tools/web_search.py
-"""网络搜索工具 — 知识库检索不到的实时信息通过此工具补充"""
+当前网络搜索由两层适配器组成：
 
-from __future__ import annotations
-import os
-import json
-import logging
+- `models/native_search.py`：实现 `openai_responses`、`kimi_builtin`、
+  `glm_web_search` 三种供应商原生协议，并统一来源、Token usage 和后端标识。
+- `tools/web_search.py`：按“模型原生 → Tavily → DuckDuckGo”选择可用后端，
+  校验工具参数并输出统一 `ToolResult`。
 
-from mindforge.tools.base import BaseTool, ToolResult
+兼容云 API 和本地服务通过 `.env` 选择协议：
 
-logger = logging.getLogger(__name__)
-
-
-class WebSearchTool(BaseTool):
-    """
-    网络搜索工具。
-
-    当知识库中没有足够信息时，Agent 可以调用此工具获取实时信息。
-    优先使用 Tavily Search API（RAG 优化的搜索 API），
-    没有配置时回退到 DuckDuckGo。
-    """
-
-    def __init__(self):
-        self.tavily_api_key = os.getenv("TAVILY_API_KEY")
-
-    @property
-    def name(self) -> str:
-        return "web_search"
-
-    @property
-    def description(self) -> str:
-        return (
-            "搜索互联网获取实时信息。"
-            "当知识库中没有足够信息，或需要最新数据时使用。"
-            "返回搜索结果的标题、摘要和来源链接。"
-        )
-
-    @property
-    def parameters_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "搜索查询",
-                },
-                "num_results": {
-                    "type": "integer",
-                    "description": "结果数量（1-5）",
-                    "default": 3,
-                },
-            },
-            "required": ["query"],
-        }
-
-    async def execute(self, query: str, num_results: int = 3) -> ToolResult:
-        num_results = min(num_results, 5)
-
-        try:
-            if self.tavily_api_key:
-                return await self._search_tavily(query, num_results)
-            else:
-                return await self._search_duckduckgo(query, num_results)
-        except Exception as e:
-            logger.warning(f"网络搜索失败: {e}")
-            return ToolResult(
-                tool_name=self.name,
-                success=False,
-                error=f"网络搜索不可用: {str(e)}。请尝试使用知识库检索。",
-            )
-
-    async def _search_tavily(self, query: str, num_results: int) -> ToolResult:
-        """使用 Tavily Search API"""
-        try:
-            from langchain_community.tools.tavily_search import TavilySearchResults
-            tavily = TavilySearchResults(max_results=num_results)
-            results = await asyncio.to_thread(tavily.invoke, {"query": query})
-
-            formatted = []
-            for i, r in enumerate(results):
-                formatted.append(
-                    f"[{i+1}] {r.get('title', '无标题')}\n"
-                    f"{r.get('content', '')[:300]}\n"
-                    f"来源: {r.get('url', '')}"
-                )
-
-            return ToolResult(
-                tool_name=self.name,
-                success=True,
-                content="\n\n".join(formatted),
-            )
-        except ImportError:
-            raise
-
-    async def _search_duckduckgo(self, query: str, num_results: int) -> ToolResult:
-        """使用 DuckDuckGo（无需 API Key）"""
-        try:
-            from duckduckgo_search import DDGS
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=num_results))
-
-            formatted = []
-            for i, r in enumerate(results):
-                formatted.append(
-                    f"[{i+1}] {r.get('title', '无标题')}\n"
-                    f"{r.get('body', '')[:300]}\n"
-                    f"来源: {r.get('href', '')}"
-                )
-
-            return ToolResult(
-                tool_name=self.name,
-                success=True,
-                content="\n\n".join(formatted),
-            )
-        except ImportError:
-            raise
-
-
-import asyncio
+```dotenv
+LLM_COMPATIBLE_NATIVE_WEB_SEARCH_PROTOCOL=none
+LLM_COMPATIBLE_NATIVE_WEB_SEARCH_ENDPOINT=
+LLM_LOCAL_NATIVE_WEB_SEARCH_PROTOCOL=none
+LLM_LOCAL_NATIVE_WEB_SEARCH_ENDPOINT=
 ```
+
+协议可选值为 `none`、`openai_responses`、`kimi_builtin`、`glm_web_search`。
+Kimi 使用兼容 Chat API 的 `$web_search` 内置工具循环；GLM 默认使用
+`<Base URL>/web_search`，也可显式配置 Endpoint。Endpoint 改动会要求重新确认
+API Key，防止已有凭证被静默发送到新的地址。
+
+`TAVILY_API_KEY` 和 `WEB_SEARCH_DUCKDUCKGO_ENABLED` 仅控制辅助搜索。没有可用
+来源时，`auto` 策略下的普通概念和建议问题保留模型回答，标记为
+`model_only / citation unavailable`，但不误报为降级或子任务失败；明确要求最新信息、
+联网、知识库、引用或事实核验的问题仍标记为 `degraded`。模型知识回答不会进入可复用
+研究记忆。关闭 `WEB_SEARCH_MODEL_ONLY_FALLBACK` 后不再保留无来源回答。
 
 ### 6.4 代码执行工具
 
@@ -4731,7 +4655,7 @@ class ResearcherAgent(BaseAgent):
 
 规则：
 - 每个思考步骤只做一件事（思考 OR 调用工具）
-- 最终给出有引用来源的完整回答（800-2000 字的详细分析）
+- 最终回答深度与问题复杂度匹配：范围集中的问题通常为 1000-1800 字，复杂研究通常为 1800-3500 字
 - 如果某个工具调用失败，分析原因并尝试其他方式
 - 中文回答，专业、客观、有深度"""
 
@@ -7217,8 +7141,9 @@ A:  RAPTOR 是从底层文档块自底向上构建层次化摘要树，适合单
 
 Q4: MindForge 如何统一接入不同大模型？
 A:  上层 Agent 只依赖 BaseLLM；LLMFactory 用注册表选择 Provider。内置
-    OpenAI、DeepSeek、OpenAI-compatible 云端接口和 Local 本地服务。
-    每个 Provider 独立配置 Base URL、Key、默认模型、四个角色模型和能力开关。
+    OpenAI、DeepSeek、Kimi、GLM、通用兼容接口和 Local 本地服务。
+    六个 Provider 独立配置 Base URL、Key、默认模型、四个角色模型和能力开关；
+    Kimi、GLM 仅在协议实现层复用兼容适配器，不共享配置槽。
     未知 Provider 会返回包含可用列表的 LLMConfigurationError，不静默回退。
 
 Q5: 你的 Critic Agent 怎么防止自我宽松偏差？
@@ -7321,14 +7246,16 @@ A:  因为 BGE、OpenAI 和 hash 不在同一个向量空间。静默回退虽�
 #### 🧩 模型与成本
 
 ```
-Q12: 云端兼容 API 和本地模型如何切换？
-A:  设置 `LLM_LLM_PROVIDER`，或在设置页选择 Provider。兼容云 API 填
+Q12: 云端 API 和本地模型如何切换？
+A:  设置 `LLM_LLM_PROVIDER`，或在设置页选择 Provider。Kimi 与 GLM 分别填
+    `LLM_KIMI_*` 和 `LLM_GLM_*`；其他兼容云 API 填
     `LLM_COMPATIBLE_BASE_URL/API_KEY/MODEL`；本地 vLLM/Ollama/LM Studio
     填 `LLM_LOCAL_BASE_URL/MODEL`，无鉴权时关闭 Key 要求。Agent、RAPTOR、
     GraphRAG 和 QA 生成都通过 LLMFactory；专用模型为空时继承 Researcher。
     填写连接参数后可以调用 Provider 的 `/models` 拉取真实模型列表，并为四个
     Agent 直接选择；不支持枚举时使用自定义模型 ID。Tool Calling、JSON Mode、
-    JSON Schema 按实际服务能力开关。
+    JSON Schema 按实际服务能力开关。Kimi、GLM、通用接口配置相互独立；
+    联网搜索协议分别默认为 `kimi_builtin`、`glm_web_search` 和 `none`。
 
 Q13: 怎么控制 LLM 调用成本？
 A:  四层成本控制：① per-role 模型分配（弱 Agent 用便宜模型）

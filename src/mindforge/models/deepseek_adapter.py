@@ -17,9 +17,11 @@ from mindforge.models.base import (
     ChatMessage,
     ChatResult,
     LLMConfigurationError,
+    NativeWebSearchResult,
     StreamEvent,
     normalize_token_usage,
 )
+from mindforge.models.native_search import create_native_search_adapter
 
 
 # 延迟加载 embedding 模型（单例，线程安全）
@@ -84,7 +86,33 @@ class DeepSeekAdapter(BaseLLM):
             base_url=base_url,
             max_retries=max_retries,
         )
+        self._native_search_adapter = create_native_search_adapter(
+            "openai_responses",
+            client=self.client,
+            model=self.model,
+            provider=self.provider_name,
+            api_key=key,
+            include_action_sources=False,
+        )
         self._extra_kwargs = kwargs
+
+    @property
+    def supports_native_web_search(self) -> bool:
+        return True
+
+    async def search_web(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        max_output_tokens: int = 1200,
+    ) -> NativeWebSearchResult:
+        assert self._native_search_adapter is not None
+        return await self._native_search_adapter.search(
+            query=query,
+            max_results=max_results,
+            max_output_tokens=max_output_tokens,
+        )
 
     # ------------------------------------------------------------------
     # chat

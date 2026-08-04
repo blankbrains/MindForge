@@ -1,31 +1,84 @@
-import { useRef, useState } from "react";
 import {
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
+import {
+  Bot,
+  Boxes,
+  Cable,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  Cpu,
   Eye,
   EyeOff,
   KeyRound,
+  MoonStar,
   RefreshCw,
   RotateCcw,
   Server,
+  Sparkles,
   Trash2,
+  type LucideIcon,
 } from "lucide-react";
 import { API_BASE } from "@/lib/constants";
 import {
-  LLM_PROVIDERS,
   useSettingsStore,
   type LLMProvider,
   type LLMProviderConfig,
+  type NativeWebSearchProtocol,
 } from "@/store/settings-store";
 
 const inputClassName =
   "w-full rounded-md border border-border bg-surface-alt px-3 py-2 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20";
 
-const providerDescriptions: Record<LLMProvider, string> = {
-  openai: "OpenAI 原生接口",
-  deepseek: "DeepSeek 原生接口",
-  openai_compatible: "通义、Kimi、硅基流动、Gemini 等兼容接口",
-  local: "vLLM、Ollama、LM Studio 等本地服务",
-};
+interface ProviderPresetDefinition {
+  id: LLMProvider;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}
+
+const PROVIDER_PRESETS: ProviderPresetDefinition[] = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    description: "原生 API",
+    icon: Sparkles,
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    description: "原生 API",
+    icon: Bot,
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    description: "Moonshot API",
+    icon: MoonStar,
+  },
+  {
+    id: "glm",
+    label: "GLM",
+    description: "智谱开放平台",
+    icon: Boxes,
+  },
+  {
+    id: "openai_compatible",
+    label: "通用接口",
+    description: "OpenAI-compatible",
+    icon: Cable,
+  },
+  {
+    id: "local",
+    label: "本地模型",
+    description: "Ollama、vLLM 等",
+    icon: Cpu,
+  },
+];
 
 interface DiscoveredModel {
   id: string;
@@ -39,18 +92,23 @@ interface ModelCatalogState {
   truncated: boolean;
 }
 
-function createModelCatalogs(): Record<LLMProvider, ModelCatalogState> {
-  const emptyCatalog = (): ModelCatalogState => ({
+function emptyModelCatalog(): ModelCatalogState {
+  return {
     status: "idle",
     models: [],
     error: "",
     truncated: false,
-  });
+  };
+}
+
+function createModelCatalogs(): Record<LLMProvider, ModelCatalogState> {
   return {
-    openai: emptyCatalog(),
-    deepseek: emptyCatalog(),
-    openai_compatible: emptyCatalog(),
-    local: emptyCatalog(),
+    openai: emptyModelCatalog(),
+    deepseek: emptyModelCatalog(),
+    kimi: emptyModelCatalog(),
+    glm: emptyModelCatalog(),
+    openai_compatible: emptyModelCatalog(),
+    local: emptyModelCatalog(),
   };
 }
 
@@ -58,9 +116,18 @@ function createModelRequestIds(): Record<LLMProvider, number> {
   return {
     openai: 0,
     deepseek: 0,
+    kimi: 0,
+    glm: 0,
     openai_compatible: 0,
     local: 0,
   };
+}
+
+function presetIsConfigured(
+  preset: ProviderPresetDefinition,
+  configs: Record<LLMProvider, LLMProviderConfig>,
+): boolean {
+  return configs[preset.id].configured;
 }
 
 async function modelDiscoveryError(response: Response): Promise<string> {
@@ -75,7 +142,7 @@ async function modelDiscoveryError(response: Response): Promise<string> {
   }
   return raw && raw.length <= 300
     ? raw
-    : "模型列表拉取失败，请检查连接配置。";
+    : "连接检测失败，请检查接口地址和密钥。";
 }
 
 export function LLMProviderPanel() {
@@ -99,6 +166,9 @@ export function LLMProviderPanel() {
   const [showKey, setShowKey] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
+  const [showAdvancedInterface, setShowAdvancedInterface] =
+    useState(false);
   const [modelCatalogs, setModelCatalogs] = useState(
     createModelCatalogs,
   );
@@ -107,19 +177,20 @@ export function LLMProviderPanel() {
   const config = configs[provider];
   const catalog = modelCatalogs[provider];
   const isCustomProvider =
-    provider === "openai_compatible" || provider === "local";
+    provider === "kimi"
+    || provider === "glm"
+    || provider === "openai_compatible"
+    || provider === "local";
   const isDirty = dirtyProviders.includes(provider);
+  const primaryModel = isCustomProvider
+    ? config.defaultModel
+    : config.researcherModel;
 
   const invalidateModelCatalog = (target: LLMProvider) => {
     modelRequestIds.current[target] += 1;
     setModelCatalogs((current) => ({
       ...current,
-      [target]: {
-        status: "idle",
-        models: [],
-        error: "",
-        truncated: false,
-      },
+      [target]: emptyModelCatalog(),
     }));
   };
 
@@ -131,13 +202,20 @@ export function LLMProviderPanel() {
     updateConfig(target, update);
   };
 
-  const selectProvider = (nextProvider: LLMProvider) => {
-    if (editingKey) {
-      updateConnectionConfig(provider, { apiKey: keyBeforeEdit });
-    }
+  const resetTransientState = () => {
     setEditingKey(false);
     setShowKey(false);
     setDeleteError("");
+    setShowAdvancedRouting(false);
+    setShowAdvancedInterface(false);
+  };
+
+  const selectProvider = (nextProvider: LLMProvider) => {
+    if (nextProvider === provider) return;
+    if (editingKey) {
+      updateConnectionConfig(provider, { apiKey: keyBeforeEdit });
+    }
+    resetTransientState();
     setProvider(nextProvider);
   };
 
@@ -273,16 +351,29 @@ export function LLMProviderPanel() {
             error:
               error instanceof Error
                 ? error.message
-                : "模型列表拉取失败，请检查连接配置。",
+                : "连接检测失败，请检查接口地址和密钥。",
           },
         };
       });
     }
   };
 
+  const updatePrimaryModel = (value: string) => {
+    if (isCustomProvider) {
+      updateConfig(provider, { defaultModel: value });
+      return;
+    }
+    updateConfig(provider, {
+      plannerModel: value,
+      researcherModel: value,
+      criticModel: value,
+      synthesizerModel: value,
+    });
+  };
+
   return (
     <section
-      className="space-y-6 rounded-lg border border-border bg-surface p-5 sm:p-6"
+      className="space-y-6 rounded-lg border border-border bg-surface p-4 sm:p-6"
       role="tabpanel"
       aria-label="LLM 供应商配置"
     >
@@ -290,69 +381,49 @@ export function LLMProviderPanel() {
         <div>
           <h2 className="font-semibold">模型供应商</h2>
           <p className="mt-1 text-sm text-text-muted">
-            {providerDescriptions[provider]}
+            选择接口后完成连接与模型配置
           </p>
         </div>
-        <StatusBadge configured={config.configured} dirty={isDirty} />
+        <div className="flex shrink-0 items-center gap-2">
+          {isDirty && (
+            <button
+              type="button"
+              onClick={() => {
+                restoreConfig(provider);
+                invalidateModelCatalog(provider);
+                resetTransientState();
+              }}
+              className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-text-muted transition hover:bg-surface-alt hover:text-text"
+            >
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+              撤销
+            </button>
+          )}
+          <StatusBadge configured={config.configured} dirty={isDirty} />
+        </div>
       </div>
 
-      <div
-        className="grid grid-cols-1 gap-2 sm:grid-cols-2"
-        role="radiogroup"
-        aria-label="选择模型供应商"
-      >
-        {LLM_PROVIDERS.map((item) => {
-          const itemConfig = configs[item];
-          const selected = item === provider;
-          return (
-            <button
-              key={item}
-              type="button"
-              role="radio"
-              aria-checked={selected}
-              onClick={() => selectProvider(item)}
-              className={`flex min-h-14 items-center justify-between rounded-md border px-3 py-2 text-left transition ${
-                selected
-                  ? "border-primary bg-primary/5 text-text"
-                  : "border-border bg-surface-alt text-text-muted hover:border-text-muted/50 hover:text-text"
-              }`}
-            >
-              <span>
-                <span className="block text-sm font-medium">
-                  {itemConfig.label}
-                </span>
-                <span className="mt-0.5 block text-xs">
-                  {providerDescriptions[item]}
-                </span>
-              </span>
-              <span
-                className={`h-2 w-2 shrink-0 rounded-full ${
-                  itemConfig.configured
-                    ? "bg-emerald-500"
-                    : "bg-border"
-                }`}
-                aria-hidden="true"
-              />
-            </button>
-          );
-        })}
-      </div>
+      <ProviderPresetPicker
+        selectedProvider={provider}
+        configs={configs}
+        onSelect={selectProvider}
+      />
 
       <div className="border-t border-border pt-5">
-        <SectionHeading icon={Server} title="连接" />
+        <SectionHeading icon={Server} title="连接配置" />
         <div className="mt-4 space-y-4">
           <Field
             id="llm-base-url"
             label="Base URL"
             value={config.baseUrl}
             placeholder={
-              provider === "openai"
-                ? "https://api.openai.com/v1"
+              provider === "local"
+                ? "http://host.docker.internal:11434/v1"
                 : "https://example.com/v1"
             }
-            onChange={(value) =>
-              updateConnectionConfig(provider, { baseUrl: value })
-            }
+            onChange={(value) => {
+              updateConnectionConfig(provider, { baseUrl: value });
+            }}
           />
           <ApiKeyField
             config={config}
@@ -364,21 +435,15 @@ export function LLMProviderPanel() {
             onCancel={cancelKeyEdit}
             onDelete={() => void handleDelete()}
             onToggleVisibility={() => setShowKey((value) => !value)}
-            onChange={(apiKey) =>
-              updateConnectionConfig(provider, { apiKey })
-            }
+            onChange={(apiKey) => {
+              updateConnectionConfig(provider, { apiKey });
+            }}
           />
-        </div>
-      </div>
-
-      <div className="border-t border-border pt-5">
-        <div className="flex items-center justify-between gap-4">
-          <SectionHeading icon={KeyRound} title="模型路由" />
           <button
             type="button"
             onClick={() => void fetchModels()}
             disabled={catalog.status === "loading"}
-            className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm font-medium text-text transition hover:bg-surface-alt disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-border bg-surface px-4 py-2 text-sm font-medium text-text transition hover:bg-surface-alt disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
           >
             <RefreshCw
               className={`h-4 w-4 ${
@@ -386,113 +451,98 @@ export function LLMProviderPanel() {
               }`}
               aria-hidden="true"
             />
-            {catalog.status === "loading" ? "拉取中" : "拉取模型"}
+            {catalog.status === "loading"
+              ? "正在检测连接"
+              : "检测连接并拉取模型"}
           </button>
-        </div>
-        {catalog.status === "success" && (
-          <p
-            className="mt-3 text-xs text-text-muted"
-            role="status"
-            aria-live="polite"
-          >
-            已从接口加载 {catalog.models.length} 个模型
-            {catalog.truncated ? "，列表已按配置上限截断" : ""}
-          </p>
-        )}
-        {catalog.status === "error" && (
-          <p className="mt-3 text-xs text-red-600" role="alert">
-            {catalog.error}
-          </p>
-        )}
-        <div className="mt-4 space-y-4">
-          {isCustomProvider && (
-            <ModelRouteField
-              key={`${provider}-default`}
-              id="llm-default-model"
-              label="默认模型"
-              value={config.defaultModel}
-              placeholder="模型服务返回的模型 ID"
-              models={catalog.models}
-              allowEmpty={false}
-              onChange={(defaultModel) =>
-                updateConfig(provider, { defaultModel })
-              }
-            />
-          )}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <ModelRouteField
-              key={`${provider}-planner`}
-              id="llm-planner-model"
-              label="Planner"
-              value={config.plannerModel}
-              placeholder={isCustomProvider ? "留空继承默认模型" : ""}
-              models={catalog.models}
-              allowEmpty={isCustomProvider}
-              onChange={(plannerModel) =>
-                updateConfig(provider, { plannerModel })
-              }
-            />
-            <ModelRouteField
-              key={`${provider}-researcher`}
-              id="llm-researcher-model"
-              label="Researcher"
-              value={config.researcherModel}
-              placeholder={isCustomProvider ? "留空继承默认模型" : ""}
-              models={catalog.models}
-              allowEmpty={isCustomProvider}
-              onChange={(researcherModel) =>
-                updateConfig(provider, { researcherModel })
-              }
-            />
-            <ModelRouteField
-              key={`${provider}-critic`}
-              id="llm-critic-model"
-              label="Critic"
-              value={config.criticModel}
-              placeholder={isCustomProvider ? "留空继承默认模型" : ""}
-              models={catalog.models}
-              allowEmpty={isCustomProvider}
-              onChange={(criticModel) =>
-                updateConfig(provider, { criticModel })
-              }
-            />
-            <ModelRouteField
-              key={`${provider}-synthesizer`}
-              id="llm-synthesizer-model"
-              label="Synthesizer"
-              value={config.synthesizerModel}
-              placeholder={isCustomProvider ? "留空继承默认模型" : ""}
-              models={catalog.models}
-              allowEmpty={isCustomProvider}
-              onChange={(synthesizerModel) =>
-                updateConfig(provider, { synthesizerModel })
-              }
-            />
-          </div>
+          <ModelCatalogMessage catalog={catalog} />
         </div>
       </div>
 
+      <div className="border-t border-border pt-5">
+        <SectionHeading icon={KeyRound} title="模型选择" />
+        <div className="mt-4">
+          <ModelRouteField
+            key={`${provider}-primary`}
+            id="llm-primary-model"
+            label={isCustomProvider ? "默认模型" : "主要模型"}
+            value={primaryModel}
+            placeholder="模型服务返回的模型 ID"
+            models={catalog.models}
+            allowEmpty={false}
+            onChange={updatePrimaryModel}
+          />
+        </div>
+      </div>
+
+      <AdvancedSection
+        id="advanced-model-routing"
+        title="高级模型路由"
+        description="按 Agent 分配不同模型"
+        open={showAdvancedRouting}
+        onToggle={() => setShowAdvancedRouting((value) => !value)}
+      >
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <ModelRouteField
+            key={`${provider}-planner`}
+            id="llm-planner-model"
+            label="Planner"
+            value={config.plannerModel}
+            placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+            models={catalog.models}
+            allowEmpty={isCustomProvider}
+            onChange={(plannerModel) =>
+              updateConfig(provider, { plannerModel })
+            }
+          />
+          <ModelRouteField
+            key={`${provider}-researcher`}
+            id="llm-researcher-model"
+            label="Researcher"
+            value={config.researcherModel}
+            placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+            models={catalog.models}
+            allowEmpty={isCustomProvider}
+            onChange={(researcherModel) =>
+              updateConfig(provider, { researcherModel })
+            }
+          />
+          <ModelRouteField
+            key={`${provider}-critic`}
+            id="llm-critic-model"
+            label="Critic"
+            value={config.criticModel}
+            placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+            models={catalog.models}
+            allowEmpty={isCustomProvider}
+            onChange={(criticModel) =>
+              updateConfig(provider, { criticModel })
+            }
+          />
+          <ModelRouteField
+            key={`${provider}-synthesizer`}
+            id="llm-synthesizer-model"
+            label="Synthesizer"
+            value={config.synthesizerModel}
+            placeholder={isCustomProvider ? "留空继承默认模型" : ""}
+            models={catalog.models}
+            allowEmpty={isCustomProvider}
+            onChange={(synthesizerModel) =>
+              updateConfig(provider, { synthesizerModel })
+            }
+          />
+        </div>
+      </AdvancedSection>
+
       {isCustomProvider && (
-        <div className="border-t border-border pt-5">
-          <div className="flex items-center justify-between gap-4">
-            <h3 className="text-sm font-semibold">接口能力</h3>
-            {isDirty && (
-              <button
-                type="button"
-                onClick={() => {
-                  restoreConfig(provider);
-                  invalidateModelCatalog(provider);
-                  setEditingKey(false);
-                  setShowKey(false);
-                }}
-                className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-text-muted transition hover:bg-surface-alt hover:text-text"
-              >
-                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                撤销此供应商
-              </button>
-            )}
-          </div>
-          <div className="mt-3 divide-y divide-border rounded-md border border-border">
+        <AdvancedSection
+          id="advanced-interface-settings"
+          title="高级接口设置"
+          description="协议与能力兼容选项"
+          open={showAdvancedInterface}
+          onToggle={() => setShowAdvancedInterface((value) => !value)}
+        >
+          <div className="divide-y divide-border rounded-md border border-border">
             <CapabilityToggle
               label="需要 API Key"
               checked={config.apiKeyRequired}
@@ -522,9 +572,221 @@ export function LLMProviderPanel() {
               }
             />
           </div>
-        </div>
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium">
+                原生联网协议
+              </span>
+              <select
+                value={config.nativeWebSearchProtocol}
+                onChange={(event) =>
+                  updateConfig(provider, {
+                    nativeWebSearchProtocol: event.target
+                      .value as NativeWebSearchProtocol,
+                  })
+                }
+                className={inputClassName}
+              >
+                <option value="none">不启用</option>
+                <option value="openai_responses">
+                  OpenAI Responses Web Search
+                </option>
+                <option value="kimi_builtin">Kimi 内置联网</option>
+                <option value="glm_web_search">GLM Web Search API</option>
+              </select>
+            </label>
+            {config.nativeWebSearchProtocol === "glm_web_search" && (
+              <Field
+                id="llm-native-web-search-endpoint"
+                label="联网搜索 Endpoint"
+                value={config.nativeWebSearchEndpoint}
+                placeholder={`${config.baseUrl.replace(/\/$/, "")}/web_search`}
+                onChange={(nativeWebSearchEndpoint) =>
+                  updateConnectionConfig(provider, {
+                    nativeWebSearchEndpoint,
+                  })
+                }
+              />
+            )}
+          </div>
+        </AdvancedSection>
       )}
     </section>
+  );
+}
+
+function ProviderPresetPicker({
+  selectedProvider,
+  configs,
+  onSelect,
+}: {
+  selectedProvider: LLMProvider;
+  configs: Record<LLMProvider, LLMProviderConfig>;
+  onSelect: (provider: LLMProvider) => void;
+}) {
+  const buttonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const moveSelection = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % PROVIDER_PRESETS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex =
+        (currentIndex - 1 + PROVIDER_PRESETS.length)
+        % PROVIDER_PRESETS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = PROVIDER_PRESETS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextPreset = PROVIDER_PRESETS[nextIndex];
+    onSelect(nextPreset.id);
+    buttonRefs.current[nextIndex]?.focus();
+  };
+
+  return (
+    <div
+      className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3"
+      role="radiogroup"
+      aria-label="选择模型供应商"
+    >
+      {PROVIDER_PRESETS.map((preset, index) => {
+        const Icon = preset.icon;
+        const selected = preset.id === selectedProvider;
+        const configured = presetIsConfigured(preset, configs);
+        return (
+          <button
+            key={preset.id}
+            ref={(node) => {
+              buttonRefs.current[index] = node;
+            }}
+            type="button"
+            role="radio"
+            aria-label={preset.label}
+            aria-checked={selected}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onSelect(preset.id)}
+            onKeyDown={(event) => moveSelection(event, index)}
+            className={`group flex min-h-16 min-w-0 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2 ${
+              selected
+                ? "border-primary bg-primary text-white shadow-sm"
+                : "border-border bg-surface-alt text-text hover:border-primary/50 hover:bg-surface"
+            }`}
+          >
+            <span
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${
+                selected
+                  ? "bg-white/15 text-white"
+                  : "bg-surface text-text-muted group-hover:text-primary"
+              }`}
+            >
+              <Icon className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold">
+                {preset.label}
+              </span>
+              <span
+                className={`mt-0.5 block truncate text-xs ${
+                  selected ? "text-white/80" : "text-text-muted"
+                }`}
+              >
+                {preset.description}
+              </span>
+            </span>
+            {selected ? (
+              <Check className="h-4 w-4 shrink-0" aria-hidden="true" />
+            ) : (
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  configured ? "bg-emerald-500" : "bg-border"
+                }`}
+                aria-hidden="true"
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModelCatalogMessage({
+  catalog,
+}: {
+  catalog: ModelCatalogState;
+}) {
+  if (catalog.status === "success") {
+    return (
+      <p
+        className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400"
+        role="status"
+        aria-live="polite"
+      >
+        <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+        连接成功，已加载 {catalog.models.length} 个模型
+        {catalog.truncated ? "，列表已按上限截断" : ""}
+      </p>
+    );
+  }
+  if (catalog.status === "error") {
+    return (
+      <p className="text-xs text-red-600" role="alert">
+        {catalog.error}
+      </p>
+    );
+  }
+  return null;
+}
+
+function AdvancedSection({
+  id,
+  title,
+  description,
+  open,
+  onToggle,
+  children,
+}: {
+  id: string;
+  title: string;
+  description: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-t border-border pt-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={onToggle}
+        className="flex min-h-12 w-full items-center justify-between gap-4 rounded-md px-2 text-left transition hover:bg-surface-alt focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+      >
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold">{title}</span>
+          <span className="mt-0.5 block text-xs text-text-muted">
+            {description}
+          </span>
+        </span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-text-muted transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+          aria-hidden="true"
+        />
+      </button>
+      {open && (
+        <div id={id} className="px-2 pb-2 pt-4">
+          {children}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -558,7 +820,7 @@ function SectionHeading({
   icon: Icon,
   title,
 }: {
-  icon: typeof Server;
+  icon: LucideIcon;
   title: string;
 }) {
   return (
@@ -637,11 +899,10 @@ function ModelRouteField({
     );
   }
 
-  const manual = (
+  const manual =
     manualRequested
     || Boolean(value && !modelIds.has(value))
-    || (!allowEmpty && !value)
-  );
+    || (!allowEmpty && !value);
   const selectedValue = manual
     ? customValue
     : value || (allowEmpty ? inheritValue : customValue);
@@ -736,8 +997,10 @@ function ApiKeyField({
         )}
       </div>
       {hasStoredKey ? (
-        <div className="flex items-center gap-2">
-          <div className={`${inputClassName} flex-1 text-text-muted`}>
+        <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2">
+          <div
+            className={`${inputClassName} min-w-0 truncate text-text-muted`}
+          >
             {config.apiKey}
           </div>
           <button
@@ -759,8 +1022,8 @@ function ApiKeyField({
           </button>
         </div>
       ) : (
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="relative min-w-0 flex-1">
             <input
               id="llm-api-key"
               type={showKey ? "text" : "password"}

@@ -188,7 +188,7 @@ class ApiKey(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     provider: Mapped[str] = mapped_column(
         String(32), nullable=False
-    )  # openai, deepseek
+    )  # Stable LLM provider identifier.
     key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     base_url: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -239,6 +239,11 @@ class DocumentCatalog(Base):
         nullable=False,
         default="indexing",
         index=True,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
     )
     index_signature: Mapped[Optional[str]] = mapped_column(
         String(64),

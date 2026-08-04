@@ -222,12 +222,24 @@ async def test_model_discovery_cannot_redirect_a_stored_key(
 
 
 @pytest.mark.asyncio
-async def test_model_discovery_route_requires_cloud_api_key() -> None:
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("openai", "https://api.openai.com/v1"),
+        ("deepseek", "https://api.deepseek.com"),
+        ("kimi", "https://api.moonshot.cn/v1"),
+        ("glm", "https://open.bigmodel.cn/api/paas/v4"),
+    ],
+)
+async def test_model_discovery_route_requires_cloud_api_key(
+    provider: str,
+    base_url: str,
+) -> None:
     with pytest.raises(routes.HTTPException) as exc_info:
         await routes.discover_provider_models(
             LLMModelDiscoveryRequest(
-                provider="openai",
-                base_url="https://api.openai.com/v1",
+                provider=provider,
+                base_url=base_url,
                 api_key="",
                 use_stored_api_key=False,
             )

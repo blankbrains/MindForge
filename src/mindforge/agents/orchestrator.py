@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import time
 from contextlib import aclosing, nullcontext
@@ -21,6 +20,7 @@ from mindforge.tools.rag_tool import RAGTool
 from mindforge.tools.web_search import WebSearchTool
 from mindforge.config import get_settings
 from mindforge.memory import WorkingMemory
+from mindforge.models.base import LLMFactory
 
 logger = logging.getLogger(__name__)
 
@@ -75,27 +75,45 @@ class Orchestrator:
         self._planner_injected = planner is not None
         self._planner = planner or PlannerAgent()
 
-        # Build default tool set for ResearcherAgent
-        source_policy = getattr(
-            self._settings.agent,
-            "source_policy",
-            "auto",
-        )
-        _researcher_tools: list = []
-        if source_policy in {"auto", "knowledge_base"}:
-            _researcher_tools.append(RAGTool())
-        if source_policy in {"auto", "web"} and os.environ.get(
-            "TAVILY_API_KEY",
-            "",
-        ).strip():
-            _researcher_tools.append(WebSearchTool())
-        _researcher_tools.extend([CodeExecutor(), CitationVerifier()])
-
-        self._researcher = researcher or ResearcherAgent(
-            tools=_researcher_tools,
-            tool_semaphore=self._tool_semaphore,
-            tool_queue_timeout=self._settings.agent.queue_timeout,
-        )
+        if researcher is None:
+            provider = self._settings.llm.llm_provider
+            researcher_llm = LLMFactory.create(
+                provider,
+                self._settings.llm.get_model("researcher", provider),
+            )
+            source_policy = getattr(
+                self._settings.agent,
+                "source_policy",
+                "auto",
+            )
+            researcher_tools: list = []
+            if source_policy in {"auto", "knowledge_base"}:
+                researcher_tools.append(RAGTool())
+            if source_policy in {"auto", "web"}:
+                web_search = WebSearchTool(
+                    native_llm=researcher_llm,
+                    native_enabled=self._settings.web_search.native_enabled,
+                    duckduckgo_enabled=(
+                        self._settings.web_search.duckduckgo_enabled
+                    ),
+                    native_max_output_tokens=(
+                        self._settings.web_search.native_max_output_tokens
+                    ),
+                    native_timeout_seconds=(
+                        self._settings.web_search.native_timeout_seconds
+                    ),
+                )
+                if web_search.available:
+                    researcher_tools.append(web_search)
+            researcher_tools.extend([CodeExecutor(), CitationVerifier()])
+            self._researcher = ResearcherAgent(
+                llm=researcher_llm,
+                tools=researcher_tools,
+                tool_semaphore=self._tool_semaphore,
+                tool_queue_timeout=self._settings.agent.queue_timeout,
+            )
+        else:
+            self._researcher = researcher
         if researcher is not None and isinstance(researcher, ResearcherAgent):
             researcher._tool_semaphore = self._tool_semaphore
             researcher._tool_queue_timeout = self._settings.agent.queue_timeout
@@ -278,9 +296,14 @@ class Orchestrator:
             plan = await self._create_plan(task)
             if planner_span is not None:
                 planner_span.output = {
-                    "success": True,
+                    "success": plan.planner_status != "fallback",
                     "subtask_count": len(plan.subtasks),
+                    "planner_status": plan.planner_status,
+                    "planner_error": plan.planner_error,
                 }
+                if plan.planner_status == "fallback":
+                    planner_span.metadata["status"] = "degraded"
+                    planner_span.error = plan.planner_error
         if plan.reasoning:
             working_memory.add_thought(plan.reasoning)
         pipeline_log["plan"] = {
@@ -514,12 +537,17 @@ class Orchestrator:
                     total_cost,
                 )
                 if not refined_result.success or not refined_result.output.strip():
+                    refinement_failure = str(
+                        refined_result.data.get("failure_reason")
+                        or "报告精炼返回空结果。"
+                    )
                     pipeline_log["critic"] = {
                         "evaluations": evaluation_round + 1,
                         "refine_rounds": refine_count,
                         "overall_score": critic_score.overall,
                         "refined": refine_count > 0,
                         "refinement_failed": True,
+                        "reason": refinement_failure,
                     }
                     break
                 current_draft = refined_result.output
@@ -527,6 +555,10 @@ class Orchestrator:
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         total_cost_usd, cost_status = self._cost_summary(total_cost)
+        citation_verification = self._verify_final_citations(
+            current_draft,
+            all_sources,
+        )
         result = self._build_success_result(
             output=current_draft,
             plan=plan,
@@ -540,6 +572,7 @@ class Orchestrator:
             cost_status=cost_status,
             pipeline_log=pipeline_log,
             refinement_failure=refinement_failure,
+            citation_verification=citation_verification,
         )
         await self._store_memories(task, result)
         return result
@@ -717,9 +750,14 @@ class Orchestrator:
             plan = await self._create_plan(task)
             if planner_span is not None:
                 planner_span.output = {
-                    "success": True,
+                    "success": plan.planner_status != "fallback",
                     "subtask_count": len(plan.subtasks),
+                    "planner_status": plan.planner_status,
+                    "planner_error": plan.planner_error,
                 }
+                if plan.planner_status == "fallback":
+                    planner_span.metadata["status"] = "degraded"
+                    planner_span.error = plan.planner_error
         if plan.reasoning:
             working_memory.add_thought(plan.reasoning)
         self._accumulate_usage(total_usage, plan, total_cost)
@@ -965,12 +1003,20 @@ class Orchestrator:
                     total_cost,
                 )
                 if not refined_result.success or not refined_result.output.strip():
+                    refinement_failure = str(
+                        refined_result.data.get("failure_reason")
+                        or "报告精炼返回空结果。"
+                    )
                     break
                 current_draft = refined_result.output
                 refine_count += 1
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         total_cost_usd, cost_status = self._cost_summary(total_cost)
+        citation_verification = self._verify_final_citations(
+            current_draft,
+            all_sources,
+        )
         result = self._build_success_result(
             output=current_draft,
             plan=plan,
@@ -983,6 +1029,7 @@ class Orchestrator:
             total_cost_usd=total_cost_usd,
             cost_status=cost_status,
             refinement_failure=refinement_failure,
+            citation_verification=citation_verification,
         )
         await self._store_memories(task, result)
         yield {"type": "done", "result": result}
@@ -1033,8 +1080,7 @@ class Orchestrator:
             return False
         if any(marker in normalized for marker in cls._DEEP_RESEARCH_MARKERS):
             return False
-        padded = f" {normalized} "
-        if any(marker in padded for marker in cls._COMPARISON_MARKERS):
+        if PlannerAgent._is_comparison_task(task):
             return False
         sentence_breaks = len(re.findall(r"[。！？!?;\n]", normalized))
         return sentence_breaks <= 2
@@ -1044,10 +1090,11 @@ class Orchestrator:
         normalized = re.sub(r"\s+", " ", task).strip().casefold()
         if not normalized or len(normalized) > 160:
             return False
+        if PlannerAgent._minimum_subtask_count(task) > 1:
+            return False
         if any(marker in normalized for marker in cls._DEEP_RESEARCH_MARKERS):
             return False
-        padded = f" {normalized} "
-        if any(marker in padded for marker in cls._COMPARISON_MARKERS):
+        if PlannerAgent._is_comparison_task(task):
             return False
         sentence_breaks = len(re.findall(r"[。！？!?;\n]", normalized))
         return sentence_breaks <= 2
@@ -1057,7 +1104,11 @@ class Orchestrator:
             return await self._planner.run(task)
         mode = self._research_mode()
         if mode == "fast" or (
-            mode == "balanced" and self._can_use_direct_plan(task)
+            mode == "balanced"
+            and (
+                getattr(self._settings.agent, "max_subtasks", 5) == 1
+                or self._can_use_direct_plan(task)
+            )
         ):
             return ResearchPlan(
                 plan_id=f"direct-{int(time.time() * 1000):x}"[-12:],
@@ -1271,6 +1322,11 @@ class Orchestrator:
                 if isinstance(self._researcher, ResearcherAgent):
                     configured_rounds = self._settings.agent.max_iterations
                     mode = self._research_mode()
+                    researcher_kwargs["task_type"] = subtask.task_type
+                    researcher_kwargs["subtopics"] = subtask.subtopics
+                    researcher_kwargs["deadline"] = (
+                        time.perf_counter() + timeout
+                    )
                     researcher_kwargs["max_rounds"] = (
                         1
                         if mode == "fast"
@@ -1480,6 +1536,48 @@ class Orchestrator:
                 result.data.get("sources", []) if result and result.data else []
             ),
             "success": result.success if result else False,
+            "outcome": (
+                str(
+                    result.metadata.get(
+                        "outcome",
+                        result.data.get("outcome", "success"),
+                    )
+                )
+                if result
+                else "error"
+            ),
+            "grounding_status": (
+                result.metadata.get(
+                    "grounding_status",
+                    result.data.get("grounding_status"),
+                )
+                if result
+                else None
+            ),
+            "citation_status": (
+                result.metadata.get(
+                    "citation_status",
+                    result.data.get("citation_status"),
+                )
+                if result
+                else None
+            ),
+            "failure_reason": (
+                result.metadata.get(
+                    "failure_reason",
+                    result.data.get("failure_reason"),
+                )
+                if result
+                else None
+            ),
+            "source_warning": (
+                result.metadata.get(
+                    "source_warning",
+                    result.data.get("source_warning"),
+                )
+                if result
+                else None
+            ),
             "error": error,
         }
 
@@ -1506,6 +1604,8 @@ class Orchestrator:
             result = AgentResult.from_dict(cached)
             if not result.output.strip():
                 return None
+            if self._cached_result_requires_refresh(result):
+                return None
             if ResearcherAgent.requires_sources(task):
                 cached_sources = result.data.get("sources")
                 if (
@@ -1528,6 +1628,14 @@ class Orchestrator:
                 str(result.metadata.get("outcome") or "").strip().lower()
                 == "degraded"
                 or has_failed_subtask
+                or result.metadata.get("quality_status") == "evaluation_failed"
+                or result.metadata.get("citation_status") == "invalid"
+            ):
+                return None
+            cached_plan = result.data.get("plan")
+            if (
+                isinstance(cached_plan, dict)
+                and cached_plan.get("planner_status") == "fallback"
             ):
                 return None
             cached_generation_usage = dict(result.token_usage)
@@ -1570,6 +1678,21 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("Episodic memory recall failed: %s", exc)
             return None
+
+    @staticmethod
+    def _cached_result_requires_refresh(result: AgentResult) -> bool:
+        if "](" in result.output and "]([" in result.output:
+            return True
+        if "ws_call_id=" in result.output:
+            return True
+        sources = result.data.get("sources")
+        if not isinstance(sources, list):
+            return False
+        return any(
+            isinstance(source, dict)
+            and "ws_call_id=" in str(source.get("url") or "")
+            for source in sources
+        )
 
     async def _create_working_memory(
         self,
@@ -1644,7 +1767,14 @@ class Orchestrator:
         result: AgentResult,
     ) -> None:
         outcome = str(result.metadata.get("outcome") or "").strip().lower()
-        is_complete_success = result.success and outcome != "degraded"
+        grounding_status = str(
+            result.metadata.get("grounding_status") or ""
+        ).strip().lower()
+        is_complete_success = (
+            result.success
+            and outcome != "degraded"
+            and grounding_status != "model_only"
+        )
         if self._episodic_memory is not None and is_complete_success:
             try:
                 await self._episodic_memory.store(task, result)
@@ -1688,24 +1818,82 @@ class Orchestrator:
         cost_status: str,
         pipeline_log: dict[str, Any] | None = None,
         refinement_failure: str | None = None,
+        citation_verification: dict[str, Any] | None = None,
     ) -> AgentResult:
         completed_subtasks = sum(
             1 for output in subtask_outputs if output.get("success")
         )
         failed_subtasks = len(subtask_outputs) - completed_subtasks
-        outcome = (
-            "degraded"
-            if failed_subtasks or refinement_failure
-            else "success"
-        )
-        failure_reason = (
-            self._format_partial_failure(subtask_outputs)
-            if failed_subtasks
-            else (
-                "报告精炼未完成，当前展示最后一个有效版本。"
-                if refinement_failure
-                else None
+        degradation_reasons: list[str] = []
+        if failed_subtasks:
+            degradation_reasons.append(
+                self._format_partial_failure(subtask_outputs)
             )
+        degraded_subtasks = [
+            item
+            for item in subtask_outputs
+            if item.get("success") and item.get("outcome") == "degraded"
+        ]
+        if degraded_subtasks:
+            model_only_count = sum(
+                1
+                for item in degraded_subtasks
+                if item.get("grounding_status") == "model_only"
+            )
+            degradation_reasons.append(
+                (
+                    f"{model_only_count} 个子任务未获得可核验来源，"
+                    "已保留模型自身回答。"
+                )
+                if model_only_count
+                else f"{len(degraded_subtasks)} 个子任务以降级模式完成。"
+            )
+        if plan.planner_status == "fallback":
+            degradation_reasons.append(
+                "Planner 规划失败，当前使用保留原问题语义的单任务回退计划。"
+                + (
+                    f" 原因：{plan.planner_error}"
+                    if plan.planner_error
+                    else ""
+                )
+            )
+        if (
+            final_critic is not None
+            and final_critic.evaluation_status == "failed"
+        ):
+            degradation_reasons.append(
+                "质量评审失败，报告未完成有效评审。"
+                + (
+                    f" 原因：{final_critic.evaluation_error}"
+                    if final_critic.evaluation_error
+                    else ""
+                )
+            )
+        if refinement_failure:
+            degradation_reasons.append(
+                "报告精炼未完成，当前展示最后一个有效版本。"
+                f" 原因：{refinement_failure}"
+            )
+        if (
+            citation_verification is not None
+            and not citation_verification.get("valid", True)
+        ):
+            degradation_reasons.append(
+                self._format_citation_failure(citation_verification)
+            )
+        outcome = "degraded" if degradation_reasons else "success"
+        failure_reason = (
+            " ".join(degradation_reasons) if degradation_reasons else None
+        )
+        source_warnings = list(
+            dict.fromkeys(
+                str(item.get("source_warning") or "").strip()
+                for item in subtask_outputs
+                if str(item.get("source_warning") or "").strip()
+            )
+        )
+        source_warning = (
+            "; ".join(source_warnings) if source_warnings else None
         )
         data: dict[str, Any] = {
             "plan": plan.to_dict(),
@@ -1713,9 +1901,20 @@ class Orchestrator:
             "sources": sources,
             "critic_score": (final_critic.to_dict() if final_critic else None),
             "refine_rounds": refine_count,
+            "citation_verification": citation_verification,
+            "grounding_status": (
+                "model_only"
+                if any(
+                    item.get("grounding_status") == "model_only"
+                    for item in subtask_outputs
+                )
+                else ("grounded" if sources else "not_required")
+            ),
         }
         if failure_reason:
             data["partial_failure"] = failure_reason
+        if source_warning:
+            data["source_warning"] = source_warning
         if refinement_failure:
             data["refinement_failure"] = refinement_failure
         if pipeline_log is not None:
@@ -1750,9 +1949,31 @@ class Orchestrator:
             ),
             "model": self._settings.llm.llm_provider,
             "outcome": outcome,
+            "grounding_status": (
+                "model_only"
+                if any(
+                    item.get("grounding_status") == "model_only"
+                    for item in subtask_outputs
+                )
+                else ("grounded" if sources else "not_required")
+            ),
+            "citation_status": (
+                "unavailable"
+                if any(
+                    item.get("grounding_status") == "model_only"
+                    for item in subtask_outputs
+                )
+                else (
+                    citation_verification.get("status", "not_applicable")
+                    if citation_verification is not None
+                    else "not_applicable"
+                )
+            ),
         }
         if failure_reason:
             metadata["failure_reason"] = failure_reason
+        if source_warning:
+            metadata["source_warning"] = source_warning
         return AgentResult(
             agent_name="orchestrator",
             success=True,
@@ -1868,6 +2089,93 @@ class Orchestrator:
                 seen.add(identity)
                 all_sources.append({**src, "index": len(all_sources) + 1})
         return all_sources
+
+    @staticmethod
+    def _verify_final_citations(
+        report: str,
+        sources: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        markers = [
+            int(value)
+            for value in re.findall(r"\[([1-9]\d*)\]", report)
+        ]
+        if not sources:
+            valid = not markers
+            return {
+                "valid": valid,
+                "status": "not_applicable" if valid else "invalid",
+                "total_markers": len(markers),
+                "valid_markers": 0,
+                "validity_score": 1.0 if valid else 0.0,
+                "has_issues": not valid,
+                "issues": (
+                    []
+                    if valid
+                    else [
+                        {
+                            "marker": f"[{markers[0]}]",
+                            "index": markers[0],
+                            "type": "missing_source_list",
+                            "detail": "报告包含引用标记，但没有可用来源列表。",
+                        }
+                    ]
+                ),
+                "unused_sources": [],
+                "sources_used": [],
+            }
+        if not markers:
+            return {
+                "valid": False,
+                "status": "invalid",
+                "total_markers": 0,
+                "valid_markers": 0,
+                "validity_score": 0.0,
+                "has_issues": True,
+                "issues": [
+                    {
+                        "marker": "",
+                        "index": None,
+                        "type": "missing_markers",
+                        "detail": "报告使用了来源，但正文没有引用标记。",
+                    }
+                ],
+                "unused_sources": [
+                    source.get("index")
+                    for source in sources
+                    if isinstance(source.get("index"), int)
+                ],
+                "sources_used": [],
+            }
+
+        verification = CitationVerifier().execute(
+            report_text=report,
+            sources=sources,
+            strict_unused=False,
+        )
+        data = (
+            dict(verification.data)
+            if isinstance(verification.data, dict)
+            else {}
+        )
+        data["valid"] = verification.success
+        data["status"] = "valid" if verification.success else "invalid"
+        return data
+
+    @staticmethod
+    def _format_citation_failure(
+        verification: dict[str, Any],
+    ) -> str:
+        issues = verification.get("issues")
+        if isinstance(issues, list) and issues:
+            first = issues[0]
+            if isinstance(first, dict):
+                detail = str(
+                    first.get("detail")
+                    or first.get("type")
+                    or "引用校验未通过"
+                ).strip()
+                return f"最终报告引用校验未通过：{detail}"
+        return "最终报告引用校验未通过。"
 
     @staticmethod
     def _attach_citation_maps(

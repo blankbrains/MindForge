@@ -172,6 +172,10 @@ def get_retriever() -> AdaptiveRetriever:
             async def _async_embed(text: str) -> list[float]:
                 return await asyncio.to_thread(embedder.embed_single, text)
 
+            from mindforge.repositories.documents import (
+                list_disabled_document_ids,
+            )
+
             _retriever = AdaptiveRetriever(
                 hybrid_retriever=HybridRetriever(
                     vector_store=get_vector_store(),
@@ -188,6 +192,7 @@ def get_retriever() -> AdaptiveRetriever:
                 max_request_top_k=settings.retrieval.max_request_top_k,
                 retrieval_top_k=settings.retrieval.vector_top_k,
                 rerank_top_k=settings.retrieval.rerank_top_k,
+                disabled_document_ids_fn=list_disabled_document_ids,
             )
         return _retriever
 

@@ -9,6 +9,11 @@ beforeEach(() => {
   useSettingsStore.setState({
     researchMode: "balanced",
     tavilyConfigured: false,
+    nativeWebSearchProtocol: "none",
+    nativeWebSearchSupported: false,
+    duckDuckGoEnabled: false,
+    modelOnlyFallbackEnabled: true,
+    webSearchAvailable: false,
     rerankerConfigured: true,
     rerankerAvailable: false,
     rerankerLoadFailed: true,
@@ -30,17 +35,17 @@ describe("settings status panels", () => {
     expect(unselected.getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("explains unavailable reranking and Tavily configuration", () => {
+  it("explains unavailable reranking and model-only search fallback", () => {
     render(<RetrievalSettingsPanel />);
 
     expect(screen.getByText("模型加载失败")).toBeTruthy();
     expect(
       screen.getByText("继续使用基础混合检索；请检查模型文件、依赖和设备配置"),
     ).toBeTruthy();
-    expect(screen.getByText("未配置 API Key")).toBeTruthy();
+    expect(screen.getByText("当前无联网后端")).toBeTruthy();
     expect(
       screen.getByText(
-        "当前不会调用联网搜索；配置 TAVILY_API_KEY 后启用",
+        "研究会保留模型回答，并明确标记为无可核验引用",
       ),
     ).toBeTruthy();
   });

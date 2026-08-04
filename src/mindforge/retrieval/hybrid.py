@@ -41,6 +41,7 @@ class HybridRetriever:
         vector_weight: float = 0.5,
         bm25_weight: float = 0.5,
         top_k: int = 10,
+        excluded_doc_ids: set[str] | None = None,
     ) -> List[Dict[str, Any]]:
         """Execute hybrid retrieval with configurable paths.
 
@@ -54,7 +55,9 @@ class HybridRetriever:
             try:
                 dense_vec = await self.embedding_fn(query)
                 vector_hits = await self.vector_store.search(
-                    vector=dense_vec, top_k=top_k
+                    vector=dense_vec,
+                    top_k=top_k,
+                    excluded_doc_ids=excluded_doc_ids,
                 )
                 return (
                     "vector",
@@ -81,6 +84,7 @@ class HybridRetriever:
                     self.bm25_retriever.search,
                     query=query,
                     top_k=bm25_candidate_k,
+                    excluded_doc_ids=excluded_doc_ids,
                 )
                 return (
                     "bm25",
@@ -107,6 +111,7 @@ class HybridRetriever:
                 hyde_hits = await self.vector_store.search(
                     vector=hyp_vec,
                     top_k=top_k,
+                    excluded_doc_ids=excluded_doc_ids,
                 )
                 return (
                     "hyde",
@@ -141,6 +146,7 @@ class HybridRetriever:
                             self.bm25_retriever.search,
                             query=expanded_query,
                             top_k=bm25_candidate_k,
+                            excluded_doc_ids=excluded_doc_ids,
                         )
 
                 search_results = await asyncio.gather(

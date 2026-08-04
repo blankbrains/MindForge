@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, LLMFactory
 from mindforge.config import get_settings
@@ -526,11 +527,23 @@ class BaseAgent(ABC):
 
     # -- Tool helpers -------------------------------------------------------
 
-    def _get_tool_schemas(self) -> list[dict[str, Any]]:
+    def _get_tool_schemas(
+        self,
+        active_tool_names: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Convert internal tools to OpenAI function-calling schema list."""
-        return [t.to_openai_function() for t in self._tools]
+        return [
+            tool.to_openai_function()
+            for tool in self._tools
+            if active_tool_names is None or tool.name in active_tool_names
+        ]
 
-    async def _execute_tool(self, tool_call: dict) -> dict[str, Any]:
+    async def _execute_tool(
+        self,
+        tool_call: dict,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Execute a single tool call and return a result dict.
 
         Returns
@@ -579,15 +592,49 @@ class BaseAgent(ABC):
 
         started = time.perf_counter()
         acquired_tool_slot = False
+
+        def timeout_result(message: str) -> dict[str, Any]:
+            return {
+                "tool_call_id": tc_id,
+                "output": message,
+                "success": False,
+                "error": message,
+                "data": {
+                    "backend": tool_name,
+                    "failure_type": "tool_timeout",
+                    "retryable": True,
+                    "terminal_for_run": True,
+                },
+                "execution_time_ms": (
+                    time.perf_counter() - started
+                ) * 1000,
+            }
+
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            return timeout_result(
+                f"Tool {tool_name} was skipped because the subtask time "
+                "budget was exhausted."
+            )
+
         try:
             if self._tool_semaphore is not None:
+                queue_timeout = self._tool_queue_timeout
+                budget_limited_queue = False
+                if timeout_seconds is not None:
+                    budget_limited_queue = timeout_seconds <= queue_timeout
+                    queue_timeout = min(queue_timeout, timeout_seconds)
                 try:
                     await asyncio.wait_for(
                         self._tool_semaphore.acquire(),
-                        timeout=self._tool_queue_timeout,
+                        timeout=queue_timeout,
                     )
                     acquired_tool_slot = True
                 except asyncio.TimeoutError:
+                    if budget_limited_queue:
+                        return timeout_result(
+                            f"Tool {tool_name} could not start before the "
+                            "subtask time budget expired."
+                        )
                     return {
                         "tool_call_id": tc_id,
                         "output": (
@@ -598,24 +645,57 @@ class BaseAgent(ABC):
                         "error": "Tool execution queue timeout",
                         "execution_time_ms": (time.perf_counter() - started) * 1000,
                     }
-            tracer = self._get_tracer()
-            if tracer is None:
-                result = await tool.execute_async(**args)
-            else:
+
+            async def invoke_tool() -> Any:
+                tracer = self._get_tracer()
+                if tracer is None:
+                    return await tool.execute_async(**args)
                 with tracer.span(
                     "tool.execute",
                     metadata={
                         "agent": self.name,
                         "tool": tool_name,
+                        "timeout_seconds": timeout_seconds,
                     },
                 ) as span:
                     span.input = args
-                    result = await tool.execute_async(**args)
+                    tool_result = await tool.execute_async(**args)
                     span.output = {
-                        "success": result.success,
-                        "output": (result.output or "")[:4000],
-                        "error": result.error,
+                        "success": tool_result.success,
+                        "output": (tool_result.output or "")[:4000],
+                        "error": tool_result.error,
                     }
+                    if not tool_result.success:
+                        span.metadata["status"] = "error"
+                        span.error = (
+                            tool_result.error
+                            or f"Tool {tool_name} returned no usable result."
+                        )
+                    return tool_result
+
+            execution_timeout = timeout_seconds
+            if execution_timeout is not None:
+                execution_timeout -= time.perf_counter() - started
+                if execution_timeout <= 0:
+                    return timeout_result(
+                        f"Tool {tool_name} could not start before the "
+                        "subtask time budget expired."
+                    )
+                result = await asyncio.wait_for(
+                    invoke_tool(),
+                    timeout=execution_timeout,
+                )
+            else:
+                result = await invoke_tool()
+        except asyncio.TimeoutError:
+            timeout_label = (
+                f"{timeout_seconds:g} seconds"
+                if timeout_seconds is not None
+                else "its configured limit"
+            )
+            return timeout_result(
+                f"Tool {tool_name} timed out after {timeout_label}."
+            )
         except Exception as exc:
             logger.exception("Tool execution failed: %s", tool_name)
             return {
@@ -654,6 +734,8 @@ class BaseAgent(ABC):
         messages: Optional[list[ChatMessage]] = None,
         _llm_override: Any = None,
         require_sources: bool = False,
+        source_requirement: str = "required",
+        deadline: float | None = None,
     ) -> AgentResult:
         """Run the LLM tool-calling loop (ReAct / function calling).
 
@@ -691,8 +773,8 @@ class BaseAgent(ABC):
                 user_content = f"## Task\n\n{task}\n\n## Context\n\n{context}"
             conv.append(ChatMessage(role="user", content=user_content))
 
-        tool_schemas = self._get_tool_schemas()
-        use_tools = bool(tool_schemas)
+        active_tool_names = set(self._tool_dict)
+        use_tools = bool(active_tool_names)
 
         aggregated_usage: dict[str, int] = {}
         final_content = ""
@@ -700,23 +782,130 @@ class BaseAgent(ABC):
         tool_calls_rejected = 0
         automatic_source_search_attempted = False
         citation_rewrite_requested = False
+        force_model_only_generation = False
+        native_answer_candidate = ""
         collected_sources: list[
             dict[str, Any]
         ] = []  # aggregate source metadata from tool calls
         source_indices: dict[str, int] = {}
         tool_call_details: list[dict[str, Any]] = []
+        source_failures: list[dict[str, Any]] = []
+        source_tool_name_set = {
+            "search_knowledge_base",
+            "web_search",
+        }
+        model_only_fallback = bool(
+            getattr(
+                getattr(self._settings, "web_search", None),
+                "model_only_fallback",
+                True,
+            )
+        )
         citation_rewrite_instruction = (
             "这份草稿没有使用来源编号。请基于已经提供的真实来源重写答案，"
             "并在对应事实后加入全局 [N] 引用标记；不要编造来源。"
         )
+        source_tool_names = self._ordered_source_tools(task)
+        strict_sources = (
+            require_sources and source_requirement == "required"
+        )
+        llm_timeout = float(
+            getattr(self._settings.agent, "llm_request_timeout", 45)
+        )
+        total_deadline_budget = (
+            max(0.0, deadline - start_time)
+            if deadline is not None
+            else None
+        )
+        final_answer_reserve = (
+            min(
+                llm_timeout,
+                max(5.0, total_deadline_budget * 0.35),
+            )
+            if total_deadline_budget is not None
+            else 0.0
+        )
+
+        def tool_timeout_budget() -> float | None:
+            if deadline is None:
+                return None
+            remaining = deadline - time.perf_counter()
+            return max(0.0, remaining - final_answer_reserve)
+
+        async def execute_tool_call(
+            tool_call: dict[str, Any],
+        ) -> dict[str, Any]:
+            tool_name = str(
+                tool_call.get("function", {}).get("name", "")
+            )
+            if tool_name not in active_tool_names:
+                return {
+                    "tool_call_id": tool_call.get("id", ""),
+                    "output": (
+                        f"Tool {tool_name} is unavailable for the remainder "
+                        "of this subtask because an earlier call failed."
+                    ),
+                    "success": False,
+                    "error": "Tool disabled after earlier failure",
+                    "data": {
+                        "backend": tool_name,
+                        "failure_type": "tool_disabled",
+                        "retryable": False,
+                        "terminal_for_run": False,
+                    },
+                }
+            return await self._execute_tool(
+                tool_call,
+                timeout_seconds=tool_timeout_budget(),
+            )
+
+        async def chat_with_deadline(
+            *,
+            tools: list[dict[str, Any]] | None,
+        ) -> ChatResult:
+            if deadline is not None:
+                remaining = deadline - time.perf_counter() - 0.25
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(
+                        "Subtask deadline exhausted before LLM generation."
+                    )
+                return await asyncio.wait_for(
+                    self._chat(
+                        conv,
+                        tools=tools,
+                        _llm_override=_llm_override,
+                    ),
+                    timeout=remaining,
+                )
+            return await self._chat(
+                conv,
+                tools=tools,
+                _llm_override=_llm_override,
+            )
 
         def register_tool_result(
             tool_call: dict[str, Any],
             exec_result: dict[str, Any],
         ) -> str:
+            nonlocal native_answer_candidate
             tool_output = str(exec_result["output"])
             tool_data = exec_result.get("data")
+            tool_name = str(
+                tool_call.get("function", {}).get("name", "")
+            )
             if isinstance(tool_data, dict):
+                tool_usage = tool_data.get("usage")
+                if isinstance(tool_usage, dict):
+                    for key, value in tool_usage.items():
+                        if isinstance(value, (int, float)) and not isinstance(
+                            value,
+                            bool,
+                        ):
+                            normalized_key = str(key)
+                            aggregated_usage[normalized_key] = (
+                                aggregated_usage.get(normalized_key, 0)
+                                + int(value)
+                            )
                 raw_sources = tool_data.get("sources")
                 if isinstance(raw_sources, list):
                     mapping_lines: list[str] = []
@@ -746,28 +935,156 @@ class BaseAgent(ABC):
                             "answer; do not reuse local result numbers.\n\n"
                             + tool_output
                         )
+                    if (
+                        tool_data.get("answer_ready") is True
+                        and isinstance(tool_data.get("answer"), str)
+                    ):
+                        native_answer_candidate = (
+                            self._ground_native_answer(
+                                tool_data["answer"],
+                                raw_sources,
+                                source_indices,
+                            )
+                        )
+                if (
+                    tool_name in source_tool_name_set
+                    and not exec_result.get("success", False)
+                ):
+                    failure_type = str(
+                        tool_data.get("failure_type") or "tool_failed"
+                    )
+                    if failure_type != "tool_disabled":
+                        source_failures.append(
+                            {
+                                "tool": tool_name,
+                                "backend": str(
+                                    tool_data.get("backend") or tool_name
+                                ),
+                                "failure_type": failure_type,
+                                "retryable": bool(
+                                    tool_data.get("retryable", False)
+                                ),
+                                "message": str(
+                                    exec_result.get("error")
+                                    or exec_result.get("output")
+                                    or "Source tool failed."
+                                ),
+                            }
+                        )
+                    if tool_data.get("terminal_for_run") is True:
+                        active_tool_names.discard(tool_name)
             tool_call_details.append(
                 {
-                    "tool": tool_call.get("function", {}).get("name", ""),
+                    "tool": tool_name,
                     "success": exec_result.get("success", False),
                     "latency_ms": exec_result.get(
                         "execution_time_ms",
                         0.0,
                     ),
+                    "failure_type": (
+                        tool_data.get("failure_type")
+                        if isinstance(tool_data, dict)
+                        else None
+                    ),
+                    "backend": (
+                        tool_data.get("backend")
+                        if isinstance(tool_data, dict)
+                        else None
+                    ),
                 }
             )
             return tool_output
 
-        for round_idx in range(max_rounds):
-            result = await self._chat(
-                conv,
+        async def collect_required_sources() -> None:
+            nonlocal automatic_source_search_attempted, tool_calls_made
+            if (
+                automatic_source_search_attempted
+                or not source_tool_names
+                or tool_calls_made
+                >= self._settings.agent.max_tool_calls_total
+            ):
+                return
+            automatic_source_search_attempted = True
+            for source_tool_name in source_tool_names:
+                if (
+                    tool_calls_made
+                    >= self._settings.agent.max_tool_calls_total
+                ):
+                    break
+                if source_tool_name not in active_tool_names:
+                    continue
+                tool_call = {
+                    "id": f"automatic-source-{tool_calls_made + 1}",
+                    "type": "function",
+                    "function": {
+                        "name": source_tool_name,
+                        "arguments": json.dumps(
+                            {"query": task},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+                tool_calls_made += 1
+                exec_result = await execute_tool_call(tool_call)
+                tool_output = register_tool_result(
+                    tool_call,
+                    exec_result,
+                )
+                conv.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            "## 已检索证据\n\n"
+                            f"{tool_output}\n\n"
+                            "请仅基于以上证据回答；有来源时使用对应 [N] "
+                            "引用，不要编造来源。"
+                        ),
+                    )
+                )
+                if collected_sources:
+                    break
+
+        # Factual research needs evidence before generation. This avoids paying
+        # for an ungrounded draft that would immediately be discarded.
+        if require_sources:
+            await collect_required_sources()
+            if not collected_sources and model_only_fallback:
+                force_model_only_generation = True
+                active_tool_names.difference_update(source_tool_name_set)
+                conv.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            "未能获得可核验来源。请基于模型已有知识给出有用答案，"
+                            "严格遵守用户指定的篇幅、句数和输出格式；"
+                            "不要在正文中追加来源免责声明，系统会通过结构化状态"
+                            "单独提示来源情况。不要编造引用或声称已经联网检索成功。"
+                        ),
+                    )
+                )
+
+        rounds_completed = 0
+        if native_answer_candidate and collected_sources:
+            final_content = native_answer_candidate
+            conv.append(ChatMessage(role="assistant", content=final_content))
+
+        for round_idx in (
+            range(0) if final_content else range(max_rounds)
+        ):
+            rounds_completed = round_idx + 1
+            round_tool_schemas = (
+                []
+                if force_model_only_generation
+                else self._get_tool_schemas(active_tool_names)
+            )
+            result = await chat_with_deadline(
                 tools=(
-                    tool_schemas
+                    round_tool_schemas
                     if use_tools
+                    and round_tool_schemas
                     and tool_calls_made < self._settings.agent.max_tool_calls_total
                     else None
                 ),
-                _llm_override=_llm_override,
             )
 
             # Accumulate token usage
@@ -778,11 +1095,6 @@ class BaseAgent(ABC):
             # --- No tool calls → final answer ---
             if not result.tool_calls:
                 candidate_content = result.content or ""
-                source_tool_names = [
-                    name
-                    for name in ("search_knowledge_base", "web_search")
-                    if name in self._tool_dict
-                ]
                 if (
                     require_sources
                     and not collected_sources
@@ -791,49 +1103,8 @@ class BaseAgent(ABC):
                     and tool_calls_made
                     < self._settings.agent.max_tool_calls_total
                 ):
-                    automatic_source_search_attempted = True
-                    for source_tool_name in source_tool_names:
-                        if (
-                            tool_calls_made
-                            >= self._settings.agent.max_tool_calls_total
-                        ):
-                            break
-                        tool_call = {
-                            "id": (
-                                f"automatic-source-{tool_calls_made + 1}"
-                            ),
-                            "function": {
-                                "name": source_tool_name,
-                                "arguments": json.dumps(
-                                    {"query": task},
-                                    ensure_ascii=False,
-                                ),
-                            },
-                        }
-                        tool_calls_made += 1
-                        conv.append(
-                            ChatMessage(
-                                role="assistant",
-                                content="",
-                                tool_calls=[tool_call],
-                            )
-                        )
-                        exec_result = await self._execute_tool(tool_call)
-                        tool_output = register_tool_result(
-                            tool_call,
-                            exec_result,
-                        )
-                        conv.append(
-                            ChatMessage(
-                                role="tool",
-                                content=tool_output,
-                                tool_call_id=exec_result["tool_call_id"],
-                            )
-                        )
-                        if collected_sources:
-                            break
-                    if tool_calls_made > 0:
-                        continue
+                    await collect_required_sources()
+                    continue
                 if (
                     require_sources
                     and collected_sources
@@ -886,7 +1157,7 @@ class BaseAgent(ABC):
 
             # 2. Execute all tools concurrently
             tool_results = await asyncio.gather(
-                *[self._execute_tool(tc) for tc in selected_calls],
+                *[execute_tool_call(tc) for tc in selected_calls],
                 return_exceptions=True,
             )
             tool_results.extend(
@@ -928,10 +1199,8 @@ class BaseAgent(ABC):
         # so the LLM can produce a closing answer from accumulated tool results.
         if not final_content and use_tools and tool_calls_made > 0:
             try:
-                final_result = await self._chat(
-                    conv,
+                final_result = await chat_with_deadline(
                     tools=None,  # no tools allowed – force text answer
-                    _llm_override=_llm_override,
                 )
                 final_content = final_result.content or ""
                 if final_content:
@@ -958,10 +1227,8 @@ class BaseAgent(ABC):
                 )
             )
             try:
-                citation_result = await self._chat(
-                    conv,
+                citation_result = await chat_with_deadline(
                     tools=None,
-                    _llm_override=_llm_override,
                 )
                 if citation_result.content.strip():
                     final_content = citation_result.content
@@ -1006,39 +1273,91 @@ class BaseAgent(ABC):
             aggregated_usage,
             self._provider_name,
         )
-        success = bool(final_content.strip())
+        has_citations = self._contains_citation_marker(final_content)
+        citation_status = (
+            "available"
+            if collected_sources and has_citations
+            else (
+                "missing_markers"
+                if collected_sources
+                else ("unavailable" if require_sources else "not_required")
+            )
+        )
+        failure_reason: str | None = None
+        source_warning: str | None = None
+        terminal_failure = False
+        outcome = "success"
+        grounding_status = (
+            "grounded"
+            if require_sources and collected_sources and has_citations
+            else ("not_required" if not require_sources else "unavailable")
+        )
+        if require_sources and not collected_sources:
+            primary_source_failure = (
+                source_failures[-1] if source_failures else None
+            )
+            source_warning = (
+                f"{primary_source_failure['tool']}:"
+                f"{primary_source_failure['failure_type']}"
+                if primary_source_failure is not None
+                else "sources_unavailable"
+            )
+            if model_only_fallback and final_content.strip():
+                outcome = "degraded" if strict_sources else "success"
+                grounding_status = "model_only"
+                failure_reason = source_warning if strict_sources else None
+            else:
+                failure_reason = source_warning
+                terminal_failure = True
+                final_content = str(
+                    primary_source_failure["message"]
+                    if primary_source_failure is not None
+                    else (
+                        "未能获取与当前问题高度相关且可核验的来源，"
+                        "因此无法可靠完成本次研究。"
+                    )
+                )
+        elif require_sources and not has_citations:
+            failure_reason = "citation_markers_missing"
+            terminal_failure = True
+            final_content = (
+                "已获取研究资料，但模型未能生成可核验的引用标记，"
+                "因此本次结果未被视为有效研究报告。"
+            )
+
+        success = bool(final_content.strip()) and not terminal_failure
         if not success:
-            final_content = ""
+            final_content = final_content.strip()
 
         return AgentResult(
             agent_name=self.name,
             success=success,
             output=final_content,
             data={
-                "rounds": min(round_idx + 1, max_rounds),
+                "rounds": rounds_completed,
                 "tool_calls": tool_calls_made,
                 "tool_calls_rejected": tool_calls_rejected,
                 "messages": len(conv),
                 "sources": collected_sources,
-                "citation_status": (
-                    "available"
-                    if collected_sources
-                    and self._contains_citation_marker(final_content)
-                    else (
-                        "missing_markers"
-                        if collected_sources
-                        else (
-                            "unavailable"
-                            if require_sources
-                            else "not_required"
-                        )
-                    )
-                ),
+                "citation_status": citation_status,
+                "grounding_status": grounding_status,
+                "outcome": outcome if success else "error",
                 "tool_call_details": tool_call_details,
-                "failure_reason": (None if success else "empty_llm_response"),
+                "source_failures": source_failures,
+                "source_warning": source_warning,
+                "failure_reason": (
+                    failure_reason
+                    if failure_reason is not None
+                    else (None if success else "empty_llm_response")
+                ),
             },
             metadata={
                 "model": model_used,
+                "citation_status": citation_status,
+                "grounding_status": grounding_status,
+                "outcome": outcome if success else "error",
+                "failure_reason": failure_reason,
+                "source_warning": source_warning,
             },
             token_usage=aggregated_usage,
             latency_ms=elapsed_ms,
@@ -1061,3 +1380,127 @@ class BaseAgent(ABC):
     @staticmethod
     def _contains_citation_marker(text: str) -> bool:
         return bool(re.search(r"\[[1-9]\d*\]", text))
+
+    def _ordered_source_tools(self, task: str) -> list[str]:
+        available = {
+            name
+            for name in ("search_knowledge_base", "web_search")
+            if name in self._tool_dict
+        }
+        if not available:
+            return []
+        normalized = re.sub(r"\s+", " ", task).strip().casefold()
+        web_only_markers = (
+            "只使用联网",
+            "仅使用联网",
+            "仅联网",
+            "只查官网",
+            "仅查官网",
+            "web only",
+            "online sources only",
+        )
+        web_priority_markers = (
+            "联网",
+            "官网",
+            "官方网站",
+            "最新",
+            "当前版本",
+            "发布日期",
+            "实时",
+            "today",
+            "latest",
+            "official website",
+        )
+        if "web_search" in available and any(
+            marker in normalized for marker in web_only_markers
+        ):
+            return ["web_search"]
+        preferred = (
+            ("web_search", "search_knowledge_base")
+            if "web_search" in available
+            and any(marker in normalized for marker in web_priority_markers)
+            else ("search_knowledge_base", "web_search")
+        )
+        return [name for name in preferred if name in available]
+
+    @classmethod
+    def _ground_native_answer(
+        cls,
+        answer: str,
+        sources: list[Any],
+        source_indices: dict[str, int],
+    ) -> str:
+        rendered = answer.strip()
+        available_indices: list[int] = []
+        url_indices: dict[str, int] = {}
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            global_index = source_indices.get(cls._source_identity(source))
+            if global_index is None:
+                continue
+            available_indices.append(global_index)
+            url = str(source.get("url") or "").strip()
+            if not url:
+                continue
+            url_indices[cls._canonical_citation_url(url)] = global_index
+
+        def replace_markdown_link(match: re.Match[str]) -> str:
+            index = url_indices.get(
+                cls._canonical_citation_url(match.group(2))
+            )
+            if index is None:
+                return match.group(0)
+            return f"{match.group(1)} [{index}]"
+
+        rendered = re.sub(
+            r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+            replace_markdown_link,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+
+        def replace_raw_url(match: re.Match[str]) -> str:
+            index = url_indices.get(
+                cls._canonical_citation_url(match.group(0))
+            )
+            return f"[{index}]" if index is not None else match.group(0)
+
+        rendered = re.sub(
+            r"https?://[^\s<>()\[\]{}\"']+",
+            replace_raw_url,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        if (
+            rendered
+            and available_indices
+            and not cls._contains_citation_marker(rendered)
+        ):
+            markers = " ".join(
+                f"[{index}]" for index in dict.fromkeys(available_indices)
+            )
+            rendered = f"{rendered}\n\n来源：{markers}"
+        return rendered
+
+    @staticmethod
+    def _canonical_citation_url(url: str) -> str:
+        value = url.strip().rstrip(".,;:!?")
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value
+        fragment = (
+            ""
+            if parsed.fragment.startswith("ws_call_id=")
+            else parsed.fragment
+        )
+        return urlunsplit(
+            (
+                parsed.scheme.casefold(),
+                parsed.netloc.casefold(),
+                parsed.path,
+                parsed.query,
+                fragment,
+            )
+        )

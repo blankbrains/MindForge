@@ -138,6 +138,9 @@ class APIProtectionMiddleware(BaseHTTPMiddleware):
                 )
             return await call_next(request)
 
+        if _settings.api.allow_insecure_remote_access:
+            return await call_next(request)
+
         if _api_binding_is_loopback():
             return await call_next(request)
         client_host = request.client.host if request.client is not None else ""

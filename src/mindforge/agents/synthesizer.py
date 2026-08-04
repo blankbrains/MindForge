@@ -11,6 +11,7 @@ from mindforge.agents.base import (
     _estimate_cost_details,
 )
 from mindforge.agents.critic import CriticScore
+from mindforge.agents.response_guidance import build_response_guidance
 from mindforge.models.base import ChatMessage
 
 
@@ -18,16 +19,7 @@ from mindforge.models.base import ChatMessage
 # SynthesizerAgent
 # ---------------------------------------------------------------------------
 
-_SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的任务是将多项研究发现整合成一份连贯、结构良好、内容详实的中文报告。
-
-报告必须按以下结构编写（所有标题和内容使用中文）：
-
-1. **执行摘要** — 研究问题和关键结论的简要概述（2-3 段）。
-2. **详细分析** — 对研究问题各方面的深入覆盖，按逻辑组织。
-3. **关键发现** — 最重要发现或结论的项目符号列表。
-4. **数据与证据** — 支持性数据、统计数据、引用和证据，附上正确的 [N] 引用标记。
-5. **局限性** — 承认研究中的任何空白、不确定性或局限性。
-6. **参考文献** — 报告中以 [N] 形式引用的所有来源的编号列表。
+_SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的任务是将多项研究发现整合成一份连贯、结构良好、深度与问题匹配的中文报告。
 
 指南：
 - 使用清晰、专业的中文撰写。
@@ -35,7 +27,10 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 - 将多个子任务的发现整合成统一的叙述。
 - 去除冗余内容——如果多个子任务涉及同一领域，只需呈现一次。
 - 如果有评审反馈，明确回应每个问题或建议。
-- 力求全面覆盖同时保持可读性。
+- 先回答用户真正提出的问题，再决定需要哪些章节；不得机械套用固定报告模板。
+- 简短或范围集中的问题不写执行摘要、关键发现、局限性等重复章节。
+- 多维研究可使用执行摘要、详细分析、风险、建议等章节，但只保留有内容的部分。
+- 只有实际提供来源时才生成参考文献；没有数据时不要创建“数据与证据”空章节。
 - 使用标准 Markdown 结构化内容：标题之间、段落之间、列表前后保留空行。
 - 每段聚焦一个主题，避免把多个观点挤在一个超长段落中。
 - 对比项、参数、统计数据等天然具有行列关系的内容使用 GFM 表格；
@@ -43,11 +38,10 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 - 代码必须使用带语言标识的 fenced code block，正文只使用必要的强调。
 
 **关键要求 — 当子任务发现稀疏或为空时**：
-- 不要生成"未找到信息"的简短报告。
-- 应利用你自己的广博训练知识，提供详尽、全面的回答。
-- 明确标注知识来源："基于通用知识" vs "基于检索文档"。
-- 报告应全面、详尽，结构化分析。长度根据问题复杂度自然决定，不设死板下限。
-- Critic 仍会评估和精炼你的输出，请确保内容充实。"""
+- 明确说明哪些问题缺少证据，以及这会如何限制结论。
+- 只能综合所提供的子任务发现和来源，不得用模型记忆补造事实、数据或引用。
+- 可以解释已有证据，但必须区分证据支持的结论与合理推断。
+- 不得为了填充固定章节而重复内容或虚构细节。"""
 
 
 @dataclass(frozen=True)
@@ -55,6 +49,53 @@ class SynthesisStreamEvent:
     type: str
     content: str = ""
     result: AgentResult | None = None
+
+
+def _bounded_finding_output(value: Any, max_chars: int) -> str:
+    if isinstance(value, AgentResult):
+        value = value.output
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n\n[该子任务内容因上下文预算已截断]"
+
+
+def _bounded_label(value: Any, max_chars: int = 500) -> str:
+    return str(value or "").strip()[:max_chars]
+
+
+def _per_subtask_budget(
+    total_budget: int,
+    subtask_count: int,
+) -> int:
+    count = max(1, subtask_count)
+    # Reserve prompt space for descriptions, citation maps and source metadata.
+    return max(100, (max(200, total_budget) // count) - 300)
+
+
+def _synthesis_output_instruction(
+    task: str,
+    *,
+    subtask_count: int,
+    has_sources: bool,
+) -> str:
+    citation_instruction = (
+        "正文中的事实性主张必须使用所提供的全局 [N] 编号引用。"
+        if has_sources
+        else "当前没有可用来源，不得编造引用或虚构数据。"
+    )
+    depth_guidance = build_response_guidance(
+        task,
+        subtask_count=subtask_count,
+        final_report=True,
+    )
+    return (
+        "## 输出深度\n\n"
+        f"{depth_guidance}\n\n"
+        "请将发现综合成直接回应原始问题的最终答案，按实际内容选择章节，"
+        "不要重复子任务原文，也不要为了显得完整而填充固定模板。"
+        f"{citation_instruction}输出语言必须是中文。"
+    )
 
 
 class SynthesizerAgent(BaseAgent):
@@ -101,12 +142,26 @@ class SynthesizerAgent(BaseAgent):
         AgentResult with ``output`` containing the final report text.
         """
         # --- Build the findings block ---
+        synthesis_context_max_chars = int(
+            getattr(
+                self._settings.agent,
+                "synthesis_context_max_chars",
+                60_000,
+            )
+        )
+        per_subtask_chars = _per_subtask_budget(
+            synthesis_context_max_chars,
+            len(subtask_results),
+        )
         findings_lines: list[str] = []
         for i, sr in enumerate(subtask_results, 1):
-            desc = sr.get("description", sr.get("task_id", f"Subtask {i}"))
-            output = sr.get("output", sr.get("result", ""))
-            if isinstance(output, AgentResult):
-                output = output.output
+            desc = _bounded_label(
+                sr.get("description", sr.get("task_id", f"Subtask {i}"))
+            )
+            output = _bounded_finding_output(
+                sr.get("output", sr.get("result", "")),
+                per_subtask_chars,
+            )
             citation_map = sr.get("citation_map")
             mapping_text = ""
             if isinstance(citation_map, dict) and citation_map:
@@ -118,11 +173,17 @@ class SynthesizerAgent(BaseAgent):
                     )
                     + ". Rewrite citations to the global numbers."
                 )
+                mapping_text = mapping_text[:1_000]
             findings_lines.append(
                 f"### Subtask {i}: {desc}\n\n{output}{mapping_text}\n"
             )
 
         findings_text = "\n".join(findings_lines)
+        if len(findings_text) > synthesis_context_max_chars:
+            findings_text = (
+                findings_text[:synthesis_context_max_chars].rstrip()
+                + "\n\n[子任务上下文已达到综合预算上限]"
+            )
 
         try:
             # --- Build the sources block ---
@@ -165,9 +226,11 @@ class SynthesizerAgent(BaseAgent):
                 user_prompt_parts.append(f"## 评审反馈（需回应）\n\n{feedback_text}\n")
 
             user_prompt_parts.append(
-                "请将这些发现综合成一份全面、结构良好的最终报告，遵循要求的章节结构。"
-                "为所有事实性主张使用 [N] 引用标记，引用所提供的来源。"
-                "**输出语言必须是中文。**"
+                _synthesis_output_instruction(
+                    task,
+                    subtask_count=len(subtask_results),
+                    has_sources=bool(all_sources),
+                )
             )
 
             user_prompt = "\n".join(user_prompt_parts)
@@ -231,12 +294,26 @@ class SynthesizerAgent(BaseAgent):
         max_attempts: int = 3,
     ):
         """Yield report chunks followed by one usage-bearing result event."""
+        synthesis_context_max_chars = int(
+            getattr(
+                self._settings.agent,
+                "synthesis_context_max_chars",
+                60_000,
+            )
+        )
+        per_subtask_chars = _per_subtask_budget(
+            synthesis_context_max_chars,
+            len(subtask_results),
+        )
         findings_lines: list[str] = []
         for i, sr in enumerate(subtask_results, 1):
-            desc = sr.get("description", sr.get("task_id", f"Subtask {i}"))
-            output = sr.get("output", sr.get("result", ""))
-            if isinstance(output, AgentResult):
-                output = output.output
+            desc = _bounded_label(
+                sr.get("description", sr.get("task_id", f"Subtask {i}"))
+            )
+            output = _bounded_finding_output(
+                sr.get("output", sr.get("result", "")),
+                per_subtask_chars,
+            )
             citation_map = sr.get("citation_map")
             mapping_text = ""
             if isinstance(citation_map, dict) and citation_map:
@@ -248,10 +325,16 @@ class SynthesizerAgent(BaseAgent):
                     )
                     + "。最终报告必须改用全局编号。"
                 )
+                mapping_text = mapping_text[:1_000]
             findings_lines.append(
                 f"### 子任务 {i}: {desc}\n\n{output}{mapping_text}\n"
             )
         findings_text = "\n".join(findings_lines)
+        if len(findings_text) > synthesis_context_max_chars:
+            findings_text = (
+                findings_text[:synthesis_context_max_chars].rstrip()
+                + "\n\n[子任务上下文已达到综合预算上限]"
+            )
 
         sources_text = ""
         if all_sources:
@@ -282,9 +365,11 @@ class SynthesizerAgent(BaseAgent):
         if feedback_text:
             user_prompt_parts.append(f"## 评审反馈（需回应）\n\n{feedback_text}\n")
         user_prompt_parts.append(
-            "请将这些发现综合成一份全面、结构良好的最终报告，遵循要求的章节结构。"
-            "为所有事实性主张使用 [N] 引用标记，引用所提供的来源。"
-            "**输出语言必须是中文。**"
+            _synthesis_output_instruction(
+                task,
+                subtask_count=len(subtask_results),
+                has_sources=bool(all_sources),
+            )
         )
         user_prompt = "\n".join(user_prompt_parts)
 

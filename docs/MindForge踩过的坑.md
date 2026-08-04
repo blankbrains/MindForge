@@ -806,8 +806,10 @@ RAPTOR、GraphRAG 和 QA 生成链路。
 不存在的模型。
 
 **修复**：`LLMFactory` 改为注册表，新增通用 `OpenAICompatibleAdapter` 和
-`openai_compatible/local` Provider；设置页按后端 Provider 列表渲染并原子保存
-多份草稿；Local Provider 可关闭 Key 要求；Tool/JSON 能力显式配置。RAPTOR、
+`kimi/glm/openai_compatible/local` Provider；Kimi、GLM 与通用接口分别保存
+Base URL、API Key、模型路由和联网协议，避免共享配置槽互相覆盖；设置页按后端
+Provider 列表渲染并原子保存多份草稿。Local Provider 可关闭 Key 要求；
+Tool/JSON 能力显式配置。RAPTOR、
 GraphRAG、QA 生成和仓库辅助脚本统一走工厂，专用模型为空时继承当前 Provider
 的 Researcher 模型；Compose 增加宿主机网关。
 

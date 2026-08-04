@@ -37,6 +37,18 @@ class StreamEvent:
     model: str = ""
 
 
+@dataclass
+class NativeWebSearchResult:
+    """Provider-normalized result from a server-side web search."""
+
+    text: str = ""
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    model: str = ""
+    backend: str = ""
+    answer_ready: bool = False
+
+
 def normalize_token_usage(usage: Any) -> dict[str, int]:
     """Convert provider usage objects into a stable flat numeric mapping."""
     if usage is None:
@@ -76,6 +88,22 @@ def normalize_token_usage(usage: Any) -> dict[str, int]:
 
 
 class BaseLLM(ABC):
+    @property
+    def supports_native_web_search(self) -> bool:
+        return False
+
+    async def search_web(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        max_output_tokens: int = 1200,
+    ) -> NativeWebSearchResult:
+        del query, max_results, max_output_tokens
+        raise LLMConfigurationError(
+            "The selected provider does not support native web search."
+        )
+
     @abstractmethod
     async def chat(self, messages, tools=None, response_format=None, temperature=0.7, stream=False):
         pass
@@ -139,7 +167,14 @@ class LLMFactory:
     """Registry-driven factory for cloud and self-hosted LLM providers."""
 
     _builtin_names = frozenset(
-        {"openai", "deepseek", "openai_compatible", "local"}
+        {
+            "openai",
+            "deepseek",
+            "kimi",
+            "glm",
+            "openai_compatible",
+            "local",
+        }
     )
     _providers: dict[str, ProviderBuilder] = {}
     _builtins_registered = False
@@ -191,6 +226,8 @@ class LLMFactory:
             return
         cls._providers.setdefault("openai", cls._build_openai)
         cls._providers.setdefault("deepseek", cls._build_deepseek)
+        cls._providers.setdefault("kimi", cls._build_kimi)
+        cls._providers.setdefault("glm", cls._build_glm)
         cls._providers.setdefault(
             "openai_compatible",
             cls._build_openai_compatible,
@@ -271,45 +308,37 @@ class LLMFactory:
         model: str,
         kwargs: dict[str, Any],
     ) -> BaseLLM:
-        from mindforge.models.openai_compatible_adapter import (
-            OpenAICompatibleAdapter,
-        )
-
-        settings, api_key, base_url = cls._resolve_provider_values(
+        return cls._build_configurable_compatible(
             "openai_compatible",
+            "compatible",
+            model,
             kwargs,
         )
-        require_api_key = kwargs.pop(
-            "require_api_key",
-            settings.llm.compatible_api_key_required,
+
+    @classmethod
+    def _build_kimi(
+        cls,
+        model: str,
+        kwargs: dict[str, Any],
+    ) -> BaseLLM:
+        return cls._build_configurable_compatible(
+            "kimi",
+            "kimi",
+            model,
+            kwargs,
         )
-        supports_tools = kwargs.pop(
-            "supports_tools",
-            settings.llm.compatible_supports_tools,
-        )
-        supports_json_mode = kwargs.pop(
-            "supports_json_mode",
-            settings.llm.compatible_supports_json_mode,
-        )
-        supports_json_schema = kwargs.pop(
-            "supports_json_schema",
-            settings.llm.compatible_supports_json_schema,
-        )
-        supports_stream_usage = kwargs.pop(
-            "supports_stream_usage",
-            settings.llm.compatible_supports_stream_usage,
-        )
-        return OpenAICompatibleAdapter(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            provider_name="openai_compatible",
-            require_api_key=require_api_key,
-            supports_tools=supports_tools,
-            supports_json_mode=supports_json_mode,
-            supports_json_schema=supports_json_schema,
-            supports_stream_usage=supports_stream_usage,
-            **kwargs,
+
+    @classmethod
+    def _build_glm(
+        cls,
+        model: str,
+        kwargs: dict[str, Any],
+    ) -> BaseLLM:
+        return cls._build_configurable_compatible(
+            "glm",
+            "glm",
+            model,
+            kwargs,
         )
 
     @classmethod
@@ -318,43 +347,74 @@ class LLMFactory:
         model: str,
         kwargs: dict[str, Any],
     ) -> BaseLLM:
+        return cls._build_configurable_compatible(
+            "local",
+            "local",
+            model,
+            kwargs,
+        )
+
+    @classmethod
+    def _build_configurable_compatible(
+        cls,
+        provider: str,
+        config_prefix: str,
+        model: str,
+        kwargs: dict[str, Any],
+    ) -> BaseLLM:
         from mindforge.models.openai_compatible_adapter import (
             OpenAICompatibleAdapter,
         )
 
         settings, api_key, base_url = cls._resolve_provider_values(
-            "local",
+            provider,
             kwargs,
         )
         require_api_key = kwargs.pop(
             "require_api_key",
-            settings.llm.local_api_key_required,
+            getattr(settings.llm, f"{config_prefix}_api_key_required"),
         )
         supports_tools = kwargs.pop(
             "supports_tools",
-            settings.llm.local_supports_tools,
+            getattr(settings.llm, f"{config_prefix}_supports_tools"),
         )
         supports_json_mode = kwargs.pop(
             "supports_json_mode",
-            settings.llm.local_supports_json_mode,
+            getattr(settings.llm, f"{config_prefix}_supports_json_mode"),
         )
         supports_json_schema = kwargs.pop(
             "supports_json_schema",
-            settings.llm.local_supports_json_schema,
+            getattr(settings.llm, f"{config_prefix}_supports_json_schema"),
         )
         supports_stream_usage = kwargs.pop(
             "supports_stream_usage",
-            settings.llm.local_supports_stream_usage,
+            getattr(settings.llm, f"{config_prefix}_supports_stream_usage"),
+        )
+        native_web_search_protocol = kwargs.pop(
+            "native_web_search_protocol",
+            getattr(
+                settings.llm,
+                f"{config_prefix}_native_web_search_protocol",
+            ),
+        )
+        native_web_search_endpoint = kwargs.pop(
+            "native_web_search_endpoint",
+            getattr(
+                settings.llm,
+                f"{config_prefix}_native_web_search_endpoint",
+            ),
         )
         return OpenAICompatibleAdapter(
             model=model,
             api_key=api_key,
             base_url=base_url,
-            provider_name="local",
+            provider_name=provider,
             require_api_key=require_api_key,
             supports_tools=supports_tools,
             supports_json_mode=supports_json_mode,
             supports_json_schema=supports_json_schema,
             supports_stream_usage=supports_stream_usage,
+            native_web_search_protocol=native_web_search_protocol,
+            native_web_search_endpoint=native_web_search_endpoint,
             **kwargs,
         )

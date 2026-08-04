@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from mindforge.api.schemas import (
     DocumentContentResponse,
+    DocumentEnabledUpdate,
     DocumentItem,
     HealthResponse,
     HistoryCitationSource,
@@ -1169,6 +1170,16 @@ async def _execute_query_non_stream(
                 latency = (time.time() - start) * 1000
                 cost_value = result.metadata.get("cost")
                 trace_id = result.trace_id
+                result_outcome = str(
+                    result.metadata.get("outcome") or "success"
+                )
+                if result_outcome not in {"success", "degraded"}:
+                    result_outcome = "success"
+                result_failure_reason = (
+                    str(result.metadata.get("failure_reason"))
+                    if result.metadata.get("failure_reason")
+                    else None
+                )
                 return QueryResponse(
                     task_id=trace_id[:12] if trace_id else uuid.uuid4().hex[:12],
                     trace_id=trace_id,
@@ -1201,7 +1212,8 @@ async def _execute_query_non_stream(
                         )
                     ),
                     iterations=int(result.metadata.get("subtask_count", 0)),
-                    outcome="success",
+                    outcome=result_outcome,
+                    failure_reason=result_failure_reason,
                 )
         except LLMConfigurationError as exc:
             primary_failure_reason = str(exc)
@@ -1242,9 +1254,7 @@ async def _execute_query_non_stream(
         if primary_failure_reason and not has_relevant_results:
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    f"{primary_failure_reason}；知识库中也没有检索到高度相关资料。"
-                ),
+                detail=primary_failure_reason,
             )
         latency = (time.time() - start) * 1000
         degraded = primary_failure_reason is not None
@@ -1597,6 +1607,37 @@ async def list_documents():
         )
 
 
+@router.patch(
+    "/documents/{doc_id}/enabled",
+    response_model=DocumentItem,
+)
+async def update_document_enabled(
+    doc_id: str,
+    request: DocumentEnabledUpdate,
+):
+    """Enable or disable one document for retrieval without reindexing."""
+    from mindforge.repositories.documents import set_document_enabled
+
+    try:
+        document = await asyncio.to_thread(
+            set_document_enabled,
+            doc_id,
+            enabled=request.enabled,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to update retrieval availability for document %s.",
+            doc_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Document availability could not be updated.",
+        ) from exc
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return document
+
+
 @router.delete("/documents/{doc_id}", status_code=204)
 async def delete_document(doc_id: str):
     """Delete a document from Qdrant."""
@@ -1796,6 +1837,37 @@ async def upload_document(
 # Settings
 # ------------------------------------------------------------------
 
+_PROVIDER_ENV_PREFIXES: dict[LLMProviderName, str] = {
+    "openai": "OPENAI",
+    "deepseek": "DEEPSEEK",
+    "kimi": "KIMI",
+    "glm": "GLM",
+    "openai_compatible": "COMPATIBLE",
+    "local": "LOCAL",
+}
+_CONFIGURABLE_PROVIDER_PREFIXES: dict[LLMProviderName, str] = {
+    "kimi": "kimi",
+    "glm": "glm",
+    "openai_compatible": "compatible",
+    "local": "local",
+}
+_PROVIDER_LABELS: dict[LLMProviderName, str] = {
+    "openai": "OpenAI",
+    "deepseek": "DeepSeek",
+    "kimi": "Kimi",
+    "glm": "GLM",
+    "openai_compatible": "通用接口",
+    "local": "本地模型",
+}
+_PROVIDER_ORDER: tuple[LLMProviderName, ...] = (
+    "openai",
+    "deepseek",
+    "kimi",
+    "glm",
+    "openai_compatible",
+    "local",
+)
+
 
 def _stored_provider_api_key(provider: LLMProviderName) -> str:
     """Resolve a provider key without returning it to the browser."""
@@ -1809,6 +1881,8 @@ def _stored_provider_api_key(provider: LLMProviderName) -> str:
             {
                 "openai": "openai_api_key",
                 "deepseek": "deepseek_api_key",
+                "kimi": "kimi_api_key",
+                "glm": "glm_api_key",
                 "openai_compatible": "compatible_api_key",
                 "local": "local_api_key",
             }[provider],
@@ -1872,7 +1946,9 @@ async def discover_provider_models(
         else body.api_key.strip()
     )
     api_key_required = (
-        True if body.provider in {"openai", "deepseek"} else body.api_key_required
+        True
+        if body.provider in {"openai", "deepseek", "kimi", "glm"}
+        else body.api_key_required
     )
     if api_key_required and not api_key:
         raise HTTPException(
@@ -1935,13 +2011,6 @@ def get_settings_api():
             normalized = str(value or "").strip()
             return "***" + normalized[-4:] if normalized else ""
 
-        provider_labels = {
-            "openai": "OpenAI",
-            "deepseek": "DeepSeek",
-            "openai_compatible": "OpenAI 兼容接口",
-            "local": "本地模型",
-        }
-
         def _provider_config(
             provider: LLMProviderName,
         ) -> LLMProviderConfig:
@@ -1958,7 +2027,7 @@ def get_settings_api():
                 critic_model = s.llm.deepseek_critic
                 synthesizer_model = s.llm.deepseek_synthesizer
             else:
-                prefix = "compatible" if provider == "openai_compatible" else "local"
+                prefix = _CONFIGURABLE_PROVIDER_PREFIXES[provider]
                 default_model = getattr(s.llm, f"{prefix}_model")
                 planner_model = getattr(
                     s.llm,
@@ -1978,7 +2047,7 @@ def get_settings_api():
                 )
             return LLMProviderConfig(
                 provider=provider,
-                label=provider_labels[provider],
+                label=_PROVIDER_LABELS[provider],
                 base_url=s.llm.get_base_url(provider) or "",
                 api_key=_masked(
                     provider,
@@ -1994,21 +2063,40 @@ def get_settings_api():
                 supports_tools=s.llm.supports_tools(provider),
                 supports_json_mode=s.llm.supports_json_mode(provider),
                 supports_json_schema=s.llm.supports_json_schema(provider),
+                native_web_search_protocol=(
+                    s.llm.get_native_web_search_protocol(provider)
+                ),
+                native_web_search_endpoint=(
+                    s.llm.get_native_web_search_endpoint(provider) or ""
+                ),
                 configured=has_llm_credentials(provider),
             )
 
         provider_configs = [
-            _provider_config(provider)
-            for provider in (
-                "openai",
-                "deepseek",
-                "openai_compatible",
-                "local",
-            )
+            _provider_config(provider) for provider in _PROVIDER_ORDER
         ]
         from mindforge.retrieval.service import get_reranker_status
 
         reranker_status = get_reranker_status()
+        selected_native_protocol = s.llm.get_native_web_search_protocol()
+        web_search_config = getattr(s, "web_search", None)
+        native_enabled = bool(
+            getattr(web_search_config, "native_enabled", True)
+        )
+        duckduckgo_enabled = bool(
+            getattr(web_search_config, "duckduckgo_enabled", False)
+        )
+        model_only_fallback = bool(
+            getattr(web_search_config, "model_only_fallback", True)
+        )
+        native_web_search_supported = bool(
+            native_enabled
+            and selected_native_protocol != "none"
+            and has_llm_credentials(s.llm.llm_provider)
+        )
+        tavily_configured = bool(
+            os.environ.get("TAVILY_API_KEY", "").strip()
+        )
         return SettingsResponse(
             llm_provider=s.llm.llm_provider,
             llm_configured=has_llm_credentials(s.llm.llm_provider),
@@ -2083,7 +2171,17 @@ def get_settings_api():
                 "trace_retention_days",
                 0,
             ),
-            tavily_configured=bool(os.environ.get("TAVILY_API_KEY", "").strip()),
+            tavily_configured=tavily_configured,
+            native_web_search_enabled=native_enabled,
+            native_web_search_protocol=selected_native_protocol,
+            native_web_search_supported=native_web_search_supported,
+            duckduckgo_enabled=duckduckgo_enabled,
+            model_only_fallback_enabled=model_only_fallback,
+            web_search_available=bool(
+                native_web_search_supported
+                or tavily_configured
+                or duckduckgo_enabled
+            ),
             reranker_configured=reranker_status["configured"],
             reranker_available=reranker_status["available"],
             reranker_load_failed=reranker_status["load_failed"],
@@ -2263,14 +2361,14 @@ def _update_settings_locked(body: SettingsUpdateRequest):
         user_id = get_default_user_id(db)
         env_updates: dict[str, str] = {}
         _env_key_map = {
-            "deepseek": "LLM_DEEPSEEK_API_KEY",
-            "openai": "LLM_OPENAI_API_KEY",
-            "openai_compatible": "LLM_COMPATIBLE_API_KEY",
-            "local": "LLM_LOCAL_API_KEY",
+            provider: f"LLM_{prefix}_API_KEY"
+            for provider, prefix in _PROVIDER_ENV_PREFIXES.items()
         }
         key_updates = {
             "deepseek": body.deepseek_api_key,
             "openai": body.openai_api_key,
+            "kimi": None,
+            "glm": None,
             "openai_compatible": body.compatible_api_key,
             "local": body.local_api_key,
         }
@@ -2316,6 +2414,8 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                         {
                             "openai": "openai_base_url",
                             "deepseek": "deepseek_base_url",
+                            "kimi": "kimi_base_url",
+                            "glm": "glm_base_url",
                             "openai_compatible": "compatible_base_url",
                             "local": "local_base_url",
                         }[provider],
@@ -2328,6 +2428,35 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                 provider_update.base_url.rstrip("/")
                 if provider_update.base_url is not None
                 else current_base_url
+            )
+            get_native_search_endpoint = getattr(
+                current_settings.llm,
+                "get_native_web_search_endpoint",
+                None,
+            )
+            current_native_search_endpoint = (
+                (
+                    get_native_search_endpoint(provider)
+                    if callable(get_native_search_endpoint)
+                    else (
+                        getattr(
+                            current_settings.llm,
+                            (
+                                f"{_CONFIGURABLE_PROVIDER_PREFIXES[provider]}"
+                                "_native_web_search_endpoint"
+                            ),
+                            "",
+                        )
+                        if provider in _CONFIGURABLE_PROVIDER_PREFIXES
+                        else ""
+                    )
+                )
+                or ""
+            ).rstrip("/")
+            requested_native_search_endpoint = (
+                provider_update.native_web_search_endpoint.rstrip("/")
+                if provider_update.native_web_search_endpoint is not None
+                else current_native_search_endpoint
             )
             key_reconfirmed = (
                 provider_update.api_key is not None
@@ -2342,6 +2471,8 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     {
                         "openai": "openai_api_key",
                         "deepseek": "deepseek_api_key",
+                        "kimi": "kimi_api_key",
+                        "glm": "glm_api_key",
                         "openai_compatible": "compatible_api_key",
                         "local": "local_api_key",
                     }[provider],
@@ -2352,22 +2483,24 @@ def _update_settings_locked(body: SettingsUpdateRequest):
             if not existing_key:
                 existing_key = _stored_provider_api_key(provider)
             if (
-                requested_base_url != current_base_url
+                (
+                    requested_base_url != current_base_url
+                    or requested_native_search_endpoint
+                    != current_native_search_endpoint
+                )
                 and existing_key
                 and not key_reconfirmed
             ):
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "Changing a Provider Base URL requires re-entering "
+                        "Changing a provider endpoint requires re-entering "
                         "or explicitly clearing its API key."
                     ),
                 )
             base_url_keys = {
-                "openai": "LLM_OPENAI_BASE_URL",
-                "deepseek": "LLM_DEEPSEEK_BASE_URL",
-                "openai_compatible": "LLM_COMPATIBLE_BASE_URL",
-                "local": "LLM_LOCAL_BASE_URL",
+                name: f"LLM_{prefix}_BASE_URL"
+                for name, prefix in _PROVIDER_ENV_PREFIXES.items()
             }
             role_key_maps = {
                 "openai": {
@@ -2381,6 +2514,18 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     "researcher_model": "LLM_DEEPSEEK_RESEARCHER",
                     "critic_model": "LLM_DEEPSEEK_CRITIC",
                     "synthesizer_model": "LLM_DEEPSEEK_SYNTHESIZER",
+                },
+                "kimi": {
+                    "planner_model": "LLM_KIMI_PLANNER_MODEL",
+                    "researcher_model": "LLM_KIMI_RESEARCHER_MODEL",
+                    "critic_model": "LLM_KIMI_CRITIC_MODEL",
+                    "synthesizer_model": "LLM_KIMI_SYNTHESIZER_MODEL",
+                },
+                "glm": {
+                    "planner_model": "LLM_GLM_PLANNER_MODEL",
+                    "researcher_model": "LLM_GLM_RESEARCHER_MODEL",
+                    "critic_model": "LLM_GLM_CRITIC_MODEL",
+                    "synthesizer_model": "LLM_GLM_SYNTHESIZER_MODEL",
                 },
                 "openai_compatible": {
                     "planner_model": "LLM_COMPATIBLE_PLANNER_MODEL",
@@ -2396,10 +2541,24 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                 },
             }
             default_model_keys = {
+                "kimi": "LLM_KIMI_MODEL",
+                "glm": "LLM_GLM_MODEL",
                 "openai_compatible": "LLM_COMPATIBLE_MODEL",
                 "local": "LLM_LOCAL_MODEL",
             }
             capability_key_maps = {
+                "kimi": {
+                    "api_key_required": "LLM_KIMI_API_KEY_REQUIRED",
+                    "supports_tools": "LLM_KIMI_SUPPORTS_TOOLS",
+                    "supports_json_mode": "LLM_KIMI_SUPPORTS_JSON_MODE",
+                    "supports_json_schema": "LLM_KIMI_SUPPORTS_JSON_SCHEMA",
+                },
+                "glm": {
+                    "api_key_required": "LLM_GLM_API_KEY_REQUIRED",
+                    "supports_tools": "LLM_GLM_SUPPORTS_TOOLS",
+                    "supports_json_mode": "LLM_GLM_SUPPORTS_JSON_MODE",
+                    "supports_json_schema": "LLM_GLM_SUPPORTS_JSON_SCHEMA",
+                },
                 "openai_compatible": {
                     "api_key_required": ("LLM_COMPATIBLE_API_KEY_REQUIRED"),
                     "supports_tools": ("LLM_COMPATIBLE_SUPPORTS_TOOLS"),
@@ -2411,6 +2570,40 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                     "supports_tools": "LLM_LOCAL_SUPPORTS_TOOLS",
                     "supports_json_mode": ("LLM_LOCAL_SUPPORTS_JSON_MODE"),
                     "supports_json_schema": ("LLM_LOCAL_SUPPORTS_JSON_SCHEMA"),
+                },
+            }
+            native_search_key_maps = {
+                "kimi": {
+                    "native_web_search_protocol": (
+                        "LLM_KIMI_NATIVE_WEB_SEARCH_PROTOCOL"
+                    ),
+                    "native_web_search_endpoint": (
+                        "LLM_KIMI_NATIVE_WEB_SEARCH_ENDPOINT"
+                    ),
+                },
+                "glm": {
+                    "native_web_search_protocol": (
+                        "LLM_GLM_NATIVE_WEB_SEARCH_PROTOCOL"
+                    ),
+                    "native_web_search_endpoint": (
+                        "LLM_GLM_NATIVE_WEB_SEARCH_ENDPOINT"
+                    ),
+                },
+                "openai_compatible": {
+                    "native_web_search_protocol": (
+                        "LLM_COMPATIBLE_NATIVE_WEB_SEARCH_PROTOCOL"
+                    ),
+                    "native_web_search_endpoint": (
+                        "LLM_COMPATIBLE_NATIVE_WEB_SEARCH_ENDPOINT"
+                    ),
+                },
+                "local": {
+                    "native_web_search_protocol": (
+                        "LLM_LOCAL_NATIVE_WEB_SEARCH_PROTOCOL"
+                    ),
+                    "native_web_search_endpoint": (
+                        "LLM_LOCAL_NATIVE_WEB_SEARCH_ENDPOINT"
+                    ),
                 },
             }
             if provider_update.base_url is not None:
@@ -2433,6 +2626,13 @@ def _update_settings_locked(body: SettingsUpdateRequest):
                 value = getattr(provider_update, field_name)
                 if value is not None:
                     env_updates[env_key] = "true" if value else "false"
+            for field_name, env_key in native_search_key_maps.get(
+                provider,
+                {},
+            ).items():
+                value = getattr(provider_update, field_name)
+                if value is not None:
+                    env_updates[env_key] = value
 
         if body.llm_provider:
             env_updates["LLM_LLM_PROVIDER"] = body.llm_provider
@@ -3265,22 +3465,20 @@ async def _stream_response_events(
                         "result": completed_result,
                     }
                 else:
+                    fallback_error = (
+                        primary_failure_reason
+                        if primary_failure_reason
+                        else (
+                            "知识库中没有检索到高度相关资料。"
+                            if result.success
+                            else "知识库检索回退也未成功："
+                            f"{result.error or '未知错误'}"
+                        )
+                    )
                     fallback = {
                         "type": "error",
                         "trace_id": trace_id,
-                        "content": (
-                            (
-                                f"{primary_failure_reason}；"
-                                if primary_failure_reason
-                                else "研究失败；"
-                            )
-                            + (
-                                "知识库中没有检索到高度相关资料。"
-                                if result.success
-                                else "知识库检索回退也未成功："
-                                f"{result.error or '未知错误'}"
-                            )
-                        ),
+                        "content": fallback_error,
                     }
                 yield (
                     f"data: {json.dumps(fallback, ensure_ascii=False)}\n\n"

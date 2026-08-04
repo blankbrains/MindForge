@@ -163,19 +163,56 @@ class CriticAgent(BaseAgent):
         """
         settings = get_settings()
         threshold = threshold if threshold is not None else settings.agent.critic_threshold
+        report_context_max_chars = int(
+            getattr(
+                settings.agent,
+                "critic_report_context_max_chars",
+                60_000,
+            )
+        )
+        bounded_draft = draft[:report_context_max_chars]
+        if len(draft) > report_context_max_chars:
+            bounded_draft = (
+                bounded_draft.rstrip()
+                + "\n\n[报告正文因评审上下文预算已截断]"
+            )
 
         # Build the evaluation prompt
         src_text = ""
         if sources:
-            src_lines = ["Available sources:"]
+            remaining = int(
+                getattr(
+                    settings.agent,
+                    "critic_source_context_max_chars",
+                    12_000,
+                )
+            )
+            src_lines = ["可核验来源证据："]
             for i, s in enumerate(sources, 1):
+                if remaining <= 0:
+                    break
+                index = s.get("index", i)
                 title = s.get("title", s.get("source", f"Source {i}"))
-                src_lines.append(f"  [{i}] {title}")
+                url = str(s.get("url") or "").strip()
+                evidence = str(
+                    s.get("content")
+                    or s.get("text")
+                    or s.get("snippet")
+                    or ""
+                ).strip()
+                source_text = f"[{index}] {title}"
+                if url:
+                    source_text += f"\nURL: {url}"
+                if evidence:
+                    source_text += f"\n证据: {evidence}"
+                bounded = source_text[:remaining]
+                src_lines.append(bounded)
+                remaining -= len(bounded)
             src_text = "\n".join(src_lines)
 
         user_prompt = (
             f"## 原始任务\n\n{task}\n\n"
-            f"## 研究报告草稿\n\n{draft}\n\n"
+            f"## 研究报告草稿\n\n{bounded_draft}\n\n"
             f"{src_text}\n\n"
             "请使用 5 个维度对草稿进行评估。返回包含 scores、issues 和 suggestions 的 JSON。"
             "**issues 和 suggestions 必须用中文撰写。**"
@@ -209,7 +246,9 @@ class CriticAgent(BaseAgent):
 
             # Apply threshold
             if threshold is not None:
-                score.should_refine = score.overall < threshold
+                score.should_refine = (
+                    score.should_refine or score.overall < threshold
+                )
 
             return score
 

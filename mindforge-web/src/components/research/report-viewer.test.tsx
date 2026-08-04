@@ -88,4 +88,58 @@ describe("ReportViewer quality state", () => {
     ).not.toBeNull();
     expect(screen.getByText("6.5 / 10")).not.toBeNull();
   });
+
+  it("labels a successful model-only answer as unverified, not incomplete", () => {
+    render(
+      <ReportViewer
+        result={{
+          success: true,
+          output: "模型知识回答",
+          data: {
+            grounding_status: "model_only",
+          },
+          metadata: {
+            outcome: "success",
+            grounding_status: "model_only",
+            source_warning: "web_search:native_timeout",
+            quality: null,
+            quality_status: "not_evaluated",
+          },
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText("未获得可核验来源，当前为模型知识回答"),
+    ).not.toBeNull();
+    expect(screen.queryByText("部分子任务未完成，当前报告为降级结果"))
+      .toBeNull();
+  });
+
+  it("explains source-required degradation without claiming task failure", () => {
+    render(
+      <ReportViewer
+        result={{
+          success: true,
+          output: "模型知识回答",
+          data: {
+            grounding_status: "model_only",
+          },
+          metadata: {
+            outcome: "degraded",
+            grounding_status: "model_only",
+            failure_reason: "联网检索未获得可核验来源",
+            quality: null,
+            quality_status: "not_evaluated",
+          },
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText("来源检索未完成，当前为模型知识回答"),
+    ).not.toBeNull();
+    expect(screen.queryByText("部分子任务未完成，当前报告为降级结果"))
+      .toBeNull();
+  });
 });

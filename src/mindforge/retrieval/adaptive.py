@@ -3,6 +3,7 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 import asyncio
+import inspect
 import logging
 
 from mindforge.retrieval.hybrid import HybridRetriever
@@ -114,6 +115,7 @@ class AdaptiveRetriever:
         max_request_top_k: int = 50,
         retrieval_top_k: int = 20,
         rerank_top_k: int = 6,
+        disabled_document_ids_fn=None,
     ):
         self.hybrid_retriever = hybrid_retriever
         self.reranker = reranker
@@ -128,6 +130,7 @@ class AdaptiveRetriever:
             max(1, rerank_top_k),
             self.max_request_top_k,
         )
+        self.disabled_document_ids_fn = disabled_document_ids_fn
 
     # ------------------------------------------------------------------
     # Public API
@@ -177,6 +180,7 @@ class AdaptiveRetriever:
 
         # Step 2: Select strategy
         config = STRATEGY_MAP.get(query_mode, STRATEGY_MAP[QueryMode.FACTUAL])
+        excluded_doc_ids = await self._load_disabled_document_ids()
 
         logger.info(
             "Adaptive retrieval — mode=%s, hyde=%s, multi=%s, graph=%s",
@@ -198,6 +202,7 @@ class AdaptiveRetriever:
                 vector_weight=config.vector_weight,
                 bm25_weight=config.bm25_weight,
                 top_k=candidate_top_k,
+                excluded_doc_ids=excluded_doc_ids,
             )
 
         async def _retrieve_graph() -> list[dict[str, Any]]:
@@ -207,6 +212,7 @@ class AdaptiveRetriever:
                 query=query,
                 top_k_entities=candidate_top_k,
                 top_k_communities=min(3, candidate_top_k),
+                excluded_doc_ids=excluded_doc_ids,
             )
 
         retrieval_names = ["hybrid"]
@@ -230,8 +236,13 @@ class AdaptiveRetriever:
                     ),
                 )
                 continue
-            all_results.extend(results)
-            raw_results[name] = results
+            enabled_results = [
+                result
+                for result in results
+                if self._result_is_enabled(result, excluded_doc_ids)
+            ]
+            all_results.extend(enabled_results)
+            raw_results[name] = enabled_results
 
         # Step 4: Rerank
         if self.reranker is not None and all_results:
@@ -257,6 +268,32 @@ class AdaptiveRetriever:
             "reasoning": config.reasoning,
             "raw_results": raw_results,
         }
+
+    async def _load_disabled_document_ids(self) -> set[str]:
+        if self.disabled_document_ids_fn is None:
+            return set()
+        if inspect.iscoroutinefunction(self.disabled_document_ids_fn):
+            result = await self.disabled_document_ids_fn()
+        else:
+            result = await asyncio.to_thread(self.disabled_document_ids_fn)
+        return {str(doc_id) for doc_id in result if str(doc_id)}
+
+    @staticmethod
+    def _result_is_enabled(
+        result: Dict[str, Any],
+        excluded_doc_ids: set[str],
+    ) -> bool:
+        if not excluded_doc_ids:
+            return True
+        metadata = result.get("metadata")
+        candidates = result.get("doc_ids")
+        if not isinstance(candidates, (list, tuple, set)):
+            candidates = [
+                result.get("doc_id"),
+                metadata.get("doc_id") if isinstance(metadata, dict) else None,
+            ]
+        doc_ids = {str(doc_id) for doc_id in candidates if str(doc_id or "")}
+        return bool(doc_ids) and bool(doc_ids - excluded_doc_ids)
 
     # ------------------------------------------------------------------
     # Private: query classification

@@ -129,7 +129,7 @@ class ParsedDocument:
 class LLMConfig(BaseSettings):
     llm_provider: str = Field(
         default="openai",
-        description="openai | deepseek | openai_compatible | local",
+        description="openai | deepseek | kimi | glm | openai_compatible | local",
     )
     planner_model: str = "gpt-4o"
 ```

@@ -9,6 +9,26 @@ const inputClassName =
 
 export function RetrievalSettingsPanel() {
   const state = useSettingsStore();
+  const protocolLabels = {
+    none: "未启用",
+    openai_responses: "Responses Web Search",
+    kimi_builtin: "Kimi 内置联网",
+    glm_web_search: "GLM Web Search",
+  } as const;
+  const webSearchValue = state.nativeWebSearchSupported
+    ? "模型原生联网可用"
+    : state.tavilyConfigured
+      ? "Tavily 辅助搜索可用"
+      : state.duckDuckGoEnabled
+        ? "DuckDuckGo 辅助搜索已启用"
+        : "当前无联网后端";
+  const webSearchDetail = state.nativeWebSearchSupported
+    ? `当前协议：${protocolLabels[state.nativeWebSearchProtocol]}`
+    : state.webSearchAvailable
+      ? "模型无原生联网时使用已配置的辅助搜索"
+      : state.modelOnlyFallbackEnabled
+        ? "研究会保留模型回答，并明确标记为无可核验引用"
+        : "需要启用模型原生联网或配置可选辅助搜索";
 
   return (
     <section
@@ -49,13 +69,15 @@ export function RetrievalSettingsPanel() {
         <StatusItem
           icon={Globe2}
           label="联网搜索"
-          value={state.tavilyConfigured ? "Tavily 可用" : "未配置 API Key"}
-          detail={
-            state.tavilyConfigured
-              ? "Agent 可以调用联网搜索"
-              : "当前不会调用联网搜索；配置 TAVILY_API_KEY 后启用"
+          value={webSearchValue}
+          detail={webSearchDetail}
+          tone={
+            state.webSearchAvailable
+              ? "success"
+              : state.modelOnlyFallbackEnabled
+                ? "warning"
+                : "muted"
           }
-          tone={state.tavilyConfigured ? "success" : "warning"}
         />
       </div>
 

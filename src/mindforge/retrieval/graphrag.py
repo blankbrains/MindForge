@@ -826,6 +826,7 @@ class GraphRAGEngine:
         query: str,
         top_k_entities: int = 5,
         top_k_communities: int = 3,
+        excluded_doc_ids: set[str] | None = None,
     ) -> List[Dict[str, Any]]:
         """Find relevant entities and communities for the query.
 
@@ -856,6 +857,7 @@ class GraphRAGEngine:
             query.strip(),
             top_k_entities,
             top_k_communities,
+            excluded_doc_ids or set(),
         )
 
     def _query_sync(
@@ -863,12 +865,14 @@ class GraphRAGEngine:
         query: str,
         top_k_entities: int,
         top_k_communities: int,
+        excluded_doc_ids: set[str],
     ) -> List[Dict[str, Any]]:
         with self._state_lock:
             return self._query_locked(
                 query,
                 top_k_entities,
                 top_k_communities,
+                excluded_doc_ids,
             )
 
     def _query_locked(
@@ -876,8 +880,12 @@ class GraphRAGEngine:
         query: str,
         top_k_entities: int,
         top_k_communities: int,
+        excluded_doc_ids: set[str],
     ) -> List[Dict[str, Any]]:
-        if not self.entities:
+        entities, relations, communities = self._active_graph_view(
+            excluded_doc_ids
+        )
+        if not entities:
             logger.warning("Graph is empty; returning no results.")
             return []
 
@@ -894,7 +902,7 @@ class GraphRAGEngine:
 
         # Score entities by term overlap
         entity_scores: List[Tuple[str, float]] = []
-        for eid, entity in self.entities.items():
+        for eid, entity in entities.items():
             name_lower = entity.name.lower()
             desc_lower = entity.description.lower()
             score = 0.0
@@ -916,7 +924,7 @@ class GraphRAGEngine:
         # Find communities that contain these entities
         relevant_community_ids: Set[str] = set()
         for eid, _ in top_entities:
-            for comm in self.communities:
+            for comm in communities:
                 if eid in {e.id for e in comm.entities}:
                     relevant_community_ids.add(comm.id)
                     if len(relevant_community_ids) >= top_k_communities:
@@ -929,7 +937,7 @@ class GraphRAGEngine:
 
         # Rank 1: matched entities (使用归一化分数)
         for eid, _ in top_entities:
-            entity = self.entities[eid]
+            entity = entities[eid]
             results.append(
                 {
                     "id": f"entity_{eid}",
@@ -937,11 +945,12 @@ class GraphRAGEngine:
                     "score": entity_norm.get(eid, 0.5),
                     "source": "graph",
                     "entity_id": eid,
+                    "doc_ids": list(entity.metadata.get("doc_ids", [])),
                 }
             )
 
         # Rank 2: matched communities（仅含≥2实体的社区，且分数基于所含实体平均归一化分）
-        for comm in self.communities:
+        for comm in communities:
             if comm.id not in relevant_community_ids:
                 continue
             comm_norm = sum(
@@ -954,18 +963,26 @@ class GraphRAGEngine:
                     "score": round(comm_norm, 4),
                     "source": "graph",
                     "community_id": comm.id,
+                    "doc_ids": sorted(
+                        {
+                            str(doc_id)
+                            for entity in comm.entities
+                            for doc_id in entity.metadata.get("doc_ids", [])
+                            if str(doc_id)
+                        }
+                    ),
                 }
             )
 
         # Rank 3: relations from matched entities（也归一化到实体分区间）
         top_eid_set = {eid for eid, _ in top_entities}
-        rel_max = max((r.weight for r in self.relations
+        rel_max = max((r.weight for r in relations
                        if r.source in top_eid_set or r.target in top_eid_set),
                       default=1.0)
-        for rel in self.relations:
+        for rel in relations:
             if rel.source in top_eid_set or rel.target in top_eid_set:
-                src_name = self.entities.get(rel.source, Entity("", "")).name
-                tgt_name = self.entities.get(rel.target, Entity("", "")).name
+                src_name = entities.get(rel.source, Entity("", "")).name
+                tgt_name = entities.get(rel.target, Entity("", "")).name
                 rel_norm = (rel.weight / rel_max) * 0.5 if rel_max > 0 else 0.15
                 results.append(
                     {
@@ -973,9 +990,151 @@ class GraphRAGEngine:
                         "text": f"{src_name} --[{rel.relation_type}]--> {tgt_name}",
                         "score": round(rel_norm, 4),
                         "source": "graph",
+                        "doc_ids": list(rel.metadata.get("doc_ids", [])),
                     }
                 )
 
         # Sort descending by score
         results.sort(key=lambda x: x["score"], reverse=True)
         return results
+
+    def _active_graph_view(
+        self,
+        excluded_doc_ids: set[str],
+    ) -> tuple[
+        Dict[str, Entity],
+        List[Relation],
+        List[Community],
+    ]:
+        """Build a query-only graph view from currently enabled sources."""
+        if not excluded_doc_ids:
+            return self.entities, self.relations, self.communities
+
+        entities: Dict[str, Entity] = {}
+        for entity_id, entity in self.entities.items():
+            self._normalise_entity_provenance(entity)
+            metadata = entity.metadata
+            contributions = metadata.get(_ENTITY_CONTRIBUTIONS_KEY, {})
+            legacy_doc_ids = {
+                str(doc_id)
+                for doc_id in metadata.get(_LEGACY_DOC_IDS_KEY, [])
+                if str(doc_id)
+            }
+            active_legacy_ids = legacy_doc_ids - excluded_doc_ids
+            active_contribution_ids = {
+                str(doc_id)
+                for doc_id in contributions
+                if str(doc_id) and str(doc_id) not in excluded_doc_ids
+            }
+            active_doc_ids = active_legacy_ids | active_contribution_ids
+            if not active_doc_ids:
+                continue
+
+            candidates: list[dict[str, str]] = []
+            legacy_fields = metadata.get(_LEGACY_ENTITY_FIELDS_KEY)
+            if active_legacy_ids and isinstance(legacy_fields, dict):
+                candidates.append(legacy_fields)
+            for doc_id in sorted(active_contribution_ids):
+                contribution = contributions.get(doc_id)
+                if isinstance(contribution, dict):
+                    candidates.append(contribution)
+            if not candidates:
+                continue
+
+            fields = {}
+            for field_name in ("name", "type", "description"):
+                fields[field_name] = next(
+                    (
+                        str(candidate.get(field_name, ""))
+                        for candidate in candidates
+                        if candidate.get(field_name)
+                    ),
+                    "",
+                )
+            entities[entity_id] = Entity(
+                id=entity.id,
+                name=fields["name"],
+                type=fields["type"],
+                description=fields["description"],
+                metadata={"doc_ids": sorted(active_doc_ids)},
+            )
+
+        relations: List[Relation] = []
+        for relation in self.relations:
+            if relation.source not in entities or relation.target not in entities:
+                continue
+            self._normalise_relation_provenance(relation)
+            metadata = relation.metadata
+            weights = metadata.get(_RELATION_WEIGHTS_KEY, {})
+            legacy_doc_ids = {
+                str(doc_id)
+                for doc_id in metadata.get(_LEGACY_DOC_IDS_KEY, [])
+                if str(doc_id)
+            }
+            active_legacy_ids = legacy_doc_ids - excluded_doc_ids
+            active_weight_ids = {
+                str(doc_id)
+                for doc_id in weights
+                if str(doc_id) and str(doc_id) not in excluded_doc_ids
+            }
+            active_doc_ids = active_legacy_ids | active_weight_ids
+            if not active_doc_ids:
+                continue
+            active_weights = [
+                self._coerce_relation_weight(weights[doc_id])
+                for doc_id in sorted(active_weight_ids)
+            ]
+            if (
+                active_legacy_ids
+                and _LEGACY_RELATION_WEIGHT_KEY in metadata
+            ):
+                active_weights.append(
+                    self._coerce_relation_weight(
+                        metadata[_LEGACY_RELATION_WEIGHT_KEY]
+                    )
+                )
+            relations.append(
+                Relation(
+                    source=relation.source,
+                    target=relation.target,
+                    relation_type=relation.relation_type,
+                    weight=max(active_weights, default=relation.weight),
+                    metadata={"doc_ids": sorted(active_doc_ids)},
+                )
+            )
+
+        adjacency = {entity_id: set() for entity_id in entities}
+        for relation in relations:
+            adjacency[relation.source].add(relation.target)
+            adjacency[relation.target].add(relation.source)
+
+        communities: List[Community] = []
+        visited: Set[str] = set()
+        for entity_id in entities:
+            if entity_id in visited:
+                continue
+            component: List[str] = []
+            queue = deque([entity_id])
+            visited.add(entity_id)
+            while queue:
+                current = queue.popleft()
+                component.append(current)
+                for neighbor in adjacency.get(current, set()):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+            community_entities = [entities[item] for item in component]
+            if len(community_entities) < self.min_community_size:
+                continue
+            names = [entity.name for entity in community_entities if entity.name]
+            communities.append(
+                Community(
+                    id=f"active_community_{len(communities)}",
+                    entities=community_entities,
+                    summary="Entities: " + ", ".join(names[:10]),
+                )
+            )
+            if len(communities) >= self.max_communities:
+                break
+
+        return entities, relations, communities

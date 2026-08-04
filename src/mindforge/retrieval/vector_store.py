@@ -12,6 +12,7 @@ from qdrant_client.models import (
     PointStruct,
     Filter,
     FieldCondition,
+    MatchAny,
     MatchValue,
     FilterSelector,
 )
@@ -71,27 +72,49 @@ class QdrantStore:
         vector: List[float],
         top_k: int = 20,
         filters: Optional[Dict] = None,
+        excluded_doc_ids: set[str] | None = None,
     ) -> List[tuple[Dict, float]]:
         """Vector search using query_points (qdrant-client >= 1.18)."""
         results = await self._async_client.query_points(
             collection_name=self.collection_name,
             query=vector,
-            query_filter=self._build_filter(filters),
+            query_filter=self._build_filter(
+                filters,
+                excluded_doc_ids=excluded_doc_ids,
+            ),
             limit=top_k,
             with_payload=True,
         )
         return [(r.payload, r.score) for r in results.points]
 
-    def _build_filter(self, filters: Optional[Dict]) -> Optional[Filter]:
-        if not filters:
+    def _build_filter(
+        self,
+        filters: Optional[Dict],
+        *,
+        excluded_doc_ids: set[str] | None = None,
+    ) -> Optional[Filter]:
+        if not filters and not excluded_doc_ids:
             return None
         conditions = []
-        for key, value in filters.items():
+        for key, value in (filters or {}).items():
             if isinstance(value, (str, int, float, bool)):
                 conditions.append(
                     FieldCondition(key=key, match=MatchValue(value=value))
                 )
-        return Filter(must=conditions) if conditions else None
+        excluded_conditions = []
+        if excluded_doc_ids:
+            excluded_conditions.append(
+                FieldCondition(
+                    key="doc_id",
+                    match=MatchAny(any=sorted(excluded_doc_ids)),
+                )
+            )
+        if not conditions and not excluded_conditions:
+            return None
+        return Filter(
+            must=conditions or None,
+            must_not=excluded_conditions or None,
+        )
 
     async def delete(self, doc_id: str):
         await self._async_client.delete(

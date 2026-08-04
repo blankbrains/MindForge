@@ -446,6 +446,27 @@ def test_real_rrf_ignores_incompatible_raw_score_scales() -> None:
     assert fused[0]["rrf_score"] == fused[0]["score"]
 
 
+def test_bm25_keyword_fallback_excludes_disabled_documents() -> None:
+    retriever = object.__new__(BM25Retriever)
+    retriever.documents = [
+        "python async disabled",
+        "python async enabled",
+    ]
+    retriever.doc_ids = ["disabled-chunk", "enabled-chunk"]
+    retriever.metadatas = [
+        {"doc_id": "doc-disabled"},
+        {"doc_id": "doc-enabled"},
+    ]
+
+    results = retriever._keyword_fallback(
+        "python async",
+        top_k=1,
+        excluded_doc_ids={"doc-disabled"},
+    )
+
+    assert [result["id"] for result in results] == ["enabled-chunk"]
+
+
 @pytest.mark.asyncio
 async def test_real_graphrag_accepts_ingestion_document_shape() -> None:
     class FakeLLM:

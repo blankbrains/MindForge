@@ -55,14 +55,19 @@ Agent 系统是 MindForge 的核心，采用**四 Agent 流水线架构**，每�
 
 #### 3.1.2 Planner Agent（规划器）
 
-Planner 接收用户的研究问题，将其**分解为有向无环图（DAG）结构的子任务**。它的输出是一个任务列表，每个子任务包含 `task_id`、`description`、`dependencies`（依赖的其他子任务 ID）三个字段。
+Planner 接收用户的研究问题，将其**分解为有向无环图（DAG）结构的子任务**。
+每个子任务包含 `task_id`、`description`、`task_type`、`dependencies`、
+`priority` 和 `subtopics`。执行器按优先级调度就绪任务，并将任务类型和研究方向
+传给 Researcher，而不是只在前端展示这些字段。
 
 例如，对于问题"Python 异步编程的性能优势是什么？"，Planner 可能会分解为：
 - 子任务1：了解 Python 异步编程的基本概念（无依赖）
 - 子任务2：对比同步和异步的性能测试数据（依赖子任务1）
-- 子任务3：总结异步编程的适用场景（依赖子任务1、2）
+- 子任务3：验证关键性能结论及适用边界（依赖子任务1、2）
 
-之所以用 DAG 而非线性链，是因为很多子任务之间没有依赖关系，可以并行执行，大幅缩短端到端时间（在测试中端到端时间缩短了约 40%）。
+之所以用 DAG 而非线性链，是因为很多子任务之间没有依赖关系，可以并行执行。
+Planner 不再创建“汇总全部结果”之类的收尾任务，最终报告统一由 Synthesizer 综合，
+避免 Researcher 与 Synthesizer 重复执行相同工作。
 
 #### 3.1.3 Researcher Agent（执行器）
 
@@ -74,6 +79,13 @@ Researcher 使用 **ReAct 循环**（Thought → Action → Observation）来执
 
 ReAct 模式的优势在于让 Agent 可以逐步收集信息、自我纠错、调整策略。当信息足够时，Agent 给出最终答案并结束循环。为了防止无限循环，设置了 `max_iterations` 上限（默认为 3 步）。
 
+Researcher 会区分事实研究与无需外部事实的翻译、改写、创作、纯计算和代码生成。
+`auto` 来源策略进一步区分“来源优先”和“来源必须”：普通概念、解释和建议问题会尝试
+知识库与联网搜索，均不可用时保留模型回答并标记 `model_only` 和引用不可用，但不误报
+为子任务失败；明确要求最新信息、联网、知识库、引用或事实核验时，来源不可用才标记为
+`degraded`。模型知识回答不进入可复用研究记忆。关闭
+`WEB_SEARCH_MODEL_ONLY_FALLBACK` 后不再保留无来源回答。
+
 #### 3.1.4 Synthesizer Agent（综合器）
 
 Synthesizer 负责将多个 Researcher 返回的子任务结果**综合为一份结构化的研究报告**。它面临三个主要挑战：
@@ -83,6 +95,8 @@ Synthesizer 负责将多个 Researcher 返回的子任务结果**综合为一份
 3. **冗余信息**：多个子任务可能找到相同的内容。Synthesizer 负责去重合并。
 
 Synthesizer 的输出格式为 Markdown 结构，包含标题层级、段落、列表和引用标注。
+它只能综合子任务发现和来源；证据不足时必须披露局限，不得用模型记忆补造事实或引用。
+所有子任务正文的合计输入受 `AGENT_SYNTHESIS_CONTEXT_MAX_CHARS` 限制。
 
 #### 3.1.5 Critic Agent（评估器）
 
@@ -96,7 +110,13 @@ Critic 是整个系统的**质量把关者**，从 5 个维度对 Synthesizer �
 | 清晰度 | 结构是否清晰，语言是否易懂 |
 | 引用质量 | 引用是否准确，来源是否可靠 |
 
-Critic 的评分驱动 **Self-Refine 精炼循环**：复杂任务先执行一次质量评审，如果低于阈值，再将评分反馈和具体改进意见传回 Synthesizer。`max_refine_rounds=0` 只关闭重写，不关闭首次评审。范围集中且文本较短的问题可直接生成单任务计划以省去 Planner 调用；普通简单题显示“未评审”，短对比题和取舍题即使只有一个子任务仍执行 Critic。均衡模式的单任务只评审、不自动重写，避免一次精炼占满总超时；深度模式和多子任务按配置精炼。Critic 返回非法结构或调用失败时显示“评审失败”，不生成伪造分数。精炼后的报告会再次评审，并把最终分数同步给流式前端。
+Critic 的评分驱动 **Self-Refine 精炼循环**：复杂任务先执行一次质量评审，如果低于
+阈值或模型识别到严重问题，再将评分反馈和改进意见传回 Synthesizer。
+`max_refine_rounds=0` 只关闭重写，不关闭首次评审。报告正文和来源证据分别受
+`AGENT_CRITIC_REPORT_CONTEXT_MAX_CHARS` 与
+`AGENT_CRITIC_SOURCE_CONTEXT_MAX_CHARS` 限制。均衡模式的单任务只评审、不自动
+重写；深度模式和多子任务按配置精炼。Critic 返回非法结构或调用失败时显示
+“评审失败”，不生成伪造分数。
 
 这个机制的本质是"让 AI 检查 AI 的输出"——通过多维度评分 + 迭代精炼，将输出质量提升约 18%（BLEU/Rouge-L 指标）。
 
@@ -108,7 +128,8 @@ Orchestrator 是 Agent 系统的**调度中心**，负责：
 2. 根据 DAG 依赖关系调度子任务执行（无依赖的并行、有依赖的串行）
 3. 通过 SSE 向客户端实时推送执行进度
 4. 管理子任务的失败重试和超时处理
-5. 将最终结果存入记忆系统
+5. 对最终报告执行引用编号和证据支持校验
+6. 只将完整成功结果存入记忆系统
 
 Orchestrator 采用**惰性单例模式**设计——`get_orchestrator()` 在首次调用时初始化，后续复用。这样既避免了全局变量的弊端，又确保了多次请求间的状态隔离。
 
@@ -227,6 +248,9 @@ Agent 的知识库工具默认使用 `auto`，也可显式选择 `graph`；关�
 GraphRAG 和基础混合检索，再统一排序。图谱更新在私有副本上完成，查询继续读取
 旧的一致快照，完成后再短时间原子替换。大文档按字符预算从全文均匀取样，未变化
 社区按实体内容指纹复用摘要，并应用最小社区规模与实体/摘要模型配置。
+文档禁用状态由 PostgreSQL 目录统一管理：向量检索、BM25 和 GraphRAG 查询都会
+排除禁用来源；共享图谱实体只使用仍启用文档的贡献生成查询结果。禁用不会删除
+任何索引，重新启用后可立即参与检索。
 
 **⚠️ 曾踩过的坑**：GraphRAG 的 `Community` dataclass 定义了 `id`、`entities`、`summary` 三个字段，但 `save()` 方法访问了 `c.entity_ids` 和 `c.label`，`load()` 又用 `entity_ids=set(...)` 构造——字段不同步导致序列化错误。教训：数据模型变更后，所有序列化/反序列化代码必须同步更新。
 
@@ -299,11 +323,16 @@ Agent 检索内部知识库的主要工具。内部调用混合检索管线（�
 
 #### 3.4.2 WebSearch（web_search.py）
 
-允许 Agent 搜索互联网获取实时信息。联网搜索是显式可选能力：只有配置
-`TAVILY_API_KEY` 后才会把 `WebSearchTool` 注册给 Agent，避免默认把研究查询发送给
-第三方。启用后优先使用 `tavily-python`，Tavily 请求失败时回退到 DuckDuckGo
-HTML。运行时会校验结果数、搜索深度和域名列表，并使用结构化 HTML 解析处理
-DuckDuckGo 重定向链接。
+允许 Agent 搜索互联网获取实时信息。`WebSearchTool` 按以下顺序选择后端：
+
+1. 当前模型供应商的原生联网协议。
+2. 已配置的 Tavily。
+3. 显式启用的 DuckDuckGo HTML 搜索。
+
+OpenAI 与 DeepSeek 使用 Responses Web Search；Kimi 使用 `$web_search` 内置工具；
+GLM 使用结构化 Web Search API。兼容云 API 和本地服务通过
+`LLM_*_NATIVE_WEB_SEARCH_PROTOCOL` 选择协议，不再把供应商名称硬编码进 Agent。
+Tavily 和 DuckDuckGo 都是可选辅助能力，未配置时不会阻止模型正常回答。
 
 #### 3.4.3 CodeExecutor（code_executor.py）
 
@@ -332,7 +361,7 @@ Agent 可以在隔离子进程中执行 Python 代码。沙箱限制 CPU、地�
 
 不把 LLM 调用硬编码到 Agent 逻辑中，而是通过适配器模式实现供应商切换。这样：
 - Agent 代码不关心用的是哪个模型。
-- 可以在 OpenAI、DeepSeek、兼容云 API 和服务器本地模型之间切换。
+- 可以在 OpenAI、DeepSeek、Kimi、GLM、通用兼容 API 和服务器本地模型之间切换。
 - 新增原生供应商只需注册 `ProviderBuilder`，不需要修改 Agent 代码。
 
 #### 3.6.2 统一接口
@@ -340,21 +369,28 @@ Agent 可以在隔离子进程中执行 Python 代码。沙箱限制 CPU、地�
 所有适配器实现 `BaseLLM`：
 - `chat(messages, tools, response_format, stream)`：统一普通、流式、工具调用和
   结构化输出。
+- `search_web(query, max_results, max_output_tokens)`：统一供应商原生联网搜索，
+  返回规范化正文、来源、Token usage、模型和后端标识。
+
+原生联网协议由独立适配器实现，目前包括 `openai_responses`、`kimi_builtin` 和
+`glm_web_search`。聊天接口、模型列表和四 Agent 路由仍复用统一 Provider 适配层。
 - `embed(texts)` / `embed_single(text)`：可选的统一 Embedding 接口。
 - 返回 `ChatResult` / `StreamEvent`，Agent 不接触供应商 SDK 响应对象。
 
 #### 3.6.3 注册表与 OpenAI-compatible 适配器
 
-`LLMFactory` 内置 `openai`、`deepseek`、`openai_compatible`、`local` 四个
-Provider，并提供注册/注销接口。通用 `OpenAICompatibleAdapter` 统一普通 Chat、
+`LLMFactory` 内置 `openai`、`deepseek`、`kimi`、`glm`、
+`openai_compatible`、`local` 六个 Provider，并提供注册/注销接口。
+Kimi、GLM 和通用接口拥有独立的 Base URL、API Key、模型路由与联网协议配置，
+实现层复用 `OpenAICompatibleAdapter`。该适配器统一普通 Chat、
 流式响应、Tool Calling 增量聚合、JSON Mode/Schema 能力降级和可选 Embedding。
 普通和流式响应都会归一化 Provider usage；流式综合通过最终 usage 事件回传 Token，
 兼容端点可通过 `.env` 声明是否支持 `stream_options.include_usage`。
 
-OpenAI 与 DeepSeek 保留原有 Adapter 和导入路径；兼容云 Provider 可连接通义、
-Kimi、硅基流动、Gemini 等提供兼容协议的服务；Local Provider 可连接 vLLM、
-Ollama、LM Studio。四个 Agent 角色可独立覆盖模型名，未覆盖时使用 Provider
-默认模型。
+OpenAI 与 DeepSeek 保留原有 Adapter 和导入路径；Kimi 与 GLM 使用独立
+Provider 配置；通用接口可连接其他提供 OpenAI-compatible 协议的服务；Local
+Provider 可连接 vLLM、Ollama、LM Studio。四个 Agent 角色可独立覆盖模型名，
+未覆盖时使用 Provider 默认模型。
 
 本地模型可不配置 API Key，但 Base URL 与模型名必须完整。工具调用、JSON Mode
 和 JSON Schema 按 Provider 显式声明；关闭后 Adapter 不会发送服务不支持的参数。
@@ -367,14 +403,18 @@ usage 缺失、本地模型和部分估算，未知情况不会显示成零费�
 
 #### 3.6.4 配置与验证流程
 
-1. 打开 `/settings`，选择 OpenAI、DeepSeek、OpenAI 兼容接口或本地模型。
-2. 配置 Base URL、API Key、默认模型及四个 Agent 角色模型。
-3. 按模型和推理服务真实能力设置 Tool Calling、JSON Mode、JSON Schema。
+1. 打开 `/settings`，选择 OpenAI、DeepSeek、Kimi、GLM、通用接口或本地模型。
+2. 配置 Base URL、API Key，检测连接并拉取模型，再选择主要或默认模型。
+3. 需要角色分流时展开高级模型路由；协议与能力开关位于高级接口设置。
 4. 保存后确认 Provider 状态为“可用”，并检查 `/api/v1/settings` 中
    `llm_configured=true`。
 5. 本地模型从应用容器通过 `host.docker.internal` 访问服务器宿主机；服务必须
    监听可被 Docker 网桥访问的地址。
 6. RAPTOR、GraphRAG 和 QA 专用模型留空时继承当前 Researcher 模型。
+
+研究 SSE 连接由应用级会话管理，不跟随研究页组件卸载。站内路由切换不会取消
+任务，返回研究页后可继续查看进度并停止；浏览器刷新或关闭时发送 keepalive
+取消请求并释放连接。
 
 完整命令、Ollama/vLLM 示例和故障排查见
 [LLM Provider 配置与运维](llm-provider-operations.md)。
@@ -393,7 +433,10 @@ usage 缺失、本地模型和部分估算，未知情况不会显示成零费�
 
 #### 3.7.2 情节记忆（episodic.py）
 
-保存完整成功结果及来源、质量、费用、Token 和模型元数据。只有完全相同且未过期的任务可以直接命中缓存；缓存命中会保留原生成用量供内部追溯，但本次请求的 Token 清零并标记为不产生新的 API 费用。Redis 不可用时使用进程内缓存，不会用模糊匹配替代新的研究任务。
+保存完整成功结果及来源、质量、费用、Token 和模型元数据。只有完全相同且未过期的
+任务可以直接命中缓存；Planner 回退、Critic 失败、引用无效、精炼失败或存在失败
+子任务的结果不会写入或复用。缓存命中保留原生成用量供内部追溯，但本次请求的
+Token 清零并标记为不产生新的 API 费用。
 
 #### 3.7.3 语义记忆（semantic.py）
 
@@ -447,7 +490,7 @@ LLM 取消误报成独立根因。
 | VisualRetrievalConfig | `VISUAL_` | 默认关闭的视觉描述检索 |
 | RAPTORConfig | `RAPTOR_` | 层级、摘要模型、节点上限和摘要并发 |
 | GraphRAGConfig | `GRAPH_` | 图谱开关、模型、取样预算、存储、实体和社区上限 |
-| AgentConfig | `AGENT_` | 迭代、请求/子任务/工具并发、排队、心跳和超时 |
+| AgentConfig | `AGENT_` | 迭代、并发、排队、心跳、超时和 Researcher/Synthesizer/Critic 上下文预算 |
 | CacheConfig | `CACHE_` | Redis 连接 |
 | MemoryConfig | `MEMORY_` | 工作、情节和语义记忆容量与保留时间 |
 | ObservabilityConfig | `OBSERVABILITY_` | Langfuse、本地追踪、脱敏和保留策略 |
@@ -476,6 +519,7 @@ PostgreSQL 连接串；本地、CI 和 Docker 都必须显式提供与目标 Pos
 | `/index-jobs` | POST/GET | 创建持久化异步索引任务、列出任务 |
 | `/index-jobs/{job_id}` | GET/DELETE | 查询进度或请求取消任务 |
 | `/documents` | GET | 获取文档列表 |
+| `/documents/{doc_id}/enabled` | PATCH | 启用或禁用文档参与检索，不删除索引 |
 | `/documents/{doc_id}` | DELETE | 删除文档及关联索引 |
 | `/documents/{doc_id}/assets` | GET | 列出持久化资产及可访问的视觉资产 URL |
 | `/documents/{doc_id}/assets/{asset_id}` | GET | 读取已登记的图片或页面预览，不暴露源文件路径 |
@@ -566,7 +610,11 @@ done             →  { type, result: AgentResult }
 
 1. **输入区**：搜索框 + 提交按钮。支持快捷键提交。当前 LLM Provider 配置不完整时按钮显示“知识库检索”，请求不会初始化 Multi-Agent；问候类输入直接返回模式说明，不触发无关文档召回。
 2. **执行可视化区**：使用 React Flow 实时渲染 DAG 执行图——每个节点是一个子任务，边表示依赖关系。已完成/执行中/等待中的节点用不同颜色区分。规划开始前发送 `planning`，长步骤通过 `heartbeat` 保持连接和状态可见。
-3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告、总 Token 和估算费用状态。包含 Critic Agent 的雷达图（Recharts 实现，展示 5 个维度的评分）、未评审/评审失败状态和精炼过程记录。标题、段落、列表、引用、代码块与 GFM 表格使用统一样式，宽表格在自身容器内滚动。正文中的有效 `[N]` 通过 Markdown AST 与结构化来源关联：Web 来源在新标签页打开，内部知识库来源跳到报告底部条目；代码块、行内代码和已有链接不参与转换。多次工具调用先统一来源编号，多子任务综合时携带局部到全局的引用映射。无 LLM 时明确展示未经总结的原始命中片段。显式语言标记优先，无标记代码块自动检测主流语言，无法可靠识别时按纯文本代码块渲染。成功完成后输入框清空，失败时保留问题便于重试。
+3. **结果展示区**：Agent 完成后显示结构化 Markdown 报告、总 Token 和估算费用状态。
+包含 Critic 雷达图、未评审/评审失败状态、精炼记录和降级原因。最终报告会再次执行
+确定性引用校验；编号越界、缺少引用或来源证据不足时结果标记为降级。正文中的有效
+`[N]` 通过 Markdown AST 与结构化来源关联：Web 来源在新标签页打开，内部知识库
+来源跳到报告底部条目。成功完成后输入框清空，失败时保留问题便于重试。
 
 #### 4.2.3 知识库页面
 
@@ -574,6 +622,7 @@ done             →  { type, result: AgentResult }
 - 文档选择上传，自动触发解析和索引。
 - 文档列表（文件名、Chunk 数、索引状态，以及实际成功应用的基础索引、RAPTOR、
   GraphRAG 标识）。
+- 文档检索开关；禁用后保留内容和索引，但不参与向量、BM25 或 GraphRAG 检索。
 - 文档删除（删除时自动清理对应的向量索引）。
 - 上传时可选择 RAPTOR 和 GraphRAG 增强索引。
 
@@ -592,8 +641,8 @@ done             →  { type, result: AgentResult }
   条显示相对执行位置。
 - 失败节点展开后直接显示原因、阶段、错误码、异常类型、Agent、模型和尝试次数；
   顶部自动汇总主要原因，已恢复的重试显示为链路异常而不是整次研究失败。
-- 只要存在未完成子任务，顶层结果和 Trace 就标记为 `degraded`，结果页显示成功/失败
-  子任务数量及原因；该报告不会进入长期记忆缓存。
+- 存在未完成子任务、Planner 回退、Critic 失败、精炼失败或最终引用无效时，顶层结果
+  和 Trace 标记为 `degraded` 并显示原因；该报告不会进入成功记忆缓存。
 - 具备加载、空、错误、降级、截断和移动端状态；配置 Langfuse 后可跳转到远端 Trace。
 - 支持删除当前 Trace 或清空本地 Trace，不影响研究历史与 Langfuse 远端数据。
 - 研究结果和历史详情通过 `traceId` URL 参数直接定位，前端不调用 Langfuse API。
@@ -707,7 +756,8 @@ curl --fail http://127.0.0.1:8000/api/v1/ready
 服务就绪后的界面操作顺序为：
 
 1. 在“系统配置”中保存 LLM Provider，确认状态为“可用”。
-2. 在“知识库”上传文档，按需启用 RAPTOR/GraphRAG，等待当前任务完成。
+2. 在“知识库”上传文档，按需启用 RAPTOR/GraphRAG，等待当前任务完成；暂时不希望
+   某篇文档参与回答时关闭其检索开关，无需删除或重新索引。
 3. 在“研究工作台”提交问题；LLM 不可用时只执行知识库检索。
 4. 在“研究历史”查看或清理报告。
 

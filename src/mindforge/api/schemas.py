@@ -140,9 +140,16 @@ class DocumentItem(BaseModel):
     filename: str
     chunk_count: int
     status: str = "indexed"
+    enabled: bool = True
     index_strategy: Literal["auto", "fixed", "semantic"] = "auto"
     use_raptor: bool = False
     use_graphrag: bool = False
+
+
+class DocumentEnabledUpdate(BaseModel):
+    """Retrieval availability for one indexed document."""
+
+    enabled: bool
 
 
 DocumentsListResponse = list[DocumentItem]
@@ -166,8 +173,16 @@ class DocumentContentResponse(BaseModel):
 LLMProviderName = Literal[
     "openai",
     "deepseek",
+    "kimi",
+    "glm",
     "openai_compatible",
     "local",
+]
+NativeWebSearchProtocol = Literal[
+    "none",
+    "openai_responses",
+    "kimi_builtin",
+    "glm_web_search",
 ]
 
 
@@ -217,6 +232,8 @@ class LLMProviderConfig(BaseModel):
     supports_tools: bool = True
     supports_json_mode: bool = True
     supports_json_schema: bool = False
+    native_web_search_protocol: NativeWebSearchProtocol = "none"
+    native_web_search_endpoint: str = ""
     configured: bool = False
 
 
@@ -235,6 +252,8 @@ class LLMProviderUpdate(BaseModel):
     supports_tools: bool | None = None
     supports_json_mode: bool | None = None
     supports_json_schema: bool | None = None
+    native_web_search_protocol: NativeWebSearchProtocol | None = None
+    native_web_search_endpoint: str | None = Field(None, max_length=2048)
 
     @field_validator("api_key")
     @classmethod
@@ -266,7 +285,7 @@ class LLMProviderUpdate(BaseModel):
             raise ValueError("LLM configuration must not contain control characters.")
         return value.strip()
 
-    @field_validator("base_url")
+    @field_validator("base_url", "native_web_search_endpoint")
     @classmethod
     def validate_base_url(
         cls,
@@ -352,6 +371,12 @@ class SettingsResponse(BaseModel):
     observability_capture_content: bool = False
     trace_retention_days: int = 0
     tavily_configured: bool = False
+    native_web_search_enabled: bool = True
+    native_web_search_protocol: NativeWebSearchProtocol = "none"
+    native_web_search_supported: bool = False
+    duckduckgo_enabled: bool = False
+    model_only_fallback_enabled: bool = True
+    web_search_available: bool = False
     reranker_configured: bool = False
     reranker_available: bool = False
     reranker_load_failed: bool = False
@@ -364,7 +389,7 @@ class SettingsUpdateRequest(BaseModel):
     llm_provider_config: LLMProviderUpdate | None = None
     llm_provider_configs: list[LLMProviderUpdate] | None = Field(
         None,
-        max_length=4,
+        max_length=6,
     )
     deepseek_api_key: str | None = Field(None, max_length=4096)
     openai_api_key: str | None = Field(None, max_length=4096)

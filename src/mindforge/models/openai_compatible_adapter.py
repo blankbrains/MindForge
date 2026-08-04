@@ -13,8 +13,13 @@ from mindforge.models.base import (
     ChatMessage,
     ChatResult,
     LLMConfigurationError,
+    NativeWebSearchResult,
     StreamEvent,
     normalize_token_usage,
+)
+from mindforge.models.native_search import (
+    SUPPORTED_NATIVE_SEARCH_PROTOCOLS,
+    create_native_search_adapter,
 )
 
 
@@ -33,6 +38,8 @@ class OpenAICompatibleAdapter(BaseLLM):
         supports_json_mode: bool = True,
         supports_json_schema: bool = False,
         supports_stream_usage: bool = False,
+        native_web_search_protocol: str = "none",
+        native_web_search_endpoint: str | None = None,
         embed_model: str | None = None,
         max_retries: int = 0,
         default_headers: dict[str, str] | None = None,
@@ -67,13 +74,64 @@ class OpenAICompatibleAdapter(BaseLLM):
         self.supports_json_mode = supports_json_mode
         self.supports_json_schema = supports_json_schema
         self.supports_stream_usage = supports_stream_usage
+        normalized_search_protocol = native_web_search_protocol.strip().lower()
+        if normalized_search_protocol not in SUPPORTED_NATIVE_SEARCH_PROTOCOLS:
+            raise LLMConfigurationError(
+                "Unsupported native web search protocol: "
+                f"{native_web_search_protocol}."
+            )
+        self.native_web_search_protocol = normalized_search_protocol
         self.client = openai.AsyncOpenAI(
             api_key=normalized_key or "not-required",
             base_url=normalized_url,
             max_retries=max_retries,
             default_headers=default_headers,
         )
+        endpoint = (native_web_search_endpoint or "").strip() or None
+        if endpoint is not None:
+            endpoint = self._validate_base_url(
+                endpoint,
+                f"{provider_name} native web search",
+            )
+        elif normalized_search_protocol == "glm_web_search" and normalized_url:
+            endpoint = f"{normalized_url}/web_search"
+        try:
+            self._native_search_adapter = create_native_search_adapter(
+                normalized_search_protocol,
+                client=self.client,
+                model=self.model,
+                provider=self.provider_name,
+                api_key=normalized_key,
+                endpoint=endpoint,
+                include_action_sources=True,
+            )
+        except ValueError as exc:
+            raise LLMConfigurationError(str(exc)) from exc
         self._request_kwargs = request_kwargs
+
+    @property
+    def supports_native_web_search(self) -> bool:
+        return self._native_search_adapter is not None
+
+    async def search_web(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        max_output_tokens: int = 1200,
+    ) -> NativeWebSearchResult:
+        if not self.supports_native_web_search:
+            return await super().search_web(
+                query,
+                max_results=max_results,
+                max_output_tokens=max_output_tokens,
+            )
+        assert self._native_search_adapter is not None
+        return await self._native_search_adapter.search(
+            query=query,
+            max_results=max_results,
+            max_output_tokens=max_output_tokens,
+        )
 
     @staticmethod
     def _validate_base_url(value: str, provider_name: str) -> str:

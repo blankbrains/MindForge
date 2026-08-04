@@ -206,7 +206,12 @@ class BM25Retriever:
     # Search
     # ------------------------------------------------------------------
 
-    def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        excluded_doc_ids: set[str] | None = None,
+    ) -> List[Dict[str, Any]]:
         """Search the BM25 index and return ranked results.
 
         Returns a list of dicts with keys: ``id``, ``text``, ``score``.
@@ -216,12 +221,26 @@ class BM25Retriever:
                 logger.warning("BM25 index is empty; returning empty results.")
                 return []
 
+            excluded = excluded_doc_ids or set()
+            eligible_count = sum(
+                1
+                for metadata in self.metadatas
+                if str(metadata.get("doc_id") or "") not in excluded
+            )
+            if eligible_count == 0:
+                return []
+
             if self.retriever is not None and _BM25S_AVAILABLE:
                 try:
                     # bm25s retrieve 期望 corpus 为 token 列表的列表
                     query_tokens = [list(jieba.cut_for_search(query))]
+                    excluded_count = len(self.documents) - eligible_count
                     indices, scores = self.retriever.retrieve(
-                        query_tokens, k=min(top_k, len(self.documents))
+                        query_tokens,
+                        k=min(
+                            len(self.documents),
+                            top_k + excluded_count,
+                        ),
                     )
                     results = []
                     # bm25s returns shape (1, k) arrays; -1 表示无命中填充位
@@ -229,34 +248,61 @@ class BM25Retriever:
                         doc_idx = int(indices[0, rank])
                         if doc_idx < 0 or doc_idx >= len(self.documents):
                             continue
+                        metadata = (
+                            self.metadatas[doc_idx]
+                            if doc_idx < len(self.metadatas)
+                            else {}
+                        )
+                        if str(metadata.get("doc_id") or "") in excluded:
+                            continue
                         score = float(scores[0, rank])
                         results.append(
                             {
                                 "id": self.doc_ids[doc_idx],
                                 "text": self.documents[doc_idx],
                                 "score": score,
-                                **(
-                                    self.metadatas[doc_idx]
-                                    if doc_idx < len(self.metadatas)
-                                    else {}
-                                ),
+                                **metadata,
                             }
                         )
+                        if len(results) >= top_k:
+                            break
                     return results
                 except Exception:
                     logger.exception(
                         "BM25 search failed; falling back to keyword match."
                     )
-                    return self._keyword_fallback(query, top_k)
-            return self._keyword_fallback(query, top_k)
+                    return self._keyword_fallback(
+                        query,
+                        top_k,
+                        excluded_doc_ids=excluded,
+                    )
+            return self._keyword_fallback(
+                query,
+                top_k,
+                excluded_doc_ids=excluded,
+            )
 
-    def _keyword_fallback(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+    def _keyword_fallback(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        excluded_doc_ids: set[str] | None = None,
+    ) -> List[Dict[str, Any]]:
         """Simple keyword matching fallback when bm25s is unavailable."""
         query_lower = query.lower()
         query_terms = query_lower.split()
+        excluded = excluded_doc_ids or set()
 
         scored: List[Dict[str, Any]] = []
         for i, doc_text in enumerate(self.documents):
+            metadata = (
+                self.metadatas[i]
+                if i < len(self.metadatas)
+                else {}
+            )
+            if str(metadata.get("doc_id") or "") in excluded:
+                continue
             doc_lower = doc_text.lower()
             score = sum(1 for term in query_terms if term in doc_lower)
             if score > 0:
@@ -265,11 +311,7 @@ class BM25Retriever:
                         "id": self.doc_ids[i],
                         "text": doc_text,
                         "score": float(score),
-                        **(
-                            self.metadatas[i]
-                            if i < len(self.metadatas)
-                            else {}
-                        ),
+                        **metadata,
                     }
                 )
 

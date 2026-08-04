@@ -40,7 +40,10 @@ vi.mock("@/lib/sse-parser", () => ({
   ),
 }));
 
-import { useResearchSession } from "@/hooks/use-research-session";
+import {
+  cancelResearch,
+  useResearchSession,
+} from "@/hooks/use-research-session";
 
 async function flushCancellationRequest(): Promise<void> {
   await act(async () => {
@@ -61,7 +64,10 @@ describe("useResearchSession", () => {
     useSettingsStore.setState({ researchTimeout: 180 });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    act(() => cancelResearch());
+    await flushCancellationRequest();
+    useResearchStore.getState().reset();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -146,20 +152,30 @@ describe("useResearchSession", () => {
     unmount();
   });
 
-  it("interrupts the run when its page unmounts", async () => {
-    const { result, unmount } = renderHook(() => useResearchSession());
+  it("keeps the active run across page unmount and remount", async () => {
+    const first = renderHook(() => useResearchSession());
 
-    act(() => result.current.startResearch("navigate away"));
+    act(() => first.result.current.startResearch("navigate away"));
     expect(useResearchStore.getState().status).toBe("streaming");
 
-    unmount();
+    first.unmount();
     await flushCancellationRequest();
 
-    const state = useResearchStore.getState();
+    expect(sseState.connections[0].abort).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(useResearchStore.getState().status).toBe("streaming");
+    expect(useResearchStore.getState().activeTask).toBe("navigate away");
+
+    const second = renderHook(() => useResearchSession());
+    expect(second.result.current.isStreaming).toBe(true);
+    expect(second.result.current.startedAt).not.toBeNull();
+
+    act(() => second.result.current.cancelResearch());
+    await flushCancellationRequest();
     expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
-    expect(state.status).toBe("idle");
-    expect(state.startedAt).toBeNull();
-    expect(state.activeTask).toBe("");
+    expect(useResearchStore.getState().status).toBe("cancelled");
+
+    second.unmount();
   });
 
   it("repairs a stale running state when the page mounts again", () => {
@@ -179,6 +195,26 @@ describe("useResearchSession", () => {
     expect(state.activeTask).toBe("");
     expect(state.startedAt).toBeNull();
     expect(state.phase).toBe("idle");
+
+    unmount();
+  });
+
+  it("cancels the active transport when the browser unloads", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() => result.current.startResearch("refresh me"));
+    const requestId = sseState.connections[0].body.request_id;
+    act(() => window.dispatchEvent(new Event("beforeunload")));
+
+    expect(sseState.connections[0].abort).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/query/cancel",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ request_id: requestId }),
+        keepalive: true,
+      }),
+    );
 
     unmount();
   });

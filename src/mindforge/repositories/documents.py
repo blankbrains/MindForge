@@ -64,6 +64,7 @@ def get_document(doc_id: str) -> dict[str, Any] | None:
             "filename": record.filename,
             "chunk_count": record.chunk_count,
             "status": record.status,
+            "enabled": record.enabled,
             "index_signature": record.index_signature,
             "index_strategy": record.index_strategy,
             "use_raptor": record.use_raptor,
@@ -98,12 +99,53 @@ def list_documents() -> list[dict[str, Any]]:
                 "filename": record.filename,
                 "chunk_count": record.chunk_count,
                 "status": record.status,
+                "enabled": record.enabled,
                 "index_strategy": record.index_strategy,
                 "use_raptor": record.use_raptor,
                 "use_graphrag": record.use_graphrag,
             }
             for record in records
         ]
+
+
+def list_disabled_document_ids() -> set[str]:
+    """Return indexed documents that must be excluded from retrieval."""
+    with SessionLocal() as db:
+        rows = (
+            db.query(DocumentCatalog.doc_id)
+            .filter(
+                DocumentCatalog.status == "indexed",
+                DocumentCatalog.enabled.is_(False),
+            )
+            .all()
+        )
+        return {str(row[0]) for row in rows}
+
+
+def set_document_enabled(
+    doc_id: str,
+    *,
+    enabled: bool,
+) -> dict[str, Any] | None:
+    """Change retrieval availability without modifying stored indexes."""
+    with SessionLocal() as db:
+        record = db.get(DocumentCatalog, doc_id)
+        if record is None or record.status != "indexed":
+            return None
+        record.enabled = enabled
+        record.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(record)
+        return {
+            "doc_id": record.doc_id,
+            "filename": record.filename,
+            "chunk_count": record.chunk_count,
+            "status": record.status,
+            "enabled": record.enabled,
+            "index_strategy": record.index_strategy,
+            "use_raptor": record.use_raptor,
+            "use_graphrag": record.use_graphrag,
+        }
 
 
 def get_document_stats() -> tuple[int, int]:

@@ -14,6 +14,7 @@ const documentState = vi.hoisted(() => ({
       filename: "first.txt",
       chunk_count: 1,
       status: "indexed",
+      enabled: true,
       index_strategy: "auto",
       use_raptor: true,
       use_graphrag: true,
@@ -23,6 +24,7 @@ const documentState = vi.hoisted(() => ({
       filename: "second.txt",
       chunk_count: 1,
       status: "indexed",
+      enabled: false,
       index_strategy: "auto",
       use_raptor: false,
       use_graphrag: false,
@@ -38,6 +40,10 @@ const uploadState = vi.hoisted(() => ({
 }));
 const cancelState = vi.hoisted(() => ({
   error: null as Error | null,
+}));
+const availabilityState = vi.hoisted(() => ({
+  calls: [] as Array<{ docId: string; enabled: boolean }>,
+  fail: false,
 }));
 
 vi.mock("@/hooks/use-stats", () => ({
@@ -112,6 +118,16 @@ vi.mock("@/hooks/use-documents", () => ({
       isPending: false,
       mutateAsync: vi.fn(),
     },
+    setEnabled: {
+      isPending: false,
+      variables: undefined,
+      mutateAsync: vi.fn(async (variables) => {
+        availabilityState.calls.push(variables);
+        if (availabilityState.fail) {
+          throw new Error("文档状态更新失败");
+        }
+      }),
+    },
   }),
 }));
 
@@ -119,6 +135,8 @@ import { KnowledgeBasePage } from "./knowledge-base-page";
 
 afterEach(() => {
   cancelState.error = null;
+  availabilityState.calls = [];
+  availabilityState.fail = false;
   cleanup();
 });
 
@@ -129,6 +147,53 @@ describe("KnowledgeBasePage", () => {
     expect(screen.getAllByText("基础索引")).toHaveLength(2);
     expect(screen.getByText("RAPTOR 层次索引")).not.toBeNull();
     expect(screen.getByText("GraphRAG 图谱索引")).not.toBeNull();
+  });
+
+  it("shows disabled documents and exposes accessible retrieval switches", () => {
+    render(<KnowledgeBasePage />);
+
+    expect(screen.getByText("已禁用")).not.toBeNull();
+    expect(
+      screen
+        .getByRole("switch", { name: "禁用文档 first.txt" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      screen
+        .getByRole("switch", { name: "启用文档 second.txt" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("requests reversible document availability changes", async () => {
+    render(<KnowledgeBasePage />);
+
+    fireEvent.click(
+      screen.getByRole("switch", { name: "禁用文档 first.txt" }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", { name: "启用文档 second.txt" }),
+    );
+
+    await waitFor(() => {
+      expect(availabilityState.calls).toEqual([
+        { docId: "first", enabled: false },
+        { docId: "second", enabled: true },
+      ]);
+    });
+  });
+
+  it("reports document availability update failures", async () => {
+    availabilityState.fail = true;
+    render(<KnowledgeBasePage />);
+
+    fireEvent.click(
+      screen.getByRole("switch", { name: "禁用文档 first.txt" }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "文档状态更新失败",
+    );
   });
 
   it("shows only the current upload progress, not an index-job history", async () => {

@@ -58,11 +58,13 @@ export function ResearchPage() {
 
   useEffect(() => {
     if (!session.isStreaming || !session.startedAt) return;
-    const interval = window.setInterval(() => {
+    const updateElapsed = () => {
       setElapsedSeconds(
         Math.max(0, Math.floor((Date.now() - session.startedAt!) / 1000)),
       );
-    }, 1000);
+    };
+    updateElapsed();
+    const interval = window.setInterval(updateElapsed, 1000);
     return () => window.clearInterval(interval);
   }, [session.isStreaming, session.startedAt]);
 

@@ -25,6 +25,8 @@ function providerConfig(
       supportsTools: true,
       supportsJsonMode: true,
       supportsJsonSchema: true,
+      nativeWebSearchProtocol: "openai_responses",
+      nativeWebSearchEndpoint: "",
       configured: true,
     },
     deepseek: {
@@ -41,6 +43,44 @@ function providerConfig(
       supportsTools: true,
       supportsJsonMode: true,
       supportsJsonSchema: false,
+      nativeWebSearchProtocol: "openai_responses",
+      nativeWebSearchEndpoint: "",
+      configured: false,
+    },
+    kimi: {
+      provider: "kimi",
+      label: "Kimi",
+      baseUrl: "https://api.moonshot.cn/v1",
+      apiKey: "",
+      apiKeyRequired: true,
+      defaultModel: "",
+      plannerModel: "",
+      researcherModel: "",
+      criticModel: "",
+      synthesizerModel: "",
+      supportsTools: true,
+      supportsJsonMode: true,
+      supportsJsonSchema: false,
+      nativeWebSearchProtocol: "kimi_builtin",
+      nativeWebSearchEndpoint: "",
+      configured: false,
+    },
+    glm: {
+      provider: "glm",
+      label: "GLM",
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      apiKey: "",
+      apiKeyRequired: true,
+      defaultModel: "",
+      plannerModel: "",
+      researcherModel: "",
+      criticModel: "",
+      synthesizerModel: "",
+      supportsTools: true,
+      supportsJsonMode: true,
+      supportsJsonSchema: false,
+      nativeWebSearchProtocol: "glm_web_search",
+      nativeWebSearchEndpoint: "",
       configured: false,
     },
     openai_compatible: {
@@ -57,6 +97,8 @@ function providerConfig(
       supportsTools: true,
       supportsJsonMode: true,
       supportsJsonSchema: false,
+      nativeWebSearchProtocol: "none",
+      nativeWebSearchEndpoint: "",
       configured: false,
     },
     local: {
@@ -73,6 +115,8 @@ function providerConfig(
       supportsTools: true,
       supportsJsonMode: true,
       supportsJsonSchema: false,
+      nativeWebSearchProtocol: "none",
+      nativeWebSearchEndpoint: "",
       configured: false,
     },
   };
@@ -94,6 +138,8 @@ function apiProvider(config: LLMProviderConfig) {
     supports_tools: config.supportsTools,
     supports_json_mode: config.supportsJsonMode,
     supports_json_schema: config.supportsJsonSchema,
+    native_web_search_protocol: config.nativeWebSearchProtocol,
+    native_web_search_endpoint: config.nativeWebSearchEndpoint,
     configured: config.configured,
   };
 }
@@ -103,6 +149,8 @@ function settingsResponse(
   configs = {
     openai: providerConfig("openai"),
     deepseek: providerConfig("deepseek"),
+    kimi: providerConfig("kimi"),
+    glm: providerConfig("glm"),
     openai_compatible: providerConfig("openai_compatible"),
     local: providerConfig("local"),
   },
@@ -127,6 +175,8 @@ describe("settings store", () => {
     const providerConfigs = {
       openai: providerConfig("openai"),
       deepseek: providerConfig("deepseek"),
+      kimi: providerConfig("kimi"),
+      glm: providerConfig("glm"),
       openai_compatible: providerConfig("openai_compatible"),
       local: providerConfig("local"),
     };
@@ -205,6 +255,7 @@ describe("settings store", () => {
         baseUrl: "https://cloud.example/v1",
         apiKey: "cloud-key",
         defaultModel: "cloud-model",
+        nativeWebSearchProtocol: "kimi_builtin",
       },
     );
     useSettingsStore.getState().setLLMProvider("local");
@@ -228,6 +279,7 @@ describe("settings store", () => {
           provider: "openai_compatible",
           api_key: "cloud-key",
           default_model: "cloud-model",
+          native_web_search_protocol: "kimi_builtin",
         }),
         expect.objectContaining({
           provider: "local",
@@ -235,6 +287,38 @@ describe("settings store", () => {
           supports_json_schema: true,
         }),
       ]),
+    );
+  });
+
+  it("keeps Kimi, GLM and generic compatible settings isolated", () => {
+    useSettingsStore.getState().updateLLMProviderConfig("kimi", {
+      apiKey: "kimi-key",
+      defaultModel: "kimi-k2",
+    });
+    useSettingsStore.getState().updateLLMProviderConfig("glm", {
+      apiKey: "glm-key",
+      defaultModel: "glm-4.5",
+    });
+    useSettingsStore.getState().updateLLMProviderConfig(
+      "openai_compatible",
+      {
+        baseUrl: "https://gateway.example/v1",
+        apiKey: "generic-key",
+        defaultModel: "generic-model",
+      },
+    );
+
+    const configs = useSettingsStore.getState().providerConfigs;
+    expect(configs.kimi.apiKey).toBe("kimi-key");
+    expect(configs.kimi.defaultModel).toBe("kimi-k2");
+    expect(configs.glm.apiKey).toBe("glm-key");
+    expect(configs.glm.defaultModel).toBe("glm-4.5");
+    expect(configs.openai_compatible.apiKey).toBe("generic-key");
+    expect(configs.openai_compatible.defaultModel).toBe(
+      "generic-model",
+    );
+    expect(useSettingsStore.getState().dirtyProviders).toEqual(
+      expect.arrayContaining(["kimi", "glm", "openai_compatible"]),
     );
   });
 
@@ -246,6 +330,8 @@ describe("settings store", () => {
     const configs = {
       openai: providerConfig("openai"),
       deepseek: providerConfig("deepseek"),
+      kimi: providerConfig("kimi"),
+      glm: providerConfig("glm"),
       openai_compatible: providerConfig("openai_compatible"),
       local,
     };
@@ -273,7 +359,12 @@ describe("settings store", () => {
 
     const request = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(String(request.body))).toEqual({
-      openai_api_key: "",
+      llm_provider_configs: [
+        expect.objectContaining({
+          provider: "openai",
+          api_key: "",
+        }),
+      ],
     });
   });
 

@@ -12,6 +12,8 @@ from mindforge.config import get_settings
 from mindforge.observability.tracer import resolve_traces_dir
 
 _TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{16}(?:[0-9a-f]{16})?$")
+_LEGACY_DUPLICATE_START_TOLERANCE_SECONDS = 0.001
+_LEGACY_DUPLICATE_DURATION_TOLERANCE_MS = 5.0
 
 
 def _public_url(value: str) -> str:
@@ -75,6 +77,11 @@ class TraceRepository:
             summary = self._read_summary(path)
             if summary is None:
                 continue
+            summaries.append(summary)
+        summaries = self._collapse_legacy_duplicate_roots(summaries)
+
+        filtered_summaries: list[dict[str, Any]] = []
+        for summary in summaries:
             if status and summary.get("status") != status:
                 continue
             if normalized_search:
@@ -89,15 +96,111 @@ class TraceRepository:
                 ).casefold()
                 if normalized_search not in searchable:
                     continue
-            summaries.append(summary)
-        total = len(summaries)
+            filtered_summaries.append(summary)
+        total = len(filtered_summaries)
         return {
-            "traces": summaries[offset : offset + limit],
+            "traces": filtered_summaries[offset : offset + limit],
             "total": total,
             "limit": limit,
             "offset": offset,
             "truncated": truncated,
         }
+
+    @classmethod
+    def _collapse_legacy_duplicate_roots(
+        cls,
+        summaries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Hide duplicate root traces emitted by the legacy SSE path.
+
+        Older deployments opened one root trace in the API layer and another
+        in the Orchestrator. Those roots start and finish effectively
+        simultaneously and have the same research label. Keep the richer
+        trace while preserving distinct repeated research submissions.
+        """
+        collapsed: list[dict[str, Any]] = []
+        candidate_indexes: dict[tuple[str, str], list[int]] = {}
+
+        for summary in summaries:
+            key = cls._legacy_duplicate_key(summary)
+            if key is None:
+                collapsed.append(summary)
+                continue
+
+            duplicate_index = next(
+                (
+                    index
+                    for index in candidate_indexes.get(key, [])
+                    if cls._is_legacy_duplicate_root(
+                        collapsed[index],
+                        summary,
+                    )
+                ),
+                None,
+            )
+            if duplicate_index is None:
+                candidate_indexes.setdefault(key, []).append(len(collapsed))
+                collapsed.append(summary)
+                continue
+
+            if cls._trace_richness(summary) > cls._trace_richness(
+                collapsed[duplicate_index]
+            ):
+                collapsed[duplicate_index] = summary
+
+        return collapsed
+
+    @staticmethod
+    def _legacy_duplicate_key(
+        summary: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        name = str(summary.get("name") or "").strip()
+        if name != "orchestrator.research":
+            return None
+        label = str(
+            summary.get("display_name")
+            or summary.get("task_preview")
+            or ""
+        ).strip().casefold()
+        if not label:
+            return None
+        return name, label
+
+    @staticmethod
+    def _is_legacy_duplicate_root(
+        first: dict[str, Any],
+        second: dict[str, Any],
+    ) -> bool:
+        try:
+            start_delta = abs(
+                float(first.get("start_time") or 0.0)
+                - float(second.get("start_time") or 0.0)
+            )
+            duration_delta = abs(
+                float(first.get("duration_ms") or 0.0)
+                - float(second.get("duration_ms") or 0.0)
+            )
+        except (TypeError, ValueError):
+            return False
+        return (
+            start_delta <= _LEGACY_DUPLICATE_START_TOLERANCE_SECONDS
+            and duration_delta <= _LEGACY_DUPLICATE_DURATION_TOLERANCE_MS
+        )
+
+    @staticmethod
+    def _trace_richness(summary: dict[str, Any]) -> tuple[int, ...]:
+        def count(key: str) -> int:
+            value = summary.get(key)
+            return int(value) if isinstance(value, (int, float)) else 0
+
+        return (
+            count("span_count"),
+            count("generation_count"),
+            count("tool_count"),
+            count("total_tokens"),
+            count("error_count"),
+            int(summary.get("cost_usd") is not None),
+        )
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         if not _TRACE_ID_PATTERN.fullmatch(trace_id):

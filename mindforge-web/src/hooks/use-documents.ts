@@ -15,6 +15,11 @@ interface UploadIndexJobOptions {
   onUploadProgress?: (progress: UploadProgress) => void;
 }
 
+interface UpdateDocumentEnabledOptions {
+  docId: string;
+  enabled: boolean;
+}
+
 /** 将后端原始错误转为用户友好的中文提示 */
 export function friendlyError(status: number, raw: string): string {
   // Prefer the server's validated detail, including the configured size limit.
@@ -120,6 +125,22 @@ export function uploadIndexJob({
   });
 }
 
+export async function updateDocumentEnabled({
+  docId,
+  enabled,
+}: UpdateDocumentEnabledOptions): Promise<DocumentItem> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/enabled`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(friendlyError(res.status, text));
+  }
+  return res.json() as Promise<DocumentItem>;
+}
+
 export function useDocuments(indexJobId: string | null = null) {
   const qc = useQueryClient();
   const observedTerminalJob = useRef<string | null>(null);
@@ -199,5 +220,18 @@ export function useDocuments(indexJobId: string | null = null) {
     },
   });
 
-  return { list, job, upload, cancelJob, remove };
+  const setEnabled = useMutation({
+    mutationFn: updateDocumentEnabled,
+    onSuccess: (updatedDocument) => {
+      qc.setQueryData<DocumentItem[]>(["documents"], (current) =>
+        current?.map((document) =>
+          document.doc_id === updatedDocument.doc_id
+            ? updatedDocument
+            : document,
+        ) ?? [updatedDocument],
+      );
+    },
+  });
+
+  return { list, job, upload, cancelJob, remove, setEnabled };
 }
