@@ -18,6 +18,7 @@ __pycache__/
 
 # Project data
 data/
+docs/
 benchmarks/parser/corpus/
 benchmarks/parser/results/
 计划方案/
