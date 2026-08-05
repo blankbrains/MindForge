@@ -1,9 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import {
   Background,
   Controls,
@@ -16,6 +11,7 @@ import {
 } from "@xyflow/react";
 import { Info, RotateCcw, TriangleAlert } from "lucide-react";
 import "@xyflow/react/dist/style.css";
+import { Tooltip } from "@/components/shared/tooltip";
 import type { ResearchPlan, SubTask } from "@/types/research";
 import { useResearchStore } from "@/store/research-store";
 import { cn } from "@/lib/utils";
@@ -60,14 +56,13 @@ function taskLabel(
     <div
       className={cn(
         "w-[260px] border-2 bg-surface px-4 py-3 text-left shadow-sm",
-        status === "completed"
-          && "border-green-400 bg-green-50 text-green-900 dark:border-green-700 dark:bg-green-950 dark:text-green-100",
-        status === "in_progress"
-          && "border-blue-400 bg-blue-50 text-blue-900 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-100",
-        status === "failed"
-          && "border-red-400 bg-red-50 text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100",
-        status === "pending"
-          && "border-border bg-surface text-text",
+        status === "completed" &&
+          "border-green-400 bg-green-50 text-green-900 dark:border-green-700 dark:bg-green-950 dark:text-green-100",
+        status === "in_progress" &&
+          "border-blue-400 bg-blue-50 text-blue-900 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-100",
+        status === "failed" &&
+          "border-red-400 bg-red-50 text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100",
+        status === "pending" && "border-border bg-surface text-text",
       )}
     >
       <div className="flex items-center justify-between gap-3">
@@ -76,15 +71,11 @@ function taskLabel(
           {task.task_id}
         </span>
       </div>
-      <p className="mt-2 text-sm font-medium leading-6">
-        {task.description}
-      </p>
+      <p className="mt-2 text-sm font-medium leading-6">{task.description}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
         <span>{task.task_type}</span>
         <span>优先级 {task.priority}</span>
-        {dependencies.length > 0 && (
-          <span>依赖 {dependencies.join("、")}</span>
-        )}
+        {dependencies.length > 0 && <span>依赖 {dependencies.join("、")}</span>}
       </div>
     </div>
   );
@@ -206,15 +197,20 @@ export function PlanDAG({ plan }: Props) {
         </div>
       )}
       <div className="relative h-[460px] w-full overflow-hidden rounded-lg border border-border bg-surface">
-        <button
-          type="button"
-          onClick={resetLayout}
-          className="absolute right-3 top-3 z-10 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface text-text-muted shadow-sm hover:bg-surface-alt hover:text-text"
-          title="恢复自动布局"
-          aria-label="恢复任务 DAG 自动布局"
+        <Tooltip
+          content="恢复系统生成的任务位置，并自动缩放到完整 DAG。"
+          side="left"
+          className="absolute right-3 top-3 z-10"
         >
-          <RotateCcw className="h-4 w-4" />
-        </button>
+          <button
+            type="button"
+            onClick={resetLayout}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface text-text-muted shadow-sm hover:bg-surface-alt hover:text-text"
+            aria-label="恢复任务 DAG 自动布局"
+          >
+            <RotateCcw className="h-4 w-4" />
+          </button>
+        </Tooltip>
         <ReactFlow
           nodes={nodes}
           edges={edges}

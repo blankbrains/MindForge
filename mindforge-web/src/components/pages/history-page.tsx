@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { useHistoryStore } from "@/store/history-store";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Modal } from "@/components/shared/modal";
+import { Tooltip } from "@/components/shared/tooltip";
 import { StreamingMarkdown } from "@/components/research/streaming-markdown";
 import {
   CheckCircle2,
@@ -117,9 +118,7 @@ export function HistoryPage() {
       <div className="mx-auto max-w-5xl space-y-6">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">研究历史</h1>
-          <p className="mt-1 text-text-muted">
-            浏览过去的研究任务与结果
-          </p>
+          <p className="mt-1 text-text-muted">浏览过去的研究任务与结果</p>
         </div>
         {loadError ? (
           <div
@@ -214,16 +213,12 @@ export function HistoryPage() {
                   <div
                     className={cn(
                       "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-                      entry.quality_score != null
-                        && entry.quality_score >= 7
+                      entry.quality_score != null && entry.quality_score >= 7
                         ? "bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400"
                         : "bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400",
                     )}
                   >
-                    <CheckCircle2
-                      className="h-4 w-4"
-                      aria-hidden="true"
-                    />
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <h2 className="truncate font-medium">{entry.task}</h2>
@@ -233,28 +228,50 @@ export function HistoryPage() {
                           {new Date(entry.created_at).toLocaleString()}
                         </span>
                       )}
-                      {entry.quality_score != null
-                        && entry.quality_score > 0 && (
-                        <span
-                          className={cn(
-                            "rounded-full px-2 py-0.5 font-medium",
-                            entry.quality_score >= 7
-                              ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
-                              : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-                          )}
-                        >
-                          质量 {entry.quality_score.toFixed(1)}
-                        </span>
-                      )}
+                      {entry.quality_score != null &&
+                        entry.quality_score > 0 && (
+                          <Tooltip
+                            content="Critic 对最终报告完整性、证据和表达质量的综合评分，不代表内容绝对正确。"
+                            side="top"
+                          >
+                            <span
+                              tabIndex={0}
+                              className={cn(
+                                "cursor-help rounded-full px-2 py-0.5 font-medium outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+                                entry.quality_score >= 7
+                                  ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+                                  : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+                              )}
+                            >
+                              质量 {entry.quality_score.toFixed(1)}
+                            </span>
+                          </Tooltip>
+                        )}
                       {entry.quality_score == null && (
-                        <span className="rounded-full bg-surface-alt px-2 py-0.5 font-medium text-text-muted">
-                          未评审
-                        </span>
+                        <Tooltip
+                          content="该请求没有运行 Critic，例如会话型问题、快速模式或明确跳过质量评审的流程。"
+                          side="top"
+                        >
+                          <span
+                            tabIndex={0}
+                            className="cursor-help rounded-full bg-surface-alt px-2 py-0.5 font-medium text-text-muted outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                          >
+                            未评审
+                          </span>
+                        </Tooltip>
                       )}
                       {entry.quality_score === 0 && (
-                        <span className="rounded-full bg-surface-alt px-2 py-0.5 font-medium text-text-muted">
-                          评分状态未知
-                        </span>
+                        <Tooltip
+                          content="旧版记录没有保存明确的评审状态，无法区分真实 0 分与未执行评审。"
+                          side="top"
+                        >
+                          <span
+                            tabIndex={0}
+                            className="cursor-help rounded-full bg-surface-alt px-2 py-0.5 font-medium text-text-muted outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                          >
+                            评分状态未知
+                          </span>
+                        </Tooltip>
                       )}
                       {entry.model_used && (
                         <span>模型：{entry.model_used}</span>
@@ -278,24 +295,26 @@ export function HistoryPage() {
                     />
                   )}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActionError(null);
-                    setDeleteTargetId(entry.id);
-                  }}
-                  className="shrink-0 rounded-lg p-2 text-text-muted opacity-100 transition-colors hover:bg-red-50 hover:text-red-500 focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-red-950"
-                  aria-label={`删除研究记录：${entry.task}`}
+                <Tooltip
+                  content="永久删除这条研究历史，不会删除知识库文档。"
+                  side="left"
                 >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActionError(null);
+                      setDeleteTargetId(entry.id);
+                    }}
+                    className="shrink-0 rounded-lg p-2 text-text-muted opacity-100 transition-colors hover:bg-red-50 hover:text-red-500 focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-red-950"
+                    aria-label={`删除研究记录：${entry.task}`}
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </Tooltip>
               </div>
 
               {expanded && (
-                <div
-                  id={detailId}
-                  className="border-t border-border px-5 py-4"
-                >
+                <div id={detailId} className="border-t border-border px-5 py-4">
                   {entry.trace_id && (
                     <div className="mb-3 flex justify-end">
                       <Link

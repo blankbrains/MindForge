@@ -1,4 +1,5 @@
 import { Database, Globe2, ScanSearch } from "lucide-react";
+import { HelpTooltip } from "@/components/shared/tooltip";
 import {
   useSettingsStore,
   type EmbeddingProvider,
@@ -45,9 +46,9 @@ export function RetrievalSettingsPanel() {
               ? "运行正常"
               : state.rerankerLoadFailed
                 ? "模型加载失败"
-              : state.rerankerConfigured
-                ? "等待模型加载"
-                : "未启用"
+                : state.rerankerConfigured
+                  ? "等待模型加载"
+                  : "未启用"
           }
           detail={
             state.rerankerAvailable
@@ -82,9 +83,21 @@ export function RetrievalSettingsPanel() {
       </div>
 
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium">Embedding</span>
+        <div className="block">
+          <div className="mb-1.5 flex items-center gap-1.5">
+            <label
+              htmlFor="retrieval-embedding"
+              className="text-sm font-medium"
+            >
+              Embedding
+            </label>
+            <HelpTooltip
+              label="Embedding 说明"
+              content="把文档和问题转换为向量，用于语义检索。切换模型后向量空间会变化，因此已有文档必须重新索引。"
+            />
+          </div>
           <select
+            id="retrieval-embedding"
             value={state.embeddingProvider}
             onChange={(event) =>
               state.setEmbeddingProvider(
@@ -99,7 +112,7 @@ export function RetrievalSettingsPanel() {
           <span className="mt-1 block text-xs leading-5 text-text-muted">
             已有知识库时不能直接切换，必须删除并重新索引文档。
           </span>
-        </label>
+        </div>
         <div className="flex items-start gap-3 border border-border bg-surface-alt px-4 py-3">
           <Database className="mt-0.5 h-4 w-4 text-text-muted" />
           <p className="text-xs leading-5 text-text-muted">
@@ -109,6 +122,7 @@ export function RetrievalSettingsPanel() {
         <NumberField
           id="retrieval-topk"
           label="向量检索 Top-K"
+          help="向量检索阶段最多取回的候选知识块数量。过小可能漏掉证据，过大会增加重排序成本和噪声。"
           value={state.retrievalTopK}
           min={1}
           max={100}
@@ -117,6 +131,7 @@ export function RetrievalSettingsPanel() {
         <NumberField
           id="rerank-topk"
           label="重排序 Top-K"
+          help="CrossEncoder 精排后保留给 Agent 的知识块数量，不能大于向量检索候选规模。"
           value={state.rerankTopK}
           min={1}
           max={50}
@@ -125,6 +140,7 @@ export function RetrievalSettingsPanel() {
         <NumberField
           id="retrieval-min-score"
           label="语义相关性阈值"
+          help="过滤语义相似度不足的向量结果。阈值越高越严格，可能提高精度但降低召回率。"
           value={state.retrievalMinScore}
           min={0}
           max={1}
@@ -134,6 +150,7 @@ export function RetrievalSettingsPanel() {
         <NumberField
           id="keyword-min-coverage"
           label="关键词覆盖阈值"
+          help="判断检索结果是否覆盖问题关键词的最低比例，用于识别相关性不足或证据缺失。"
           value={state.keywordMinCoverage}
           min={0}
           max={1}
@@ -143,6 +160,7 @@ export function RetrievalSettingsPanel() {
         <NumberField
           id="native-web-search-timeout"
           label="原生联网搜索超时（秒）"
+          help="模型供应商原生联网能力的等待上限。超时后系统会按配置尝试辅助搜索或降级回答。"
           detail="模型供应商原生联网请求的最长等待时间"
           value={state.nativeWebSearchTimeoutSeconds}
           min={5}
@@ -190,6 +208,7 @@ function StatusItem({
 function NumberField({
   id,
   label,
+  help,
   value,
   min,
   max,
@@ -199,6 +218,7 @@ function NumberField({
 }: {
   id: string;
   label: string;
+  help?: string;
   value: number;
   min: number;
   max: number;
@@ -209,12 +229,12 @@ function NumberField({
   const descriptionId = detail ? `${id}-description` : undefined;
   return (
     <div className="block">
-      <label
-        htmlFor={id}
-        className="mb-1.5 block text-sm font-medium"
-      >
-        {label}
-      </label>
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <label htmlFor={id} className="text-sm font-medium">
+          {label}
+        </label>
+        {help && <HelpTooltip content={help} label={`${label}说明`} />}
+      </div>
       <input
         id={id}
         type="number"

@@ -1,8 +1,5 @@
-import {
-  Eye,
-  MessageSquarePlus,
-  Trash2,
-} from "lucide-react";
+import { Eye, MessageSquarePlus, Trash2 } from "lucide-react";
+import { Tooltip } from "@/components/shared/tooltip";
 import type { ContextMode, Conversation } from "@/types/context";
 
 interface ConversationToolbarProps {
@@ -20,10 +17,28 @@ interface ConversationToolbarProps {
   onOpenContext: () => void;
 }
 
-const MODES: Array<{ value: ContextMode; label: string }> = [
-  { value: "auto", label: "自动" },
-  { value: "manual", label: "手动" },
-  { value: "disabled", label: "关闭" },
+const MODES: Array<{
+  value: ContextMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "auto",
+    label: "自动",
+    description:
+      "系统根据当前问题，从会话消息、摘要、相关研究和长期记忆中自动选择上下文。",
+  },
+  {
+    value: "manual",
+    label: "手动",
+    description:
+      "只使用你在“查看上下文”中明确选择的历史内容，未选择的内容不会进入本轮研究。",
+  },
+  {
+    value: "disabled",
+    label: "关闭",
+    description: "本轮不读取任何历史上下文，但问题和结果仍会保存在当前会话中。",
+  },
 ];
 
 export function ConversationToolbar({
@@ -65,26 +80,34 @@ export function ConversationToolbar({
             </option>
           ))}
         </select>
-        <button
-          type="button"
-          title="新建会话"
-          aria-label="新建会话"
-          disabled={disabled || loading}
-          onClick={onCreate}
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-border bg-surface text-text-muted hover:bg-surface-alt hover:text-text disabled:opacity-50"
+        <Tooltip
+          content="创建一个新的独立会话，后续问题会在该会话内连续积累上下文。"
+          side="bottom"
         >
-          <MessageSquarePlus className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          title="彻底删除当前会话"
-          aria-label="彻底删除当前会话"
-          disabled={disabled || loading || !activeConversationId}
-          onClick={onDelete}
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-border bg-surface text-text-muted hover:border-red-300 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:hover:bg-red-950"
+          <button
+            type="button"
+            aria-label="新建会话"
+            disabled={disabled || loading}
+            onClick={onCreate}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-border bg-surface text-text-muted hover:bg-surface-alt hover:text-text disabled:opacity-50"
+          >
+            <MessageSquarePlus className="h-4 w-4" />
+          </button>
+        </Tooltip>
+        <Tooltip
+          content="彻底删除当前会话、消息及其衍生上下文。操作前会再次确认。"
+          side="bottom"
         >
-          <Trash2 className="h-4 w-4" />
-        </button>
+          <button
+            type="button"
+            aria-label="彻底删除当前会话"
+            disabled={disabled || loading || !activeConversationId}
+            onClick={onDelete}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-border bg-surface text-text-muted hover:border-red-300 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:hover:bg-red-950"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </Tooltip>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -94,43 +117,59 @@ export function ConversationToolbar({
           className="inline-flex rounded-md border border-border bg-surface p-0.5"
         >
           {MODES.map((mode) => (
-            <button
+            <Tooltip
               key={mode.value}
-              type="button"
-              disabled={disabled || independent}
-              aria-pressed={contextMode === mode.value}
-              onClick={() => onModeChange(mode.value)}
-              className={`min-w-14 rounded px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-45 ${
-                contextMode === mode.value
-                  ? "bg-primary text-white"
-                  : "text-text-muted hover:bg-surface-alt hover:text-text"
-              }`}
+              content={mode.description}
+              side="bottom"
+              className="min-w-14"
             >
-              {mode.label}
-            </button>
+              <button
+                type="button"
+                disabled={disabled || independent}
+                aria-pressed={contextMode === mode.value}
+                onClick={() => onModeChange(mode.value)}
+                className={`w-full rounded px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-45 ${
+                  contextMode === mode.value
+                    ? "bg-primary text-white"
+                    : "text-text-muted hover:bg-surface-alt hover:text-text"
+                }`}
+              >
+                {mode.label}
+              </button>
+            </Tooltip>
           ))}
         </div>
 
-        <label className="inline-flex items-center gap-2 text-sm text-text-muted">
-          <input
-            type="checkbox"
-            checked={independent}
-            disabled={disabled}
-            onChange={(event) => onIndependentChange(event.target.checked)}
-            className="h-4 w-4 accent-primary"
-          />
-          独立研究
-        </label>
-
-        <button
-          type="button"
-          disabled={disabled || !activeConversationId}
-          onClick={onOpenContext}
-          className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-text hover:bg-surface-alt disabled:opacity-50"
+        <Tooltip
+          content="本轮不继承任何历史上下文；问题和结果仍会保存到当前会话，供之后查看和使用。"
+          side="bottom"
         >
-          <Eye className="h-4 w-4" />
-          查看上下文
-        </button>
+          <label className="inline-flex items-center gap-2 text-sm text-text-muted">
+            <input
+              type="checkbox"
+              checked={independent}
+              disabled={disabled}
+              onChange={(event) => onIndependentChange(event.target.checked)}
+              className="h-4 w-4 accent-primary"
+            />
+            独立研究
+          </label>
+        </Tooltip>
+
+        <Tooltip
+          content="预览本轮将使用的历史内容，并可固定、排除、遗忘或删除具体上下文。"
+          side="bottom"
+        >
+          <button
+            type="button"
+            disabled={disabled || !activeConversationId}
+            onClick={onOpenContext}
+            className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-text hover:bg-surface-alt disabled:opacity-50"
+          >
+            <Eye className="h-4 w-4" />
+            查看上下文
+          </button>
+        </Tooltip>
       </div>
     </section>
   );

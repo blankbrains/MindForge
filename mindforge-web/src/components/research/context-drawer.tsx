@@ -11,11 +11,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { Tooltip } from "@/components/shared/tooltip";
 import { useContextStore } from "@/store/context-store";
-import type {
-  ContextSourceType,
-  ObservableContextItem,
-} from "@/types/context";
+import type { ContextSourceType, ObservableContextItem } from "@/types/context";
 
 interface ContextDrawerProps {
   open: boolean;
@@ -57,14 +55,26 @@ function ContextRow({
   return (
     <li className="border-b border-border py-3 last:border-b-0">
       <div className="flex items-start gap-3">
-        <input
-          type="checkbox"
-          checked={item.included}
-          disabled={selectionDisabled}
-          onChange={(event) => onToggle(event.target.checked)}
-          aria-label={`${item.included ? "排除" : "包含"}${item.title}`}
-          className="mt-1 h-4 w-4 shrink-0 accent-primary"
-        />
+        <Tooltip
+          content={
+            selectionDisabled
+              ? "这是本次研究实际使用的上下文快照，运行完成后不能再修改。"
+              : item.included
+                ? "取消勾选后，该内容不会进入本轮研究上下文。"
+                : "勾选后，该内容会加入本轮研究上下文。"
+          }
+          side="right"
+          className="mt-1 shrink-0"
+        >
+          <input
+            type="checkbox"
+            checked={item.included}
+            disabled={selectionDisabled}
+            onChange={(event) => onToggle(event.target.checked)}
+            aria-label={`${item.included ? "排除" : "包含"}${item.title}`}
+            className="h-4 w-4 accent-primary"
+          />
+        </Tooltip>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="min-w-0 truncate text-sm font-semibold text-text">
@@ -94,42 +104,58 @@ function ContextRow({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {(item.source_type === "message"
-            || item.source_type === "memory") && (
-            <button
-              type="button"
-              title={item.pinned ? "取消固定" : "固定上下文"}
-              aria-label={item.pinned ? "取消固定" : "固定上下文"}
-              onClick={() => onPin(!item.pinned)}
-              className="grid h-8 w-8 place-items-center rounded-md text-text-muted hover:bg-surface-alt hover:text-text"
+          {(item.source_type === "message" ||
+            item.source_type === "memory") && (
+            <Tooltip
+              content={
+                item.pinned
+                  ? "取消固定后，该内容将重新按相关性和预算决定是否使用。"
+                  : "固定后优先保留该内容，不会因相关性排序或预算不足被自动排除。"
+              }
+              side="left"
             >
-              {item.pinned ? (
-                <PinOff className="h-4 w-4" />
-              ) : (
-                <Pin className="h-4 w-4" />
-              )}
-            </button>
+              <button
+                type="button"
+                aria-label={item.pinned ? "取消固定" : "固定上下文"}
+                onClick={() => onPin(!item.pinned)}
+                className="grid h-8 w-8 place-items-center rounded-md text-text-muted hover:bg-surface-alt hover:text-text"
+              >
+                {item.pinned ? (
+                  <PinOff className="h-4 w-4" />
+                ) : (
+                  <Pin className="h-4 w-4" />
+                )}
+              </button>
+            </Tooltip>
           )}
           {item.source_type === "message" && (
             <>
-              <button
-                type="button"
-                title="以后不再使用，保留可见消息"
-                aria-label="以后遗忘该消息"
-                onClick={onForget}
-                className="grid h-8 w-8 place-items-center rounded-md text-text-muted hover:bg-amber-50 hover:text-amber-700 dark:hover:bg-amber-950"
+              <Tooltip
+                content="保留消息供你查看，但以后不再把它用于上下文或记忆。"
+                side="left"
               >
-                <Ban className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                title="彻底删除消息和衍生内容"
-                aria-label="彻底删除该消息"
-                onClick={onDelete}
-                className="grid h-8 w-8 place-items-center rounded-md text-text-muted hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
+                <button
+                  type="button"
+                  aria-label="以后遗忘该消息"
+                  onClick={onForget}
+                  className="grid h-8 w-8 place-items-center rounded-md text-text-muted hover:bg-amber-50 hover:text-amber-700 dark:hover:bg-amber-950"
+                >
+                  <Ban className="h-4 w-4" />
+                </button>
+              </Tooltip>
+              <Tooltip
+                content="永久删除该消息，以及由它生成的摘要、研究产物和长期记忆。"
+                side="left"
               >
-                <Trash2 className="h-4 w-4" />
-              </button>
+                <button
+                  type="button"
+                  aria-label="彻底删除该消息"
+                  onClick={onDelete}
+                  className="grid h-8 w-8 place-items-center rounded-md text-text-muted hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </Tooltip>
             </>
           )}
         </div>
@@ -138,11 +164,7 @@ function ContextRow({
   );
 }
 
-export function ContextDrawer({
-  open,
-  task,
-  onClose,
-}: ContextDrawerProps) {
+export function ContextDrawer({ open, task, onClose }: ContextDrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const {
     contextMode,
@@ -251,15 +273,16 @@ export function ContextDrawer({
                 : `模式：${contextMode === "auto" ? "自动选择" : contextMode === "manual" ? "手动选择" : "关闭"}`}
             </p>
           </div>
-          <button
-            type="button"
-            title="关闭"
-            aria-label="关闭上下文面板"
-            onClick={onClose}
-            className="grid h-9 w-9 place-items-center rounded-md text-text-muted hover:bg-surface-alt hover:text-text"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <Tooltip content="关闭上下文面板" side="left">
+            <button
+              type="button"
+              aria-label="关闭上下文面板"
+              onClick={onClose}
+              className="grid h-9 w-9 place-items-center rounded-md text-text-muted hover:bg-surface-alt hover:text-text"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </Tooltip>
         </header>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
@@ -280,7 +303,10 @@ export function ContextDrawer({
           )}
 
           {error && (
-            <div role="alert" className="mb-4 border-l-2 border-red-500 pl-3 text-sm text-red-700 dark:text-red-300">
+            <div
+              role="alert"
+              className="mb-4 border-l-2 border-red-500 pl-3 text-sm text-red-700 dark:text-red-300"
+            >
               {error}
             </div>
           )}
@@ -334,7 +360,7 @@ export function ContextDrawer({
                             item={item}
                             selectionDisabled={Boolean(snapshot)}
                             onToggle={(included) => {
-                              toggleContextItem(item.context_id, included)
+                              toggleContextItem(item.context_id, included);
                               void previewContext(task);
                             }}
                             onPin={(pinned) =>
@@ -351,7 +377,7 @@ export function ContextDrawer({
                                 )
                               ) {
                                 void forgetMessage(item.source_id).then(() =>
-                                  previewContext(task)
+                                  previewContext(task),
                                 );
                               }
                             }}
@@ -362,7 +388,7 @@ export function ContextDrawer({
                                 )
                               ) {
                                 void deleteMessage(item.source_id).then(() =>
-                                  previewContext(task)
+                                  previewContext(task),
                                 );
                               }
                             }}
@@ -385,7 +411,7 @@ export function ContextDrawer({
                         key={item.context_id}
                         item={item}
                         onToggle={(included) => {
-                          toggleContextItem(item.context_id, included)
+                          toggleContextItem(item.context_id, included);
                           void previewContext(task);
                         }}
                         onPin={(pinned) =>

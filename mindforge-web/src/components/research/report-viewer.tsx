@@ -2,6 +2,7 @@ import type { AgentResult } from "@/types/research";
 import { Link } from "@tanstack/react-router";
 import { Activity, AlertTriangle, Info } from "lucide-react";
 import { StreamingMarkdown } from "@/components/research/streaming-markdown";
+import { Tooltip } from "@/components/shared/tooltip";
 import { normalizeCitationSources } from "@/lib/citations";
 import {
   formatCostEstimate,
@@ -13,23 +14,39 @@ interface Props {
   result: AgentResult | null;
 }
 
+function MetricLabel({
+  children,
+  explanation,
+}: {
+  children: string;
+  explanation: string;
+}) {
+  return (
+    <Tooltip content={explanation} side="top">
+      <span
+        tabIndex={0}
+        className="cursor-help text-text-muted underline decoration-dotted underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+      >
+        {children}
+      </span>
+    </Tooltip>
+  );
+}
+
 export function ReportViewer({ result }: Props) {
   if (!result) return null;
 
-  const metadata =
-    (result.metadata ?? {}) as Record<string, unknown>;
-  const totalTokens = result.token_usage?.total_tokens
-    ?? (
-      (result.token_usage?.prompt_tokens ?? 0)
-      + (result.token_usage?.completion_tokens ?? 0)
-    );
+  const metadata = (result.metadata ?? {}) as Record<string, unknown>;
+  const totalTokens =
+    result.token_usage?.total_tokens ??
+    (result.token_usage?.prompt_tokens ?? 0) +
+      (result.token_usage?.completion_tokens ?? 0);
   const hasTokenUsage = totalTokens > 0;
-  const costStatus = result.cost_status
-    ?? (
-      typeof metadata.cost_status === "string"
-        ? metadata.cost_status
-        : undefined
-    );
+  const costStatus =
+    result.cost_status ??
+    (typeof metadata.cost_status === "string"
+      ? metadata.cost_status
+      : undefined);
   const sources = normalizeCitationSources(result.data?.sources);
   const outcome =
     typeof metadata.outcome === "string" ? metadata.outcome : "success";
@@ -69,16 +86,12 @@ export function ReportViewer({ result }: Props) {
       ? metadata.quality_status
       : null;
   const qualityStatus =
-    explicitQualityStatus
-    ?? (
-      rawQuality !== null
-      && (
-        rawQuality !== 0
-        || (criticScore !== null && typeof criticScore === "object")
-      )
-        ? "evaluated"
-        : "not_evaluated"
-    );
+    explicitQualityStatus ??
+    (rawQuality !== null &&
+    (rawQuality !== 0 ||
+      (criticScore !== null && typeof criticScore === "object"))
+      ? "evaluated"
+      : "not_evaluated");
   const quality = qualityStatus === "evaluated" ? rawQuality : null;
   const fromCache = result.data?.from_cache === true;
   const completedSubtasks =
@@ -148,12 +161,16 @@ export function ReportViewer({ result }: Props) {
       <div className="flex flex-wrap gap-x-6 gap-y-2 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
         {fromCache && (
           <div>
-            <span className="text-text-muted">结果来源：</span>
+            <MetricLabel explanation="该结果来自完全匹配的历史缓存，没有重新执行 Agent 研究流程。">
+              结果来源：
+            </MetricLabel>
             <span className="font-semibold">缓存命中</span>
           </div>
         )}
         <div>
-          <span className="text-text-muted">报告评分：</span>
+          <MetricLabel explanation="Critic 对报告完整性、证据、结构和表达的综合评分。会话型任务和部分模式不会运行评审。">
+            报告评分：
+          </MetricLabel>
           {quality !== null ? (
             <span className="font-semibold text-primary">
               {quality.toFixed(1)} / 10
@@ -166,7 +183,9 @@ export function ReportViewer({ result }: Props) {
         </div>
         {retrievalQuality !== null && (
           <div>
-            <span className="text-text-muted">检索相关性：</span>
+            <MetricLabel explanation="检索结果与当前问题的综合相关程度，用于判断证据是否足够支持回答。">
+              检索相关性：
+            </MetricLabel>
             <span className="font-semibold">
               {retrievalQuality.toFixed(1)} / 10
             </span>
@@ -182,7 +201,9 @@ export function ReportViewer({ result }: Props) {
         )}
         {(result.cost_usd != null || costStatus) && (
           <div>
-            <span className="text-text-muted">估算费用：</span>
+            <MetricLabel explanation="根据模型用量和已配置价格估算，仅供参考；部分供应商或工具调用可能无法计价。">
+              估算费用：
+            </MetricLabel>
             <span className="font-semibold">
               {formatCostEstimate(result.cost_usd, costStatus)}
             </span>
@@ -190,7 +211,9 @@ export function ReportViewer({ result }: Props) {
         )}
         {hasTokenUsage && (
           <div>
-            <span className="text-text-muted">Token：</span>
+            <MetricLabel explanation="本轮模型调用消耗的输入与输出 Token 总量，不包括无法返回用量的调用。">
+              Token：
+            </MetricLabel>
             <span className="font-semibold">
               {formatTokenCount(totalTokens)}
             </span>
@@ -198,7 +221,9 @@ export function ReportViewer({ result }: Props) {
         )}
         {metadata.subtask_count !== undefined && (
           <div>
-            <span className="text-text-muted">子任务：</span>
+            <MetricLabel explanation="Planner 将原始问题拆分出的研究任务数量，以及最终成功完成的数量。">
+              子任务：
+            </MetricLabel>
             {completedSubtasks !== null ? (
               <span className="font-semibold">
                 {completedSubtasks}/{String(metadata.subtask_count)} 完成

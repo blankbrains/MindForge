@@ -1,9 +1,4 @@
-import {
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+import { useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Bot,
   Boxes,
@@ -23,6 +18,7 @@ import {
   Trash2,
   type LucideIcon,
 } from "lucide-react";
+import { Tooltip } from "@/components/shared/tooltip";
 import { API_BASE } from "@/lib/constants";
 import {
   useSettingsStore,
@@ -148,9 +144,7 @@ async function modelDiscoveryError(response: Response): Promise<string> {
 export function LLMProviderPanel() {
   const provider = useSettingsStore((state) => state.llmProvider);
   const configs = useSettingsStore((state) => state.providerConfigs);
-  const dirtyProviders = useSettingsStore(
-    (state) => state.dirtyProviders,
-  );
+  const dirtyProviders = useSettingsStore((state) => state.dirtyProviders);
   const setProvider = useSettingsStore((state) => state.setLLMProvider);
   const updateConfig = useSettingsStore(
     (state) => state.updateLLMProviderConfig,
@@ -158,29 +152,24 @@ export function LLMProviderPanel() {
   const restoreConfig = useSettingsStore(
     (state) => state.restoreLLMProviderConfig,
   );
-  const deleteApiKey = useSettingsStore(
-    (state) => state.deleteLLMApiKey,
-  );
+  const deleteApiKey = useSettingsStore((state) => state.deleteLLMApiKey);
   const [editingKey, setEditingKey] = useState(false);
   const [keyBeforeEdit, setKeyBeforeEdit] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
-  const [showAdvancedInterface, setShowAdvancedInterface] =
-    useState(false);
-  const [modelCatalogs, setModelCatalogs] = useState(
-    createModelCatalogs,
-  );
+  const [showAdvancedInterface, setShowAdvancedInterface] = useState(false);
+  const [modelCatalogs, setModelCatalogs] = useState(createModelCatalogs);
   const modelRequestIds = useRef(createModelRequestIds());
 
   const config = configs[provider];
   const catalog = modelCatalogs[provider];
   const isCustomProvider =
-    provider === "kimi"
-    || provider === "glm"
-    || provider === "openai_compatible"
-    || provider === "local";
+    provider === "kimi" ||
+    provider === "glm" ||
+    provider === "openai_compatible" ||
+    provider === "local";
   const isDirty = dirtyProviders.includes(provider);
   const primaryModel = isCustomProvider
     ? config.defaultModel
@@ -254,8 +243,7 @@ export function LLMProviderPanel() {
 
   const fetchModels = async () => {
     const baseUrl = config.baseUrl.trim();
-    const useStoredApiKey =
-      config.apiKey.startsWith("***") && !editingKey;
+    const useStoredApiKey = config.apiKey.startsWith("***") && !editingKey;
     if (!baseUrl) {
       setModelCatalogs((current) => ({
         ...current,
@@ -267,11 +255,7 @@ export function LLMProviderPanel() {
       }));
       return;
     }
-    if (
-      config.apiKeyRequired
-      && !useStoredApiKey
-      && !config.apiKey.trim()
-    ) {
+    if (config.apiKeyRequired && !useStoredApiKey && !config.apiKey.trim()) {
       setModelCatalogs((current) => ({
         ...current,
         [provider]: {
@@ -320,9 +304,7 @@ export function LLMProviderPanel() {
         .map((item) => ({
           id: item.id.trim(),
           ownedBy:
-            typeof item.owned_by === "string"
-              ? item.owned_by.trim()
-              : "",
+            typeof item.owned_by === "string" ? item.owned_by.trim() : "",
         }));
       setModelCatalogs((current) => {
         if (modelRequestIds.current[provider] !== requestId) {
@@ -515,9 +497,7 @@ export function LLMProviderPanel() {
             placeholder={isCustomProvider ? "留空继承默认模型" : ""}
             models={catalog.models}
             allowEmpty={isCustomProvider}
-            onChange={(criticModel) =>
-              updateConfig(provider, { criticModel })
-            }
+            onChange={(criticModel) => updateConfig(provider, { criticModel })}
           />
           <ModelRouteField
             key={`${provider}-synthesizer`}
@@ -635,8 +615,7 @@ function ProviderPresetPicker({
       nextIndex = (currentIndex + 1) % PROVIDER_PRESETS.length;
     } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
       nextIndex =
-        (currentIndex - 1 + PROVIDER_PRESETS.length)
-        % PROVIDER_PRESETS.length;
+        (currentIndex - 1 + PROVIDER_PRESETS.length) % PROVIDER_PRESETS.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
@@ -716,11 +695,7 @@ function ProviderPresetPicker({
   );
 }
 
-function ModelCatalogMessage({
-  catalog,
-}: {
-  catalog: ModelCatalogState;
-}) {
+function ModelCatalogMessage({ catalog }: { catalog: ModelCatalogState }) {
   if (catalog.status === "success") {
     return (
       <p
@@ -900,9 +875,9 @@ function ModelRouteField({
   }
 
   const manual =
-    manualRequested
-    || Boolean(value && !modelIds.has(value))
-    || (!allowEmpty && !value);
+    manualRequested ||
+    Boolean(value && !modelIds.has(value)) ||
+    (!allowEmpty && !value);
   const selectedValue = manual
     ? customValue
     : value || (allowEmpty ? inheritValue : customValue);
@@ -930,9 +905,7 @@ function ModelRouteField({
         }}
         className={inputClassName}
       >
-        {allowEmpty && (
-          <option value={inheritValue}>继承默认模型</option>
-        )}
+        {allowEmpty && <option value={inheritValue}>继承默认模型</option>}
         {models.map((model) => (
           <option key={model.id} value={model.id}>
             {model.id}
@@ -998,9 +971,7 @@ function ApiKeyField({
       </div>
       {hasStoredKey ? (
         <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2">
-          <div
-            className={`${inputClassName} min-w-0 truncate text-text-muted`}
-          >
+          <div className={`${inputClassName} min-w-0 truncate text-text-muted`}>
             {config.apiKey}
           </div>
           <button
@@ -1010,16 +981,20 @@ function ApiKeyField({
           >
             修改
           </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={deleting}
-            className="rounded-md border border-red-200 p-2 text-red-600 transition hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:hover:bg-red-950"
-            aria-label="删除 API Key"
-            title="删除 API Key"
+          <Tooltip
+            content="从服务端配置中永久删除已保存的 API Key。"
+            side="top"
           >
-            <Trash2 className="h-4 w-4" aria-hidden="true" />
-          </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={deleting}
+              className="rounded-md border border-red-200 p-2 text-red-600 transition hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:hover:bg-red-950"
+              aria-label="删除 API Key"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </Tooltip>
         </div>
       ) : (
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -1033,19 +1008,28 @@ function ApiKeyField({
               onChange={(event) => onChange(event.target.value)}
               className={`${inputClassName} pr-10`}
             />
-            <button
-              type="button"
-              onClick={onToggleVisibility}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-text-muted transition hover:bg-surface hover:text-text"
-              aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
-              title={showKey ? "隐藏 API Key" : "显示 API Key"}
+            <Tooltip
+              content={
+                showKey
+                  ? "隐藏正在输入的 API Key"
+                  : "临时显示正在输入的 API Key"
+              }
+              side="top"
+              className="absolute right-2 top-1/2 -translate-y-1/2"
             >
-              {showKey ? (
-                <EyeOff className="h-4 w-4" aria-hidden="true" />
-              ) : (
-                <Eye className="h-4 w-4" aria-hidden="true" />
-              )}
-            </button>
+              <button
+                type="button"
+                onClick={onToggleVisibility}
+                className="rounded p-1 text-text-muted transition hover:bg-surface hover:text-text"
+                aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
+              >
+                {showKey ? (
+                  <EyeOff className="h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <Eye className="h-4 w-4" aria-hidden="true" />
+                )}
+              </button>
+            </Tooltip>
           </div>
           {editing && (
             <button

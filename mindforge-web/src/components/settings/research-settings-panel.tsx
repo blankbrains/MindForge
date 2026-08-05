@@ -1,4 +1,5 @@
 import { Check, Gauge, ShieldAlert } from "lucide-react";
+import { HelpTooltip } from "@/components/shared/tooltip";
 import {
   useSettingsStore,
   type ResearchMode,
@@ -14,7 +15,11 @@ const modes: Array<{
   detail: string;
 }> = [
   { id: "fast", label: "快速", detail: "单任务，不执行质量精炼" },
-  { id: "balanced", label: "均衡", detail: "简单问题快速回答，复杂问题自动规划" },
+  {
+    id: "balanced",
+    label: "均衡",
+    detail: "简单问题快速回答，复杂问题自动规划",
+  },
   { id: "deep", label: "深度", detail: "完整 DAG、评审与精炼流程" },
 ];
 
@@ -42,12 +47,10 @@ export function ResearchSettingsPanel() {
                 aria-pressed={selected}
                 onClick={() => state.setResearchMode(mode.id)}
                 className={
-                  "relative min-h-20 border px-3 py-3 text-left transition "
-                  + (
-                    selected
-                      ? "border-primary-dark bg-primary/15 shadow-sm ring-2 ring-primary/30 dark:border-primary-light dark:bg-primary/25"
-                      : "border-border bg-surface-alt hover:border-primary/60 hover:bg-primary/5"
-                  )
+                  "relative min-h-20 border px-3 py-3 text-left transition " +
+                  (selected
+                    ? "border-primary-dark bg-primary/15 shadow-sm ring-2 ring-primary/30 dark:border-primary-light dark:bg-primary/25"
+                    : "border-border bg-surface-alt hover:border-primary/60 hover:bg-primary/5")
                 }
               >
                 {selected && (
@@ -58,20 +61,18 @@ export function ResearchSettingsPanel() {
                 )}
                 <span
                   className={
-                    "block pr-6 text-sm font-semibold "
-                    + (
-                      selected
-                        ? "text-primary-dark dark:text-primary-light"
-                        : ""
-                    )
+                    "block pr-6 text-sm font-semibold " +
+                    (selected
+                      ? "text-primary-dark dark:text-primary-light"
+                      : "")
                   }
                 >
                   {mode.label}
                 </span>
                 <span
                   className={
-                    "mt-1 block text-xs leading-5 "
-                    + (selected ? "text-text" : "text-text-muted")
+                    "mt-1 block text-xs leading-5 " +
+                    (selected ? "text-text" : "text-text-muted")
                   }
                 >
                   {mode.detail}
@@ -111,6 +112,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-max-subtasks"
             label="最大子任务数"
+            help="Planner 最多可把一个研究问题拆成多少个子任务。数值越高，覆盖面可能更广，但耗时和模型费用也会增加。"
             value={state.maxSubtasks}
             min={1}
             max={20}
@@ -119,6 +121,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-max-tool-calls"
             label="工具调用总预算"
+            help="一次研究中所有 Researcher 合计可执行的工具调用上限，包括知识库检索、联网搜索和代码执行。"
             value={state.maxToolCallsTotal}
             min={1}
             max={100}
@@ -127,6 +130,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-queue-timeout"
             label="工具排队超时（秒）"
+            help="系统并发槽位占满时，任务最多等待多久。超过后会标记为排队超时，而不是继续无限等待。"
             detail="等待研究或工具并发槽位的最长时间"
             value={state.queueTimeout}
             min={1}
@@ -136,6 +140,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-max-iter"
             label="Researcher 最大轮次"
+            help="单个子任务中 Researcher 可进行的思考、调用工具和整理证据轮次上限。"
             value={state.maxIterations}
             min={1}
             max={20}
@@ -144,6 +149,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-refine-rounds"
             label="最大精炼轮次"
+            help="Critic 评分低于阈值时，最多允许重写报告多少次。设为 0 仍可评审，但不会触发重写。"
             value={state.maxRefineRounds}
             min={0}
             max={5}
@@ -152,6 +158,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-subtask-timeout"
             label="子任务超时（秒）"
+            help="单个研究子任务允许执行的最长时间，超时后其他可继续完成的子任务仍会运行。"
             value={state.subtaskTimeout}
             min={10}
             max={600}
@@ -160,6 +167,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-llm-timeout"
             label="单次模型调用超时（秒）"
+            help="一次模型请求在无新响应时允许等待的最长时间。流式响应每收到新事件会重新计时。"
             value={state.llmRequestTimeout}
             min={5}
             max={600}
@@ -168,6 +176,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="sandbox-timeout"
             label="代码执行超时（秒）"
+            help="code_executor 单次运行的最长时间，用于阻止异常代码长期占用执行资源。"
             detail="单次 code_executor 沙箱运行的最长时间"
             value={state.sandboxTimeout}
             min={5}
@@ -177,6 +186,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-research-timeout"
             label="研究总超时（秒）"
+            help="从规划到最终报告的整条研究链路最长执行时间，包括检索、工具、评审和精炼。"
             value={state.researchTimeout}
             min={30}
             max={3600}
@@ -185,6 +195,7 @@ export function ResearchSettingsPanel() {
           <NumberField
             id="agent-threshold"
             label="Critic 评判阈值"
+            help="最终报告评分低于该值时会进入精炼流程，具体是否精炼还取决于研究模式和最大精炼轮次。问候等会话型任务不会执行 Critic。"
             value={state.criticThreshold}
             min={0}
             max={10}
@@ -239,6 +250,7 @@ function ToggleRow({
 function NumberField({
   id,
   label,
+  help,
   value,
   min,
   max,
@@ -248,6 +260,7 @@ function NumberField({
 }: {
   id: string;
   label: string;
+  help?: string;
   value: number;
   min: number;
   max: number;
@@ -258,12 +271,12 @@ function NumberField({
   const descriptionId = detail ? `${id}-description` : undefined;
   return (
     <div className="block">
-      <label
-        htmlFor={id}
-        className="mb-1.5 block text-sm font-medium"
-      >
-        {label}
-      </label>
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <label htmlFor={id} className="text-sm font-medium">
+          {label}
+        </label>
+        {help && <HelpTooltip content={help} label={`${label}说明`} />}
+      </div>
       <input
         id={id}
         type="number"

@@ -1,8 +1,4 @@
-import {
-  useDeferredValue,
-  useMemo,
-  useState,
-} from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   Activity,
@@ -31,11 +27,8 @@ import {
   useTraceList,
 } from "@/hooks/use-observability";
 import { Modal } from "@/components/shared/modal";
-import {
-  cn,
-  formatCostEstimate,
-  formatTokenCount,
-} from "@/lib/utils";
+import { Tooltip } from "@/components/shared/tooltip";
+import { cn, formatCostEstimate, formatTokenCount } from "@/lib/utils";
 import type {
   TraceFailure,
   TraceObservation,
@@ -122,7 +115,10 @@ function buildObservationRows(
 ): ObservationRow[] {
   const byId = new Map(observations.map((item) => [item.span_id, item]));
   const depthCache = new Map<string, number>();
-  const getDepth = (item: TraceObservation, visited = new Set<string>()): number => {
+  const getDepth = (
+    item: TraceObservation,
+    visited = new Set<string>(),
+  ): number => {
     const cached = depthCache.get(item.span_id);
     if (cached !== undefined) return cached;
     if (!item.parent_id || visited.has(item.span_id)) return 0;
@@ -164,9 +160,9 @@ function TraceListItem({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold">
-            {trace.display_name
-              || trace.task_preview
-              || observationLabel(trace.name)}
+            {trace.display_name ||
+              trace.task_preview ||
+              observationLabel(trace.name)}
           </p>
           <p className="mt-1 truncate font-mono text-[11px] text-text-muted">
             {trace.trace_id}
@@ -196,9 +192,7 @@ export function ObservabilityPage() {
   const [searchInput, setSearchInput] = useState("");
   const [statusFilter, setStatusFilter] = useState<TraceStatus | "">("");
   const [copied, setCopied] = useState(false);
-  const [deleteMode, setDeleteMode] = useState<"selected" | "all" | null>(
-    null,
-  );
+  const [deleteMode, setDeleteMode] = useState<"selected" | "all" | null>(null);
   const deferredSearch = useDeferredValue(searchInput);
   const statusQuery = useObservabilityStatus();
   const listQuery = useTraceList({
@@ -206,9 +200,7 @@ export function ObservabilityPage() {
     status: statusFilter,
   });
   const selectedTraceId =
-    routeSearch.traceId
-    ?? listQuery.data?.traces[0]?.trace_id
-    ?? null;
+    routeSearch.traceId ?? listQuery.data?.traces[0]?.trace_id ?? null;
   const detailQuery = useTraceDetail(selectedTraceId);
   const deleteTrace = useDeleteTrace();
   const clearTraces = useClearTraces();
@@ -228,10 +220,7 @@ export function ObservabilityPage() {
     [detailQuery.data?.failures],
   );
   const traceStart = detailQuery.data?.summary.start_time ?? 0;
-  const traceDuration = Math.max(
-    detailQuery.data?.summary.duration_ms ?? 0,
-    1,
-  );
+  const traceDuration = Math.max(detailQuery.data?.summary.duration_ms ?? 0, 1);
 
   const selectTrace = (traceId: string) => {
     void navigate({
@@ -275,13 +264,8 @@ export function ObservabilityPage() {
 
   const status = statusQuery.data;
   const summary = detailQuery.data?.summary;
-  const failureSummary =
-    summary?.failure_summary
-    ?? summary?.error
-    ?? null;
-  const selectedTraceStatus = summary
-    ? effectiveTraceStatus(summary)
-    : "error";
+  const failureSummary = summary?.failure_summary ?? summary?.error ?? null;
+  const selectedTraceStatus = summary ? effectiveTraceStatus(summary) : "error";
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-5">
@@ -293,32 +277,40 @@ export function ObservabilityPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setDeleteMode("all")}
-            disabled={!listQuery.data?.traces.length}
-            title="清空本地 Trace"
-            aria-label="清空本地 Trace"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface text-text-muted transition-colors hover:border-red-200 hover:text-red-600 disabled:opacity-40"
+          <Tooltip
+            content="删除全部本地执行链路；研究历史和 Langfuse 远程数据不受影响。"
+            side="bottom"
           >
-            <Trash2 className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={statusQuery.isFetching || listQuery.isFetching}
-            title="刷新追踪数据"
-            aria-label="刷新追踪数据"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface text-text-muted transition-colors hover:bg-surface-alt hover:text-text disabled:opacity-50"
+            <button
+              type="button"
+              onClick={() => setDeleteMode("all")}
+              disabled={!listQuery.data?.traces.length}
+              aria-label="清空本地 Trace"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface text-text-muted transition-colors hover:border-red-200 hover:text-red-600 disabled:opacity-40"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </Tooltip>
+          <Tooltip
+            content="重新读取可观测状态、Trace 列表和当前链路详情。"
+            side="bottom"
           >
-            <RefreshCw
-              className={cn(
-                "h-4 w-4",
-                (statusQuery.isFetching || listQuery.isFetching)
-                  && "animate-spin",
-              )}
-            />
-          </button>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={statusQuery.isFetching || listQuery.isFetching}
+              aria-label="刷新追踪数据"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface text-text-muted transition-colors hover:bg-surface-alt hover:text-text disabled:opacity-50"
+            >
+              <RefreshCw
+                className={cn(
+                  "h-4 w-4",
+                  (statusQuery.isFetching || listQuery.isFetching) &&
+                    "animate-spin",
+                )}
+              />
+            </button>
+          </Tooltip>
         </div>
       </header>
 
@@ -421,7 +413,10 @@ export function ObservabilityPage() {
                 正在加载 Trace
               </div>
             ) : listQuery.isError ? (
-              <div role="alert" className="px-5 py-12 text-center text-sm text-red-600">
+              <div
+                role="alert"
+                className="px-5 py-12 text-center text-sm text-red-600"
+              >
                 Trace 列表加载失败。
               </div>
             ) : listQuery.data?.traces.length ? (
@@ -483,9 +478,9 @@ export function ObservabilityPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="text-lg font-semibold">
-                        {summary.display_name
-                          || summary.task_preview
-                          || observationLabel(summary.name)}
+                        {summary.display_name ||
+                          summary.task_preview ||
+                          observationLabel(summary.name)}
                       </h2>
                       <span
                         className={cn(
@@ -500,19 +495,25 @@ export function ObservabilityPage() {
                       <code className="break-all text-xs text-text-muted">
                         {summary.trace_id}
                       </code>
-                      <button
-                        type="button"
-                        onClick={() => void copyTraceId()}
-                        title="复制 Trace ID"
-                        aria-label="复制 Trace ID"
-                        className="rounded p-1 text-text-muted hover:bg-surface-alt hover:text-text"
+                      <Tooltip
+                        content={
+                          copied ? "Trace ID 已复制" : "复制完整 Trace ID"
+                        }
+                        side="top"
                       >
-                        {copied ? (
-                          <Check className="h-4 w-4 text-emerald-600" />
-                        ) : (
-                          <Copy className="h-4 w-4" />
-                        )}
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => void copyTraceId()}
+                          aria-label="复制 Trace ID"
+                          className="rounded p-1 text-text-muted hover:bg-surface-alt hover:text-text"
+                        >
+                          {copied ? (
+                            <Check className="h-4 w-4 text-emerald-600" />
+                          ) : (
+                            <Copy className="h-4 w-4" />
+                          )}
+                        </button>
+                      </Tooltip>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -527,15 +528,19 @@ export function ObservabilityPage() {
                         <ExternalLink className="h-4 w-4" />
                       </a>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => setDeleteMode("selected")}
-                      title="删除当前 Trace"
-                      aria-label="删除当前 Trace"
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-text-muted hover:border-red-200 hover:text-red-600"
+                    <Tooltip
+                      content="只删除当前本地执行链路；研究历史和 Langfuse 远程数据不受影响。"
+                      side="left"
                     >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteMode("selected")}
+                        aria-label="删除当前 Trace"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-text-muted hover:border-red-200 hover:text-red-600"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </Tooltip>
                   </div>
                 </div>
 
@@ -543,19 +548,19 @@ export function ObservabilityPage() {
                   <div
                     className={cn(
                       "mt-4 border px-4 py-3 text-sm",
-                       selectedTraceStatus === "degraded"
-                       || selectedTraceStatus === "warning"
-                       || selectedTraceStatus === "success"
+                      selectedTraceStatus === "degraded" ||
+                        selectedTraceStatus === "warning" ||
+                        selectedTraceStatus === "success"
                         ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
                         : "border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300",
                     )}
                   >
                     <span className="font-semibold">
-                       {selectedTraceStatus === "degraded"
-                         ? "降级原因汇总："
-                         : selectedTraceStatus === "warning"
-                           || selectedTraceStatus === "success"
-                           ? "链路异常汇总（最终已恢复）："
+                      {selectedTraceStatus === "degraded"
+                        ? "降级原因汇总："
+                        : selectedTraceStatus === "warning" ||
+                            selectedTraceStatus === "success"
+                          ? "链路异常汇总（最终已恢复）："
                           : "失败原因汇总："}
                     </span>
                     {failureSummary}
@@ -577,10 +582,7 @@ export function ObservabilityPage() {
                     ["Token", formatTokenCount(summary.total_tokens)],
                     [
                       "费用",
-                      formatCostEstimate(
-                        summary.cost_usd,
-                        summary.cost_status,
-                      ),
+                      formatCostEstimate(summary.cost_usd, summary.cost_status),
                     ],
                   ].map(([label, value]) => (
                     <div key={label} className="bg-surface px-3 py-3">
@@ -610,14 +612,12 @@ export function ObservabilityPage() {
                   ) : (
                     observations.map((observation) => {
                       const failure = failuresBySpan.get(observation.span_id);
-                      const isFailure = Boolean(
-                        failure || observation.error,
-                      );
+                      const isFailure = Boolean(failure || observation.error);
                       const offset = Math.max(
                         0,
-                        ((observation.start_time - traceStart) * 1000
-                          / traceDuration)
-                          * 100,
+                        (((observation.start_time - traceStart) * 1000) /
+                          traceDuration) *
+                          100,
                       );
                       const width = Math.max(
                         1,
@@ -627,11 +627,10 @@ export function ObservabilityPage() {
                         ),
                       );
                       const hasPayload = Boolean(
-                        isFailure
-                        ||
-                        observation.input !== undefined
-                        || observation.output !== undefined
-                        || Object.keys(observation.metadata).length,
+                        isFailure ||
+                        observation.input !== undefined ||
+                        observation.output !== undefined ||
+                        Object.keys(observation.metadata).length,
                       );
                       return (
                         <details
@@ -649,14 +648,14 @@ export function ObservabilityPage() {
                           >
                             <span
                               className="flex min-w-0 items-center gap-2"
-                              style={{ paddingLeft: `${observation.depth * 18}px` }}
+                              style={{
+                                paddingLeft: `${observation.depth * 18}px`,
+                              }}
                             >
                               <span
                                 className={cn(
                                   "shrink-0",
-                                  isFailure
-                                    ? "text-red-600"
-                                    : "text-primary",
+                                  isFailure ? "text-red-600" : "text-primary",
                                 )}
                               >
                                 <ObservationIcon name={observation.name} />
@@ -706,17 +705,25 @@ export function ObservabilityPage() {
                                   </p>
                                   <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
                                     <div>
-                                      <dt className="inline opacity-70">阶段：</dt>
-                                      <dd className="inline">{failure.stage}</dd>
+                                      <dt className="inline opacity-70">
+                                        阶段：
+                                      </dt>
+                                      <dd className="inline">
+                                        {failure.stage}
+                                      </dd>
                                     </div>
                                     <div>
-                                      <dt className="inline opacity-70">错误码：</dt>
+                                      <dt className="inline opacity-70">
+                                        错误码：
+                                      </dt>
                                       <dd className="inline font-mono">
                                         {failure.error_code}
                                       </dd>
                                     </div>
                                     <div>
-                                      <dt className="inline opacity-70">类型：</dt>
+                                      <dt className="inline opacity-70">
+                                        类型：
+                                      </dt>
                                       <dd className="inline font-mono">
                                         {failure.error_type}
                                       </dd>
@@ -726,7 +733,9 @@ export function ObservabilityPage() {
                                         <dt className="inline opacity-70">
                                           Agent：
                                         </dt>
-                                        <dd className="inline">{failure.agent}</dd>
+                                        <dd className="inline">
+                                          {failure.agent}
+                                        </dd>
                                       </div>
                                     )}
                                     {failure.model && (
@@ -734,7 +743,9 @@ export function ObservabilityPage() {
                                         <dt className="inline opacity-70">
                                           模型：
                                         </dt>
-                                        <dd className="inline">{failure.model}</dd>
+                                        <dd className="inline">
+                                          {failure.model}
+                                        </dd>
                                       </div>
                                     )}
                                     {failure.attempt && (
@@ -759,7 +770,10 @@ export function ObservabilityPage() {
                                   const text = payloadText(value);
                                   if (!text || text === "{}") return null;
                                   return (
-                                    <div key={String(label)} className="min-w-0">
+                                    <div
+                                      key={String(label)}
+                                      className="min-w-0"
+                                    >
                                       <p className="mb-2 text-xs font-semibold text-text-muted">
                                         {String(label)}
                                       </p>
