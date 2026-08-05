@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator, Optional
 from mindforge.agents.base import AgentResult
 from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
 from mindforge.agents.researcher import ResearcherAgent
+from mindforge.agents.response_guidance import is_conversational_task
 from mindforge.agents.critic import CriticAgent, CriticScore
 from mindforge.agents.synthesizer import SynthesizerAgent
 from mindforge.tools.citation_verifier import CitationVerifier
@@ -1303,7 +1304,9 @@ class Orchestrator:
         task: str,
         plan: ResearchPlan,
     ) -> bool:
-        del task, plan
+        del plan
+        if is_conversational_task(task):
+            return False
         return self._research_mode() != "fast"
 
     def _max_refine_rounds(self, plan: ResearchPlan) -> int:

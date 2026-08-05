@@ -1215,6 +1215,64 @@ def test_balanced_single_subtask_honors_configured_refinement() -> None:
     assert orchestrator._max_refine_rounds(plan) == 1
 
 
+@pytest.mark.asyncio
+async def test_conversational_task_skips_critic_and_refinement_in_both_paths() -> None:
+    class Planner:
+        async def run(self, task: str) -> ResearchPlan:
+            return ResearchPlan(
+                plan_id="greeting",
+                original_task=task,
+                subtasks=[SubTask(task_id="t1", description=task)],
+            )
+
+    class Researcher:
+        async def run(self, task: str, *, context=None) -> AgentResult:
+            del context
+            return AgentResult(
+                agent_name="researcher",
+                output=f"{task}！有什么可以帮你？",
+            )
+
+    class UnexpectedCritic:
+        async def evaluate(self, **_kwargs) -> CriticScore:
+            raise AssertionError("conversational tasks must skip Critic")
+
+    orchestrator = Orchestrator(
+        planner=Planner(),
+        researcher=Researcher(),
+        synthesizer=SimpleNamespace(),
+        critic=UnexpectedCritic(),
+    )
+    orchestrator._settings = SimpleNamespace(
+        agent=SimpleNamespace(
+            research_mode="balanced",
+            max_refine_rounds=2,
+            research_timeout=10,
+            subtask_timeout=5,
+            queue_timeout=5,
+            sse_heartbeat_seconds=1,
+            stream_chunk_size=512,
+            research_context_max_chars=12_000,
+        ),
+        llm=SimpleNamespace(llm_provider="test"),
+        observability=SimpleNamespace(enable_tracing=False),
+    )
+
+    result = await orchestrator.run("你好")
+    events = [event async for event in orchestrator.stream_run("你好")]
+    streamed_result = next(
+        event["result"] for event in events if event["type"] == "done"
+    )
+
+    assert result.success is True
+    assert result.metadata["quality_status"] == "not_evaluated"
+    assert result.metadata["refine_rounds"] == 0
+    assert not any(event["type"] == "critic_feedback" for event in events)
+    assert not any(event["type"] == "refining" for event in events)
+    assert streamed_result.metadata["quality_status"] == "not_evaluated"
+    assert streamed_result.metadata["refine_rounds"] == 0
+
+
 def test_report_without_sources_drops_unbacked_citation_markers() -> None:
     report = (
         "Python 适合快速迭代 [1]，Java 适合企业集成 [2]。\n\n"

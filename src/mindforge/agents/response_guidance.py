@@ -134,6 +134,12 @@ def _normalize(task: str) -> str:
     return " ".join(task.strip().casefold().split())
 
 
+def is_conversational_task(task: str) -> bool:
+    """Return whether a task is a bounded greeting or social exchange."""
+    normalized = _normalize(task)
+    return bool(normalized) and normalized in _CONVERSATIONAL_TASKS
+
+
 def classify_response_depth(
     task: str,
     *,
@@ -145,7 +151,7 @@ def classify_response_depth(
     normalized = _normalize(task)
     if task_type == "code":
         return "code"
-    if not normalized or normalized in _CONVERSATIONAL_TASKS:
+    if not normalized or is_conversational_task(task):
         return "concise"
     if any(marker in normalized for marker in _CONCISE_MARKERS):
         return "concise"
