@@ -23,6 +23,7 @@ from mindforge.tools.web_search import WebSearchTool
 from mindforge.config import get_settings
 from mindforge.memory import WorkingMemory
 from mindforge.models.base import LLMFactory
+from mindforge.context.models import ContextBundle, ResearchRequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,8 @@ class Orchestrator:
         task: str,
         *,
         create_root_trace: bool = True,
+        request_context: ResearchRequestContext | None = None,
+        context_bundle: ContextBundle | None = None,
     ) -> AgentResult:
         """Execute one research request inside a top-level trace."""
         trace_context = (
@@ -169,13 +172,38 @@ class Orchestrator:
         )
         with trace_context as root_span:
             if root_span is not None:
-                root_span.input = {"task": task}
-            result = await self._run_with_limit(task)
+                root_span.input = {
+                    "task": task,
+                    "conversation_id": (
+                        request_context.conversation_id
+                        if request_context is not None
+                        else None
+                    ),
+                    "context_fingerprint": (
+                        context_bundle.fingerprint
+                        if context_bundle is not None
+                        else None
+                    ),
+                }
+            execution_task = (
+                context_bundle.standalone_query
+                if context_bundle is not None
+                else task
+            )
+            result = await self._run_with_limit(
+                execution_task,
+                context_bundle=context_bundle,
+            )
             self._attach_trace_id(result)
             self._finish_root_span(root_span, result)
             return result
 
-    async def _run_with_limit(self, task: str) -> AgentResult:
+    async def _run_with_limit(
+        self,
+        task: str,
+        *,
+        context_bundle: ContextBundle | None = None,
+    ) -> AgentResult:
         """Execute one research request within the process-wide budget."""
         queue_timeout = getattr(
             self._settings.agent,
@@ -197,11 +225,18 @@ class Orchestrator:
                 data={"error": "research_queue_timeout"},
             )
         try:
-            return await self._run_unlimited(task)
+            if context_bundle is None:
+                return await self._run_unlimited(task)
+            return await self._run_unlimited(task, context_bundle=context_bundle)
         finally:
             self._research_semaphore.release()
 
-    async def _run_unlimited(self, task: str) -> AgentResult:
+    async def _run_unlimited(
+        self,
+        task: str,
+        *,
+        context_bundle: ContextBundle | None = None,
+    ) -> AgentResult:
         """Execute the full research pipeline for *task*.
 
         Returns an AgentResult with the final report in ``output`` and
@@ -216,9 +251,10 @@ class Orchestrator:
         # Step 0: Check episodic memory for cached results
         # ------------------------------------------------------------------
         cached_result = await self._recall_cached_result(
-            task,
+            self._cache_task_key(task, context_bundle),
             start_time=start_time,
             pipeline_log=pipeline_log,
+            fingerprint_task=task,
         )
         if cached_result is not None:
             return cached_result
@@ -228,14 +264,26 @@ class Orchestrator:
         # ------------------------------------------------------------------
         timeout_seconds = self._settings.agent.research_timeout
         try:
-            core_result = await asyncio.wait_for(
+            pipeline = (
                 self._run_pipeline(
                     task,
                     total_usage,
                     total_cost,
                     pipeline_log,
                     start_time,
-                ),
+                )
+                if context_bundle is None
+                else self._run_pipeline(
+                    task,
+                    total_usage,
+                    total_cost,
+                    pipeline_log,
+                    start_time,
+                    context_bundle=context_bundle,
+                )
+            )
+            core_result = await asyncio.wait_for(
+                pipeline,
                 timeout=timeout_seconds,
             )
             return core_result
@@ -291,9 +339,14 @@ class Orchestrator:
         total_cost: dict[str, Any],
         pipeline_log: dict[str, Any],
         start_time: float,
+        *,
+        context_bundle: ContextBundle | None = None,
     ) -> AgentResult:
         """Core pipeline steps — separated for timeout wrapping."""
-        working_memory = await self._create_working_memory(task)
+        working_memory = await self._create_working_memory(
+            task,
+            context_bundle=context_bundle,
+        )
 
         # ------------------------------------------------------------------
         # Step 1: Plan — decompose into DAG
@@ -583,7 +636,13 @@ class Orchestrator:
             refinement_failure=refinement_failure,
             citation_verification=citation_verification,
         )
-        await self._store_memories(task, result)
+        self._attach_context_metadata(result, context_bundle)
+        await self._store_memories(
+            self._cache_task_key(task, context_bundle),
+            result,
+            semantic_task=(None if context_bundle is not None else task),
+            fingerprint_task=task,
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -595,6 +654,8 @@ class Orchestrator:
         task: str,
         *,
         create_root_trace: bool = True,
+        request_context: ResearchRequestContext | None = None,
+        context_bundle: ContextBundle | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream one research request inside a top-level trace."""
         final_result: AgentResult | None = None
@@ -606,10 +667,30 @@ class Orchestrator:
         )
         with trace_context as root_span:
             if root_span is not None:
-                root_span.input = {"task": task}
+                root_span.input = {
+                    "task": task,
+                    "conversation_id": (
+                        request_context.conversation_id
+                        if request_context is not None
+                        else None
+                    ),
+                    "context_fingerprint": (
+                        context_bundle.fingerprint
+                        if context_bundle is not None
+                        else None
+                    ),
+                }
+            execution_task = (
+                context_bundle.standalone_query
+                if context_bundle is not None
+                else task
+            )
             try:
                 async with aclosing(
-                    self._stream_run_with_limit(task)
+                    self._stream_run_with_limit(
+                        execution_task,
+                        context_bundle=context_bundle,
+                    )
                 ) as limited_stream:
                     async for event in limited_stream:
                         trace_id = self._current_trace_id()
@@ -639,6 +720,8 @@ class Orchestrator:
     async def _stream_run_with_limit(
         self,
         task: str,
+        *,
+        context_bundle: ContextBundle | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream the research pipeline under the configured overall timeout."""
         queue_timeout = getattr(
@@ -671,7 +754,17 @@ class Orchestrator:
             stream_finished = object()
 
             async def pump_events() -> None:
-                async with aclosing(self._stream_pipeline(task)) as pipeline:
+                pipeline_source = (
+                    self._stream_pipeline(task)
+                    if context_bundle is None
+                    else self._stream_pipeline(
+                        task,
+                        context_bundle=context_bundle,
+                    )
+                )
+                async with aclosing(
+                    pipeline_source
+                ) as pipeline:
                     try:
                         async for event in pipeline:
                             event_queue.put_nowait(event)
@@ -727,6 +820,8 @@ class Orchestrator:
     async def _stream_pipeline(
         self,
         task: str,
+        *,
+        context_bundle: ContextBundle | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Execute the pipeline and yield events for streaming UIs.
 
@@ -747,13 +842,17 @@ class Orchestrator:
 
         # --- Step 0: Memory check ---
         cached_result = await self._recall_cached_result(
-            task,
+            self._cache_task_key(task, context_bundle),
             start_time=start_time,
+            fingerprint_task=task,
         )
         if cached_result is not None:
             yield {"type": "done", "result": cached_result}
             return
-        working_memory = await self._create_working_memory(task)
+        working_memory = await self._create_working_memory(
+            task,
+            context_bundle=context_bundle,
+        )
 
         # --- Step 1: Plan ---
         with self._agent_span("planner") as planner_span:
@@ -1045,7 +1144,13 @@ class Orchestrator:
             refinement_failure=refinement_failure,
             citation_verification=citation_verification,
         )
-        await self._store_memories(task, result)
+        self._attach_context_metadata(result, context_bundle)
+        await self._store_memories(
+            self._cache_task_key(task, context_bundle),
+            result,
+            semantic_task=(None if context_bundle is not None else task),
+            fingerprint_task=task,
+        )
         yield {"type": "done", "result": result}
 
     # ------------------------------------------------------------------
@@ -1665,6 +1770,7 @@ class Orchestrator:
         *,
         start_time: float,
         pipeline_log: dict[str, Any] | None = None,
+        fingerprint_task: str | None = None,
     ) -> AgentResult | None:
         if self._episodic_memory is None:
             return None
@@ -1711,7 +1817,7 @@ class Orchestrator:
                 return None
             if (
                 result.metadata.get("research_cache_fingerprint")
-                != self._research_cache_fingerprint()
+                != self._research_cache_fingerprint(fingerprint_task)
             ):
                 return None
             cached_generation_usage = dict(result.token_usage)
@@ -1770,7 +1876,7 @@ class Orchestrator:
             for source in sources
         )
 
-    def _research_cache_fingerprint(self) -> str:
+    def _research_cache_fingerprint(self, task: str | None = None) -> str:
         """Identify the execution strategy that produced a cached report."""
         settings = self._settings
         llm = getattr(settings, "llm", None)
@@ -1850,6 +1956,8 @@ class Orchestrator:
                     "native_failure_cooldown_seconds",
                 )
             },
+            "knowledge_index_signature": self._knowledge_index_signature(),
+            "freshness_bucket": self._freshness_bucket(task),
         }
         serialized = json.dumps(
             payload,
@@ -1859,11 +1967,95 @@ class Orchestrator:
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _freshness_bucket(task: str | None) -> str | None:
+        if not task:
+            return None
+        lowered = task.lower()
+        volatile = (
+            "今天",
+            "当前",
+            "最新",
+            "实时",
+            "价格",
+            "天气",
+            "比分",
+            "股价",
+            "today",
+            "latest",
+            "current",
+            "live",
+        )
+        if not any(marker in lowered for marker in volatile):
+            return None
+        return time.strftime("%Y-%m-%dT%H", time.gmtime())
+
+    @staticmethod
+    def _knowledge_index_signature() -> str:
+        """Hash enabled indexed-document revisions without making DB mandatory."""
+        try:
+            from mindforge.db import DocumentCatalog, SessionLocal
+
+            with SessionLocal() as db:
+                rows = (
+                    db.query(
+                        DocumentCatalog.doc_id,
+                        DocumentCatalog.index_signature,
+                        DocumentCatalog.updated_at,
+                    )
+                    .filter(
+                        DocumentCatalog.enabled.is_(True),
+                        DocumentCatalog.status == "indexed",
+                    )
+                    .order_by(DocumentCatalog.doc_id.asc())
+                    .all()
+                )
+            payload = [
+                (
+                    str(row.doc_id),
+                    str(row.index_signature or ""),
+                    row.updated_at.isoformat() if row.updated_at else "",
+                )
+                for row in rows
+            ]
+            return hashlib.sha256(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        except Exception:
+            return "unavailable"
+
+    def _cache_task_key(
+        self,
+        task: str,
+        context_bundle: ContextBundle | None,
+    ) -> str:
+        if context_bundle is None:
+            return task
+        payload = {
+            "task": task.strip(),
+            "context": context_bundle.fingerprint,
+            "execution": self._research_cache_fingerprint(task),
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return f"context-cache-v1:{digest}"
+
     async def _create_working_memory(
         self,
         task: str,
+        *,
+        context_bundle: ContextBundle | None = None,
     ) -> WorkingMemory:
         memory = WorkingMemory()
+        if context_bundle is not None:
+            memory.add_context(context_bundle.to_working_chunks())
+            return memory
         if self._semantic_memory is None:
             return memory
         try:
@@ -1930,6 +2122,9 @@ class Orchestrator:
         self,
         task: str,
         result: AgentResult,
+        *,
+        semantic_task: str | None = None,
+        fingerprint_task: str | None = None,
     ) -> None:
         outcome = str(result.metadata.get("outcome") or "").strip().lower()
         grounding_status = str(
@@ -1945,13 +2140,17 @@ class Orchestrator:
                 result.metadata = {
                     **result.metadata,
                     "research_cache_fingerprint": (
-                        self._research_cache_fingerprint()
+                        self._research_cache_fingerprint(fingerprint_task)
                     ),
                 }
                 await self._episodic_memory.store(task, result)
             except Exception as exc:
                 logger.warning("Episodic memory store failed: %s", exc)
-        if self._semantic_memory is not None and is_complete_success:
+        if (
+            self._semantic_memory is not None
+            and is_complete_success
+            and semantic_task is not None
+        ):
             quality = result.metadata.get("quality")
             quality_status = result.metadata.get("quality_status")
             confidence = (
@@ -1966,13 +2165,36 @@ class Orchestrator:
             ):
                 try:
                     await self._semantic_memory.store(
-                        task,
+                        semantic_task,
                         result.output,
                         sources=result.data.get("sources", []),
                         confidence=confidence,
                     )
                 except Exception as exc:
                     logger.warning("Semantic memory store failed: %s", exc)
+
+    @staticmethod
+    def _attach_context_metadata(
+        result: AgentResult,
+        context_bundle: ContextBundle | None,
+    ) -> None:
+        if context_bundle is None:
+            return
+        result.data = {
+            **result.data,
+            "context_snapshot_id": context_bundle.snapshot_id,
+            "context_items_used": len(context_bundle.items),
+        }
+        result.metadata = {
+            **result.metadata,
+            "context_snapshot_id": context_bundle.snapshot_id,
+            "context_token_usage": context_bundle.used_tokens,
+            "context_fingerprint": context_bundle.fingerprint,
+            "reused_artifact_count": sum(
+                item.source_type == "artifact"
+                for item in context_bundle.items
+            ),
+        }
 
     def _build_success_result(
         self,

@@ -54,6 +54,7 @@ from mindforge.api.schemas import (
     TraceDetailResponse,
     TraceListResponse,
 )
+from mindforge.api.context_routes import router as context_router
 from mindforge.agents.base import AgentResult
 from mindforge.agents.orchestrator import Orchestrator
 from mindforge.ingestion.parsers import DocumentParser, DocumentParserError
@@ -91,6 +92,7 @@ from mindforge import __version__
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+router.include_router(context_router)
 _orchestrator: Orchestrator | None = None
 _ORCHESTRATOR_LOCK = threading.Lock()
 _ENV_FILE_LOCK = threading.RLock()
@@ -1089,21 +1091,124 @@ def _call_orchestrator_method(
     orchestrator: Any,
     method_name: str,
     task: str,
+    *,
+    request_context: Any = None,
+    context_bundle: Any = None,
 ) -> Any:
     """Call an orchestrator entry point without creating a second root trace."""
     method = getattr(orchestrator, method_name)
     try:
-        parameters = inspect.signature(method).parameters.values()
+        parameters = list(inspect.signature(method).parameters.values())
+        parameter_names = {parameter.name for parameter in parameters}
+        supports_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
         supports_trace_control = any(
             parameter.name == "create_root_trace"
             or parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in parameters
         )
     except (TypeError, ValueError):
+        parameter_names = set()
+        supports_kwargs = False
         supports_trace_control = False
+    kwargs: dict[str, Any] = {}
     if supports_trace_control:
-        return method(task, create_root_trace=False)
-    return method(task)
+        kwargs["create_root_trace"] = False
+    if request_context is not None and (
+        "request_context" in parameter_names or supports_kwargs
+    ):
+        kwargs["request_context"] = request_context
+    if context_bundle is not None and (
+        "context_bundle" in parameter_names or supports_kwargs
+    ):
+        kwargs["context_bundle"] = context_bundle
+    return method(task, **kwargs)
+
+
+def _prepare_research_context(
+    body: QueryRequest,
+    *,
+    run_id: str,
+) -> Any:
+    if body.conversation_id is None:
+        return None
+    from mindforge.services.context_service import (
+        ContextService,
+        ContextServiceError,
+    )
+
+    try:
+        return ContextService().prepare_query(
+            conversation_id=body.conversation_id,
+            task=body.task,
+            run_id=run_id,
+            context_mode=body.context_mode,
+            selected_context_ids=body.selected_context_ids,
+            excluded_context_ids=body.excluded_context_ids,
+            independent=body.independent,
+        )
+    except ContextServiceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _complete_research_context(prepared: Any, result: Any) -> bool:
+    if prepared is None:
+        return True
+    from mindforge.services.context_service import ContextService
+
+    try:
+        ContextService().complete_run(prepared, result)
+        metadata = (
+            result.metadata
+            if isinstance(result, AgentResult)
+            else result.setdefault("metadata", {})
+        )
+        metadata["context_persistence_status"] = "completed"
+        return True
+    except Exception as exc:
+        logger.exception("Failed to finalize conversation context.")
+        metadata = (
+            result.metadata
+            if isinstance(result, AgentResult)
+            else result.setdefault("metadata", {})
+        )
+        metadata["context_persistence_status"] = "failed"
+        metadata["context_persistence_error"] = str(exc)[:500]
+        return False
+
+
+def _abandon_research_context(
+    prepared: Any,
+    *,
+    status: str,
+    reason: str,
+) -> bool:
+    if prepared is None or getattr(prepared, "finalized", False):
+        return True
+    from mindforge.services.context_service import ContextService
+
+    try:
+        return ContextService().abandon_run(
+            prepared,
+            status=status,
+            reason=reason,
+        )
+    except Exception:
+        logger.exception("Failed to persist unfinished conversation context.")
+        return False
+
+
+def _context_response_fields(prepared: Any) -> dict[str, Any]:
+    if prepared is None:
+        return {}
+    return {
+        "run_id": prepared.request.run_id,
+        "conversation_id": prepared.request.conversation_id,
+        "query_message_id": prepared.request.message_id,
+        "context_snapshot_id": prepared.bundle.snapshot_id,
+    }
 
 
 def _finish_research_trace(
@@ -1148,6 +1253,7 @@ async def _execute_query_non_stream(
     *,
     llm_available: bool,
     start: float,
+    prepared_context: Any = None,
 ) -> QueryResponse:
     """Execute one non-streaming request inside the caller's trace context."""
     primary_failure: AgentResult | None = None
@@ -1159,6 +1265,12 @@ async def _execute_query_non_stream(
                 orch,
                 "run",
                 body.task,
+                request_context=(
+                    prepared_context.request if prepared_context else None
+                ),
+                context_bundle=(
+                    prepared_context.bundle if prepared_context else None
+                ),
             )
             if not result.success:
                 primary_failure = result
@@ -1167,6 +1279,7 @@ async def _execute_query_non_stream(
                     or "Agent pipeline returned an unsuccessful result."
                 )
             else:
+                _complete_research_context(prepared_context, result)
                 latency = (time.time() - start) * 1000
                 cost_value = result.metadata.get("cost")
                 trace_id = result.trace_id
@@ -1214,6 +1327,7 @@ async def _execute_query_non_stream(
                     iterations=int(result.metadata.get("subtask_count", 0)),
                     outcome=result_outcome,
                     failure_reason=result_failure_reason,
+                    **_context_response_fields(prepared_context),
                 )
         except LLMConfigurationError as exc:
             primary_failure_reason = str(exc)
@@ -1239,8 +1353,13 @@ async def _execute_query_non_stream(
         from mindforge.tools.rag_tool import RAGTool
 
         rag = RAGTool()
+        effective_task = (
+            prepared_context.bundle.standalone_query
+            if prepared_context is not None
+            else body.task
+        )
         result = await rag.execute_async(
-            query=body.task,
+            query=effective_task,
             mode="hybrid",
         )
         if not result.success:
@@ -1259,6 +1378,38 @@ async def _execute_query_non_stream(
         latency = (time.time() - start) * 1000
         degraded = primary_failure_reason is not None
         trace_id = primary_failure.trace_id if primary_failure else None
+        fallback_result = AgentResult(
+            agent_name="orchestrator",
+            success=True,
+            output=result.output,
+            data={
+                "sources": list(result_data.get("sources", [])),
+                "fallback": True,
+                "retrieval_quality": float(
+                    result_data.get("retrieval_quality", 0.0)
+                ),
+            },
+            metadata={
+                "quality": None,
+                "quality_status": "not_evaluated",
+                "outcome": "degraded" if degraded else "retrieval_only",
+                "failure_reason": primary_failure_reason,
+                "model": "fallback-retrieval",
+            },
+            token_usage=(
+                dict(primary_failure.token_usage)
+                if primary_failure is not None
+                else {}
+            ),
+            cost_usd=primary_failure.cost_usd if primary_failure else None,
+            cost_status=(
+                primary_failure.cost_status
+                if primary_failure
+                else "not_applicable"
+            ),
+            trace_id=trace_id,
+        )
+        _complete_research_context(prepared_context, fallback_result)
         return QueryResponse(
             task_id=trace_id[:12] if trace_id else uuid.uuid4().hex[:12],
             trace_id=trace_id,
@@ -1279,6 +1430,7 @@ async def _execute_query_non_stream(
             retrieval_quality=float(
                 result_data.get("retrieval_quality", 0.0)
             ),
+            **_context_response_fields(prepared_context),
         )
     except HTTPException:
         raise
@@ -1320,7 +1472,13 @@ async def query(body: QueryRequest):
                 status_code=409,
                 detail="A research request with this request_id is already active.",
             )
+        prepared_context = None
         try:
+            prepared_context = await asyncio.to_thread(
+                _prepare_research_context,
+                body,
+                run_id=request_id,
+            )
             llm_available = await asyncio.to_thread(has_llm_credentials)
             orch = None
             if llm_available:
@@ -1347,6 +1505,7 @@ async def query(body: QueryRequest):
                     body.task,
                     request_id=request_id,
                     cancellation=cancellation,
+                    prepared_context=prepared_context,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -1355,20 +1514,58 @@ async def query(body: QueryRequest):
                     "X-MindForge-Request-ID": request_id,
                 },
             )
-        except BaseException:
+        except BaseException as exc:
             _unregister_research_cancellation(request_id, cancellation)
+            await asyncio.to_thread(
+                _abandon_research_context,
+                prepared_context,
+                status=(
+                    "cancelled"
+                    if isinstance(exc, asyncio.CancelledError)
+                    else "failed"
+                ),
+                reason=str(exc) or exc.__class__.__name__,
+            )
             raise
 
     llm_available = await asyncio.to_thread(has_llm_credentials)
+    run_id = body.request_id or f"research-{uuid.uuid4().hex}"
+    prepared_context = await asyncio.to_thread(
+        _prepare_research_context,
+        body,
+        run_id=run_id,
+    )
 
     with _research_trace_context(body.task, transport="rest") as trace_span:
         if trace_span is not None:
-            trace_span.input = {"task": body.task}
-        response = await _execute_query_non_stream(
-            body,
-            llm_available=llm_available,
-            start=start,
-        )
+            trace_span.input = {
+                "task": body.task,
+                "conversation_id": body.conversation_id,
+                "context_snapshot_id": (
+                    prepared_context.bundle.snapshot_id
+                    if prepared_context is not None
+                    else None
+                ),
+            }
+        try:
+            response = await _execute_query_non_stream(
+                body,
+                llm_available=llm_available,
+                start=start,
+                prepared_context=prepared_context,
+            )
+        except BaseException as exc:
+            await asyncio.to_thread(
+                _abandon_research_context,
+                prepared_context,
+                status=(
+                    "cancelled"
+                    if isinstance(exc, asyncio.CancelledError)
+                    else "failed"
+                ),
+                reason=str(exc) or exc.__class__.__name__,
+            )
+            raise
         trace_id = (
             trace_span.trace_id
             if trace_span is not None
@@ -3139,6 +3336,8 @@ def list_history(
                         getattr(e, "token_usage", None)
                     ),
                     trace_id=getattr(e, "trace_id", None),
+                    conversation_id=getattr(e, "conversation_id", None),
+                    run_id=getattr(e, "run_id", None),
                     created_at=_serialize_datetime_utc(e.created_at),
                 ).model_dump()
                 for e in entries
@@ -3184,6 +3383,8 @@ def get_history_entry(history_id: int):
             token_usage=_parse_history_token_usage(getattr(entry, "token_usage", None)),
             sources=_parse_history_sources(getattr(entry, "sources", None)),
             trace_id=getattr(entry, "trace_id", None),
+            conversation_id=getattr(entry, "conversation_id", None),
+            run_id=getattr(entry, "run_id", None),
             created_at=_serialize_datetime_utc(entry.created_at),
         )
     finally:
@@ -3215,6 +3416,8 @@ def save_history(body: HistorySaveRequest):
                 ensure_ascii=False,
             ),
             trace_id=body.trace_id,
+            conversation_id=body.conversation_id,
+            run_id=body.run_id,
         )
         db.add(entry)
         try:
@@ -3320,13 +3523,25 @@ async def _stream_response(
     *,
     request_id: str | None = None,
     cancellation: asyncio.Event | None = None,
+    prepared_context: Any = None,
 ) -> AsyncGenerator[bytes, None]:
     """Stream SSE bytes while one producer task owns the trace context."""
     chunk_queue: asyncio.Queue[bytes | object] = asyncio.Queue()
     stream_finished = object()
 
     async def pump_chunks() -> None:
-        async with aclosing(_stream_response_events(orch, task)) as events:
+        event_source = (
+            _stream_response_events(orch, task)
+            if prepared_context is None
+            else _stream_response_events(
+                orch,
+                task,
+                prepared_context=prepared_context,
+            )
+        )
+        async with aclosing(
+            event_source
+        ) as events:
             try:
                 async for chunk in events:
                     chunk_queue.put_nowait(chunk)
@@ -3336,6 +3551,9 @@ async def _stream_response(
     producer_task: asyncio.Task[None] | None = None
     cancellation_task: asyncio.Task[bool] | None = None
     chunk_task: asyncio.Task[bytes | object] | None = None
+    stream_completed = False
+    producer_failed = False
+    explicitly_cancelled = False
     try:
         producer_task = asyncio.create_task(pump_chunks())
         if cancellation is not None:
@@ -3352,6 +3570,7 @@ async def _stream_response(
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if cancellation_task in done:
+                    explicitly_cancelled = True
                     if not chunk_task.done():
                         chunk_task.cancel()
                         await asyncio.gather(
@@ -3363,7 +3582,12 @@ async def _stream_response(
             chunk = await chunk_task
             chunk_task = None
             if chunk is stream_finished:
-                await producer_task
+                try:
+                    await producer_task
+                except BaseException:
+                    producer_failed = True
+                    raise
+                stream_completed = True
                 return
             if not isinstance(chunk, bytes):
                 raise RuntimeError("SSE producer returned an invalid chunk.")
@@ -3380,11 +3604,38 @@ async def _stream_response(
             await asyncio.gather(producer_task, return_exceptions=True)
         if request_id is not None and cancellation is not None:
             _unregister_research_cancellation(request_id, cancellation)
+        if prepared_context is not None and not getattr(
+            prepared_context,
+            "finalized",
+            False,
+        ):
+            status = (
+                "failed"
+                if producer_failed or stream_completed
+                else "cancelled"
+            )
+            reason = (
+                "The research stream ended without a completed result."
+                if status == "failed"
+                else (
+                    "The research request was cancelled."
+                    if explicitly_cancelled
+                    else "The research client disconnected."
+                )
+            )
+            await asyncio.to_thread(
+                _abandon_research_context,
+                prepared_context,
+                status=status,
+                reason=reason,
+            )
 
 
 async def _stream_response_events(
     orch: Orchestrator | None,
     task: str,
+    *,
+    prepared_context: Any = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
     started = time.perf_counter()
@@ -3393,7 +3644,19 @@ async def _stream_response_events(
     primary_failure_reason: str | None = None
     with _research_trace_context(task, transport="sse") as trace_span:
         if trace_span is not None:
-            trace_span.input = {"task": task}
+            trace_span.input = {
+                "task": task,
+                "conversation_id": (
+                    prepared_context.request.conversation_id
+                    if prepared_context is not None
+                    else None
+                ),
+                "context_snapshot_id": (
+                    prepared_context.bundle.snapshot_id
+                    if prepared_context is not None
+                    else None
+                ),
+            }
         trace_id = trace_span.trace_id if trace_span is not None else None
         if trace_id:
             started_event = {
@@ -3412,6 +3675,12 @@ async def _stream_response_events(
                     orch,
                     "stream_run",
                     task,
+                    request_context=(
+                        prepared_context.request if prepared_context else None
+                    ),
+                    context_bundle=(
+                        prepared_context.bundle if prepared_context else None
+                    ),
                 )
                 async with aclosing(research_stream_source) as research_stream:
                     async for event in research_stream:
@@ -3448,6 +3717,11 @@ async def _stream_response_events(
                                 )
                                 use_retrieval_fallback = fallback_enabled
                                 if not fallback_enabled:
+                                    _complete_research_context(
+                                        prepared_context,
+                                        result,
+                                    )
+                                    prepared_context = None
                                     completed_result = result
                                     yield (
                                         "data: "
@@ -3455,6 +3729,11 @@ async def _stream_response_events(
                                         "\n\n"
                                     ).encode()
                                 break
+                            _complete_research_context(
+                                prepared_context,
+                                result,
+                            )
+                            prepared_context = None
                             completed_result = result
                         elif event.get("type") == "error":
                             primary_failure_reason = str(
@@ -3491,8 +3770,13 @@ async def _stream_response_events(
 
             try:
                 rag = RAGTool()
+                effective_task = (
+                    prepared_context.bundle.standalone_query
+                    if prepared_context is not None
+                    else task
+                )
                 result = await rag.execute_async(
-                    query=task,
+                    query=effective_task,
                     mode="hybrid",
                     top_k=5,
                 )
@@ -3559,6 +3843,11 @@ async def _stream_response_events(
                         "cost_status": cost_status,
                         "trace_id": trace_id,
                     }
+                    _complete_research_context(
+                        prepared_context,
+                        completed_result,
+                    )
+                    prepared_context = None
                     fallback = {
                         "type": "done",
                         "trace_id": trace_id,

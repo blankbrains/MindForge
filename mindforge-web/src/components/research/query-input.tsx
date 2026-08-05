@@ -8,6 +8,7 @@ interface QueryInputProps {
   isRunning: boolean;
   onCancel: () => void;
   retrievalOnly?: boolean;
+  disabled?: boolean;
 }
 
 export function QueryInput({
@@ -17,10 +18,11 @@ export function QueryInput({
   isRunning,
   onCancel,
   retrievalOnly = false,
+  disabled = false,
 }: QueryInputProps) {
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (value.trim() && !isRunning) {
+    if (value.trim() && !isRunning && !disabled) {
       onSubmit(value.trim());
     }
   };
@@ -39,9 +41,10 @@ export function QueryInput({
         <textarea
           value={value}
           readOnly={isRunning}
+          disabled={disabled}
           aria-readonly={isRunning}
           onChange={(e) => {
-            if (!isRunning) {
+            if (!isRunning && !disabled) {
               onChange(e.target.value);
             }
           }}
@@ -51,7 +54,7 @@ export function QueryInput({
             isRunning ? "cursor-not-allowed opacity-80" : ""
           }`}
           onKeyDown={(e) => {
-            if (!isRunning && e.key === "Enter" && !e.shiftKey) {
+            if (!isRunning && !disabled && e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
             }
@@ -75,7 +78,7 @@ export function QueryInput({
             <button
               key="submit"
               type="submit"
-              disabled={!value.trim()}
+              disabled={!value.trim() || disabled}
               className={`${buttonClassName} bg-primary hover:bg-primary-dark`}
             >
               <>

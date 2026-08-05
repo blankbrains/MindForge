@@ -12,6 +12,8 @@ import { useResearchStore } from "@/store/research-store";
 import { useSettingsStore } from "@/store/settings-store";
 import { Link } from "@tanstack/react-router";
 import { QueryInput } from "@/components/research/query-input";
+import { ConversationToolbar } from "@/components/research/conversation-toolbar";
+import { ContextDrawer } from "@/components/research/context-drawer";
 import { SubtaskProgressList } from "@/components/research/subtask-progress-list";
 import { EmptyState } from "@/components/shared/empty-state";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
@@ -26,6 +28,7 @@ import {
   Search,
   XCircle,
 } from "lucide-react";
+import { useContextStore } from "@/store/context-store";
 
 const PlanDAG = lazy(() =>
   import("@/components/research/plan-dag").then((module) => ({
@@ -53,8 +56,17 @@ export function ResearchPage() {
   const task = useResearchStore((s) => s.task);
   const setTask = useResearchStore((s) => s.setTask);
   const hasLLMKey = useSettingsStore((s) => s.hasLLMKey);
+  const contextState = useContextStore();
+  const initializeContext = contextState.initialize;
+  const refreshConversation = contextState.refreshConversation;
+  const loadContextSnapshot = contextState.loadSnapshot;
+  const setContextDrawerOpen = contextState.setDrawerOpen;
   const lastTaskRef = useRef(task);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    void initializeContext();
+  }, [initializeContext]);
 
   useEffect(() => {
     if (!session.isStreaming || !session.startedAt) return;
@@ -67,6 +79,22 @@ export function ResearchPage() {
     const interval = window.setInterval(updateElapsed, 1000);
     return () => window.clearInterval(interval);
   }, [session.isStreaming, session.startedAt]);
+
+  useEffect(() => {
+    if (!session.isCompleted || !session.finalResult) return;
+    void refreshConversation();
+    const metadata = session.finalResult.metadata;
+    const runId =
+      typeof metadata?.run_id === "string" ? metadata.run_id : null;
+    if (runId) {
+      void loadContextSnapshot(runId);
+    }
+  }, [
+    loadContextSnapshot,
+    refreshConversation,
+    session.finalResult,
+    session.isCompleted,
+  ]);
 
   const taskStats = useMemo(() => {
     const subtasks = Object.values(session.subtasks);
@@ -93,10 +121,32 @@ export function ResearchPage() {
     (t: string) => {
       lastTaskRef.current = t;
       setElapsedSeconds(0);
-      session.startResearch(t);
+      session.startResearch(t, {
+        conversationId: contextState.activeConversationId,
+        contextMode: contextState.contextMode,
+        selectedContextIds: contextState.selectedContextIds,
+        excludedContextIds: contextState.excludedContextIds,
+        independent: contextState.independent,
+      });
     },
-    [session],
+    [contextState, session],
   );
+
+  const handleDeleteConversation = useCallback(() => {
+    if (
+      window.confirm(
+        "将彻底删除当前会话、消息、研究产物、上下文快照和关联历史。此操作不可撤销。",
+      )
+    ) {
+      void contextState.deleteActiveConversation();
+    }
+  }, [contextState]);
+  const handleOpenContext = useCallback(() => {
+    setContextDrawerOpen(true);
+  }, [setContextDrawerOpen]);
+  const handleCloseContext = useCallback(() => {
+    setContextDrawerOpen(false);
+  }, [setContextDrawerOpen]);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -125,6 +175,32 @@ export function ResearchPage() {
         </div>
       )}
 
+      <ConversationToolbar
+        conversations={contextState.conversations}
+        activeConversationId={contextState.activeConversationId}
+        contextMode={contextState.contextMode}
+        independent={contextState.independent}
+        disabled={session.isStreaming}
+        loading={contextState.loading}
+        onSelect={(conversationId) =>
+          void contextState.selectConversation(conversationId)
+        }
+        onCreate={() => void contextState.createConversation()}
+        onDelete={handleDeleteConversation}
+        onModeChange={(mode) => void contextState.setContextMode(mode)}
+        onIndependentChange={contextState.setIndependent}
+        onOpenContext={handleOpenContext}
+      />
+
+      {contextState.error && (
+        <div
+          role="alert"
+          className="border-l-2 border-red-500 pl-3 text-sm text-red-700 dark:text-red-300"
+        >
+          {contextState.error}
+        </div>
+      )}
+
       <QueryInput
         value={task}
         onChange={setTask}
@@ -132,6 +208,9 @@ export function ResearchPage() {
         isRunning={session.isStreaming}
         onCancel={session.cancelResearch}
         retrievalOnly={!hasLLMKey}
+        disabled={
+          contextState.loading || contextState.activeConversationId === null
+        }
       />
 
       {session.isStreaming && (
@@ -198,7 +277,7 @@ export function ResearchPage() {
               </Link>
               <button
                 type="button"
-                onClick={() => session.startResearch(lastTaskRef.current)}
+                onClick={() => handleSubmit(lastTaskRef.current)}
                 className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-3 py-1.5 text-xs font-medium hover:bg-amber-200 dark:bg-amber-900 dark:hover:bg-amber-800"
               >
                 <FileSearch className="h-3 w-3" />
@@ -301,6 +380,12 @@ export function ResearchPage() {
           )}
         </>
       )}
+
+      <ContextDrawer
+        open={contextState.drawerOpen}
+        task={task}
+        onClose={handleCloseContext}
+      />
     </div>
   );
 }

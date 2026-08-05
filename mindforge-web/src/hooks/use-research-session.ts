@@ -38,6 +38,14 @@ interface ResearchConnection {
   abort: () => void;
 }
 
+export interface ResearchContextOptions {
+  conversationId?: string | null;
+  contextMode?: "auto" | "manual" | "disabled";
+  selectedContextIds?: string[];
+  excludedContextIds?: string[];
+  independent?: boolean;
+}
+
 let nextRequestId = 0;
 let activeRequestId: number | null = null;
 let activeServerRequestId: string | null = null;
@@ -166,6 +174,13 @@ function persistResearchResult(
     ?? event.trace_id
     ?? useResearchStore.getState().traceId
     ?? undefined;
+  const metadata = result?.metadata as Record<string, unknown> | undefined;
+  const conversationId =
+    typeof metadata?.conversation_id === "string"
+      ? metadata.conversation_id
+      : undefined;
+  const runId =
+    typeof metadata?.run_id === "string" ? metadata.run_id : undefined;
   const usageSummary = {
     tokenUsage,
     costUsd,
@@ -173,6 +188,20 @@ function persistResearchResult(
   };
   const addFromResearch = useHistoryStore.getState().addFromResearch;
   if (traceId) {
+    if (conversationId || runId) {
+      void addFromResearch(
+        task,
+        report,
+        quality,
+        model,
+        usageSummary,
+        sources,
+        traceId,
+        conversationId,
+        runId,
+      );
+      return;
+    }
     void addFromResearch(
       task,
       report,
@@ -194,7 +223,10 @@ function persistResearchResult(
   );
 }
 
-export function startResearch(task: string): void {
+export function startResearch(
+  task: string,
+  options: ResearchContextOptions = {},
+): void {
   detachActiveTransport(true);
 
   const requestId = ++nextRequestId;
@@ -253,7 +285,16 @@ export function startResearch(task: string): void {
 
   activeConnection = createSSEConnection<SSEEvent>(
     `${API_BASE}/query`,
-    { request_id: serverRequestId, task, stream: true },
+    {
+      request_id: serverRequestId,
+      task,
+      stream: true,
+      conversation_id: options.conversationId ?? undefined,
+      context_mode: options.contextMode ?? undefined,
+      selected_context_ids: options.selectedContextIds ?? [],
+      excluded_context_ids: options.excludedContextIds ?? [],
+      independent: options.independent ?? false,
+    },
     (event) => {
       if (activeRequestId !== requestId) return;
       if (event.type === "answer_chunk") {

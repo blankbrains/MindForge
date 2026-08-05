@@ -28,7 +28,9 @@ except Exception:
     pass
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -221,6 +223,16 @@ class ResearchHistory(Base):
         nullable=True,
         index=True,
     )
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+        index=True,
+    )
+    run_id: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -401,6 +413,510 @@ class DocumentAsset(Base):
         DateTime,
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
+    )
+
+
+class Conversation(Base):
+    """User-visible research conversation."""
+
+    __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'archived', 'deleted')",
+            name="ck_conversations_status",
+        ),
+        CheckConstraint(
+            "context_mode IN ('auto', 'manual', 'disabled')",
+            name="ck_conversations_context_mode",
+        ),
+        CheckConstraint("next_sequence >= 1", name="ck_conversations_sequence"),
+        CheckConstraint("version >= 1", name="ck_conversations_version"),
+        Index(
+            "ix_conversations_user_status_updated",
+            "user_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="active",
+    )
+    context_mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="auto",
+    )
+    next_sequence: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class ConversationMessage(Base):
+    """One visible message in a research conversation."""
+
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('user', 'assistant', 'system_notice')",
+            name="ck_conversation_messages_role",
+        ),
+        CheckConstraint(
+            "context_scope IN ('turn', 'conversation', 'user')",
+            name="ck_conversation_messages_scope",
+        ),
+        CheckConstraint("sequence >= 1", name="ck_conversation_messages_sequence"),
+        UniqueConstraint(
+            "conversation_id",
+            "sequence",
+            name="uq_conversation_messages_sequence",
+        ),
+        Index(
+            "ix_conversation_messages_context",
+            "conversation_id",
+            "include_in_context",
+            "deleted_at",
+            "sequence",
+        ),
+        Index("ix_conversation_messages_run", "run_id"),
+    )
+
+    message_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    include_in_context: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    context_scope: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="conversation",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    edited_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class ConversationSummary(Base):
+    """Structured compression of an earlier conversation range."""
+
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'invalidated', 'superseded')",
+            name="ck_conversation_summaries_status",
+        ),
+        CheckConstraint(
+            "from_sequence >= 1 AND to_sequence >= from_sequence",
+            name="ck_conversation_summaries_range",
+        ),
+        Index(
+            "ix_conversation_summaries_active",
+            "conversation_id",
+            "status",
+            "to_sequence",
+        ),
+    )
+
+    summary_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    from_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    to_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    source_message_ids: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="active",
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class ResearchArtifact(Base):
+    """Fine-grained, reusable output from a completed research run."""
+
+    __tablename__ = "research_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "artifact_type IN ('subtask_finding', 'report_section', 'claim', "
+            "'evidence', 'decision', 'limitation', 'citation_source')",
+            name="ck_research_artifacts_type",
+        ),
+        CheckConstraint(
+            "grounding_status IN ('grounded', 'model_only', 'not_required')",
+            name="ck_research_artifacts_grounding",
+        ),
+        CheckConstraint(
+            "freshness_class IN ('stable', 'time_sensitive', 'volatile')",
+            name="ck_research_artifacts_freshness",
+        ),
+        Index(
+            "ix_research_artifacts_recall",
+            "conversation_id",
+            "enabled",
+            "deleted_at",
+            "created_at",
+        ),
+        Index("ix_research_artifacts_run", "run_id"),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    artifact_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    grounding_status: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="grounded",
+    )
+    freshness_class: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="stable",
+    )
+    valid_from: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    embedding_version: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="lexical-v1",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class ContextSnapshot(Base):
+    """Immutable record of context selected for one research run."""
+
+    __tablename__ = "context_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "budget_tokens >= 0 AND used_tokens >= 0 "
+            "AND used_tokens <= budget_tokens",
+            name="ck_context_snapshots_budget",
+        ),
+        UniqueConstraint("run_id", name="uq_context_snapshots_run"),
+        Index("ix_context_snapshots_conversation", "conversation_id", "created_at"),
+        Index("ix_context_snapshots_created_at", "created_at"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    query_message_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    standalone_query: Mapped[str] = mapped_column(Text, nullable=False)
+    context_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    budget_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    used_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    embedding_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class ContextSnapshotItem(Base):
+    """One immutable item included in a context snapshot."""
+
+    __tablename__ = "context_snapshot_items"
+    __table_args__ = (
+        CheckConstraint("rank >= 1", name="ck_context_snapshot_items_rank"),
+        CheckConstraint(
+            "token_count >= 0",
+            name="ck_context_snapshot_items_tokens",
+        ),
+        CheckConstraint(
+            "freshness_status IN ('current', 'stale', 'expired')",
+            name="ck_context_snapshot_items_freshness",
+        ),
+        UniqueConstraint(
+            "snapshot_id",
+            "rank",
+            name="uq_context_snapshot_items_rank",
+        ),
+        Index(
+            "ix_context_snapshot_items_source",
+            "source_type",
+            "source_id",
+        ),
+    )
+
+    snapshot_item_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("context_snapshots.snapshot_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    selection_reason: Mapped[str] = mapped_column(String(200), nullable=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    freshness_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="current",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+
+
+class UserMemory(Base):
+    """User-managed cross-conversation memory."""
+
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('preference', 'profile', 'stable_fact', "
+            "'project_context', 'decision')",
+            name="ck_user_memories_category",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'forgotten')",
+            name="ck_user_memories_status",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_user_memories_confidence",
+        ),
+        Index(
+            "ix_user_memories_active",
+            "user_id",
+            "status",
+            "deleted_at",
+            "updated_at",
+        ),
+    )
+
+    memory_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    category: Mapped[str] = mapped_column(String(24), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_message_ids: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="active",
+    )
+    user_confirmed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    valid_from: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class ContextLineage(Base):
+    """Dependency edge used for deletion and invalidation propagation."""
+
+    __tablename__ = "context_lineage"
+    __table_args__ = (
+        CheckConstraint(
+            "source_type IN ('message', 'artifact', 'memory')",
+            name="ck_context_lineage_source_type",
+        ),
+        CheckConstraint(
+            "derived_type IN ('summary', 'artifact', 'memory', 'cache')",
+            name="ck_context_lineage_derived_type",
+        ),
+        UniqueConstraint(
+            "source_type",
+            "source_id",
+            "derived_type",
+            "derived_id",
+            "relation",
+            name="uq_context_lineage_edge",
+        ),
+        Index("ix_context_lineage_source", "source_type", "source_id"),
+        Index("ix_context_lineage_derived", "derived_type", "derived_id"),
+    )
+
+    lineage_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    derived_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    derived_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    relation: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class DeletionJob(Base):
+    """Persistent status for context deletion propagation."""
+
+    __tablename__ = "deletion_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_deletion_jobs_status",
+        ),
+        Index("ix_deletion_jobs_user_created", "user_id", "created_at"),
+    )
+
+    deletion_job_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 

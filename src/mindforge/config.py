@@ -722,7 +722,32 @@ class MemoryConfig(BaseSettings):
         default=50 * 1024 * 1024,
         ge=1024 * 1024,
     )
+    auto_capture_preferences: bool = Field(default=True)
+    require_confirmation_for_profile: bool = Field(default=True)
     model_config = SettingsConfigDict(env_prefix="MEMORY_", extra="ignore")
+
+
+class ContextConfig(BaseSettings):
+    enabled: bool = Field(default=True)
+    default_mode: str = Field(
+        default="auto",
+        pattern="^(auto|manual|disabled)$",
+    )
+    recent_message_limit: int = Field(default=8, ge=1, le=50)
+    cross_conversation_enabled: bool = Field(default=False)
+    budget_tokens: int = Field(default=4000, ge=500, le=100_000)
+    artifact_top_k: int = Field(default=8, ge=1, le=50)
+    memory_top_k: int = Field(default=4, ge=1, le=20)
+    min_relevance: float = Field(default=0.12, ge=0.0, le=1.0)
+    summary_message_threshold: int = Field(default=12, ge=4, le=200)
+    summary_max_tokens: int = Field(default=1200, ge=100, le=10_000)
+    snapshot_max_item_chars: int = Field(
+        default=12_000,
+        ge=500,
+        le=100_000,
+    )
+    snapshot_retention_days: int = Field(default=90, ge=1, le=3650)
+    model_config = SettingsConfigDict(env_prefix="CONTEXT_", extra="ignore")
 
 
 class ObservabilityConfig(BaseSettings):
@@ -809,6 +834,7 @@ class Settings(BaseSettings):
     web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     qa_generation: QAGenerationConfig = Field(default_factory=QAGenerationConfig)

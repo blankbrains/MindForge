@@ -36,6 +36,37 @@ class QueryRequest(BaseModel):
         description="Natural-language research task or question.",
     )
     stream: bool = Field(False, description="If true, use SSE streaming response.")
+    conversation_id: str | None = Field(
+        None,
+        min_length=32,
+        max_length=32,
+        pattern=r"^[a-f0-9]{32}$",
+    )
+    context_mode: Literal["auto", "manual", "disabled"] | None = None
+    selected_context_ids: list[str] = Field(default_factory=list, max_length=100)
+    excluded_context_ids: list[str] = Field(default_factory=list, max_length=100)
+    independent: bool = False
+
+    @field_validator("selected_context_ids", "excluded_context_ids")
+    @classmethod
+    def validate_context_ids(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            clean = item.strip()
+            if not clean or len(clean) > 100:
+                raise ValueError("Context identifiers must contain 1-100 characters.")
+            if not re.fullmatch(r"[A-Za-z0-9_:-]+", clean):
+                raise ValueError("Context identifier contains invalid characters.")
+            if clean not in normalized:
+                normalized.append(clean)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_context_selection(self):
+        overlap = set(self.selected_context_ids) & set(self.excluded_context_ids)
+        if overlap:
+            raise ValueError("A context item cannot be selected and excluded.")
+        return self
 
 
 class QueryCancelRequest(BaseModel):
@@ -76,6 +107,147 @@ class QueryResponse(BaseModel):
     outcome: Literal["success", "degraded", "retrieval_only"] = "success"
     failure_reason: str | None = None
     retrieval_quality: float | None = None
+    run_id: str | None = None
+    conversation_id: str | None = None
+    query_message_id: str | None = None
+    context_snapshot_id: str | None = None
+
+
+# ------------------------------------------------------------------
+# Conversation, context, and memory
+# ------------------------------------------------------------------
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str = Field("新研究", min_length=1, max_length=200)
+    context_mode: Literal["auto", "manual", "disabled"] | None = None
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=200)
+    status: Literal["active", "archived"] | None = None
+    context_mode: Literal["auto", "manual", "disabled"] | None = None
+    version: int | None = Field(None, ge=1)
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if self.title is None and self.status is None and self.context_mode is None:
+            raise ValueError("At least one conversation field must be updated.")
+        return self
+
+
+class ConversationItem(BaseModel):
+    conversation_id: str
+    title: str
+    status: str
+    context_mode: Literal["auto", "manual", "disabled"]
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationDetail(ConversationItem):
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MessageUpdateRequest(BaseModel):
+    content: str | None = Field(None, min_length=1, max_length=200_000)
+    include_in_context: bool | None = None
+    pinned: bool | None = None
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if (
+            self.content is None
+            and self.include_in_context is None
+            and self.pinned is None
+        ):
+            raise ValueError("At least one message field must be updated.")
+        return self
+
+
+class ContextPreviewRequest(BaseModel):
+    task: str = Field(..., min_length=1, max_length=20_000)
+    context_mode: Literal["auto", "manual", "disabled"] | None = None
+    selected_context_ids: list[str] = Field(default_factory=list, max_length=100)
+    excluded_context_ids: list[str] = Field(default_factory=list, max_length=100)
+    independent: bool = False
+
+    @field_validator("selected_context_ids", "excluded_context_ids")
+    @classmethod
+    def validate_context_ids(cls, value: list[str]) -> list[str]:
+        return QueryRequest.validate_context_ids(value)
+
+    @model_validator(mode="after")
+    def validate_context_selection(self):
+        overlap = set(self.selected_context_ids) & set(self.excluded_context_ids)
+        if overlap:
+            raise ValueError("A context item cannot be selected and excluded.")
+        return self
+
+
+class ContextItemUpdateRequest(BaseModel):
+    include_in_context: bool | None = None
+    pinned: bool | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if (
+            self.include_in_context is None
+            and self.pinned is None
+            and self.enabled is None
+        ):
+            raise ValueError("At least one context field must be updated.")
+        return self
+
+
+class MemoryCreateRequest(BaseModel):
+    category: Literal[
+        "preference",
+        "profile",
+        "stable_fact",
+        "project_context",
+        "decision",
+    ]
+    content: str = Field(..., min_length=1, max_length=20_000)
+    user_confirmed: bool = True
+    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    expires_at: datetime | None = None
+
+
+class MemoryUpdateRequest(BaseModel):
+    category: Literal[
+        "preference",
+        "profile",
+        "stable_fact",
+        "project_context",
+        "decision",
+    ] | None = None
+    content: str | None = Field(None, min_length=1, max_length=20_000)
+    status: Literal["active", "superseded", "forgotten"] | None = None
+    user_confirmed: bool | None = None
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if (
+            self.category is None
+            and self.content is None
+            and self.status is None
+            and self.user_confirmed is None
+        ):
+            raise ValueError("At least one memory field must be updated.")
+        return self
+
+
+class DeletionJobResponse(BaseModel):
+    deletion_job_id: str
+    target_type: str
+    target_id: str
+    status: str
+    error: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 # ------------------------------------------------------------------
@@ -496,6 +668,8 @@ class HistoryItem(BaseModel):
     token_usage: dict[str, Any] = Field(default_factory=dict)
     sources: list[HistoryCitationSource] = Field(default_factory=list)
     trace_id: str | None = None
+    conversation_id: str | None = None
+    run_id: str | None = None
     created_at: str | None = None
 
 
@@ -512,6 +686,13 @@ class HistorySaveRequest(BaseModel):
         max_length=200,
     )
     trace_id: str | None = Field(default=None, max_length=32)
+    conversation_id: str | None = Field(
+        default=None,
+        min_length=32,
+        max_length=32,
+        pattern=r"^[0-9a-f]{32}$",
+    )
+    run_id: str | None = Field(default=None, min_length=8, max_length=80)
 
     @field_validator("trace_id")
     @classmethod

@@ -90,7 +90,11 @@ class WebSearchTool(BaseTool):
 
         settings = get_settings().web_search
         self._tavily_client = tavily_client
-        self._tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
+        self._tavily_api_key = (
+            os.environ.get("TAVILY_API_KEY", "")
+            if tavily_api_key is None
+            else tavily_api_key
+        )
         self._native_llm = native_llm
         self._native_enabled = (
             settings.native_enabled

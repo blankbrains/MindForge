@@ -394,4 +394,30 @@ describe("useResearchSession", () => {
     );
     unmount();
   });
+
+  it("sends observable context controls with a conversation request", () => {
+    const { result, unmount } = renderHook(() => useResearchSession());
+
+    act(() =>
+      result.current.startResearch("follow-up", {
+        conversationId: "a".repeat(32),
+        contextMode: "manual",
+        selectedContextIds: ["message:m1"],
+        excludedContextIds: ["artifact:a1"],
+        independent: false,
+      }),
+    );
+
+    expect(sseState.connections[0].body).toEqual(
+      expect.objectContaining({
+        task: "follow-up",
+        conversation_id: "a".repeat(32),
+        context_mode: "manual",
+        selected_context_ids: ["message:m1"],
+        excluded_context_ids: ["artifact:a1"],
+        independent: false,
+      }),
+    );
+    unmount();
+  });
 });
