@@ -1,82 +1,116 @@
-# MindForge
+# MindForge - 自适应研究助理系统
 
-MindForge 是一个可自托管的自适应研究助理。它通过 Planner、Researcher、
-Critic 和 Synthesizer 协作完成问题拆解、资料检索、证据整理、质量评审和报告生成，
-并提供知识库、联网搜索、引用、历史记录与完整研究链路观测。
+> 全栈 Multi-Agent RAG · React 19 前端 · FastAPI 后端 · 混合检索 · SSE 流式交互
 
-## 核心能力
+MindForge 是一个可自托管的自适应研究助理。它结合多 Agent 编排、知识库检索、
+联网搜索、会话上下文和质量评审，生成带来源、历史记录和执行 Trace 的研究结果。
 
-- **自适应研究**：支持确定性社交回复、模型辅助直接回答、快速、均衡和深度模式，按问题复杂度选择合适链路。
-- **多来源检索**：统一调度知识库、模型原生联网搜索和可选辅助搜索，来源不可用时明确降级。
-- **文档知识库**：支持 PDF、DOCX、HTML、Markdown 和 TXT，覆盖 OCR、表格、图片与版面解析。
-- **混合索引**：基础向量检索、BM25 和重排序，可按文档启用 RAPTOR 与 GraphRAG。
-- **统一模型接入**：支持 OpenAI、DeepSeek、Kimi、GLM、通用 OpenAI-compatible API 和本地模型服务。
-- **可追溯输出**：报告支持 Markdown、代码高亮、表格、可点击引用、质量评分和失败原因。
-- **可观测链路**：每次研究建立顶层 Orchestrator Trace，展示 Agent、工具、模型、耗时、Token 和费用。
-- **连续研究上下文**：支持会话式追问、自动/手动上下文、独立研究、运行前预览和运行后快照。
-- **可控记忆复用**：复用有来源的细粒度研究产物，不把相似问题直接替换成旧报告，并支持固定、排除、遗忘和彻底删除。
+## 项目概述
 
-## 研究流程
+MindForge 根据问题类型选择确定性社交回复、模型辅助直接回答或完整研究流程。复杂问题
+会被拆解为可执行的子任务，由 Researcher 收集证据，Synthesizer 组织报告，Critic
+评审并按策略精炼结果。
 
-```text
-问题
-  -> 确定性社交路由与模型辅助直接回答
-  -> 研究模式与来源策略
-  -> Planner 生成任务 DAG（简单问题可跳过）
-  -> Researcher 并行执行检索与工具调用
-  -> Synthesizer 组织报告
-  -> Critic 评审并按需精炼
-  -> 引用校验与结果持久化
+### 前端页面
+
+| 页面 | 功能 |
+| --- | --- |
+| 概览 | 查看 PostgreSQL、Redis、Qdrant 状态和系统统计。 |
+| 研究工作台 | 输入问题，查看实时任务进度、报告、来源、评分和费用。 |
+| 知识库 | 上传、索引、启停、查看和删除文档。 |
+| 研究历史 | 查看和管理已完成的研究结果。 |
+| 可观测 | 查看研究 Trace、Agent、模型和工具调用。 |
+| 系统配置 | 配置模型 Provider、检索策略、研究参数和 Langfuse。 |
+
+### 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 自适应请求路由 | 为社交交互、稳定知识问题和复杂研究请求选择合适的执行链路。 |
+| 多 Agent 研究 | Planner、Researcher、Synthesizer、Critic 分工完成规划、检索、综合和评审。 |
+| 会话上下文 | 支持追问、自动或手动上下文、独立研究、快照、固定、遗忘和删除。 |
+| 混合检索 | 结合 Qdrant 向量检索、BM25、RRF 融合和 Cross-Encoder 重排序。 |
+| 文档知识库 | 支持 PDF、DOCX、HTML、Markdown、TXT 的解析、OCR、表格和图片资产处理。 |
+| 高级索引 | 支持 RAPTOR 层次摘要索引、GraphRAG 图谱索引和可选视觉索引。 |
+| 多模型接入 | 支持 OpenAI、DeepSeek、Kimi、GLM、OpenAI-compatible API 和本地兼容服务。 |
+| 联网搜索 | 支持 Provider 原生搜索、Tavily 和 DuckDuckGo。 |
+| 流式与取消 | 通过 SSE 展示研究阶段和答案增量，并支持按 `request_id` 取消任务。 |
+| 可观测性 | 记录 Agent、模型、工具、耗时、Token、费用、结果和失败原因。 |
+
+### 工作流程
+
+```mermaid
+flowchart TD
+    A[用户输入问题] --> B{请求路由}
+    B -->|社交交互| C[确定性回复]
+    B -->|稳定知识| D[Direct Answer]
+    B -->|研究请求| E[构建会话上下文]
+    E --> F[Planner 生成任务 DAG]
+
+    subgraph G[Researcher 并行执行]
+        G1[RAGTool]
+        G2[WebSearchTool]
+        G3[CodeExecutor]
+        G4[CitationVerifier]
+    end
+
+    F --> G1
+    F --> G2
+    F --> G3
+    F --> G4
+    G1 --> H[Synthesizer 汇总结果]
+    G2 --> H
+    G3 --> H
+    G4 --> H
+
+    H --> I{Critic 评审}
+    I -->|满足质量要求| J[引用校验与结果持久化]
+    I -->|需要精炼| H
+    C --> J
+    D --> J
+    J --> K[报告、历史、Context Snapshot 与 Trace]
 ```
-
-| 模式 | 行为 |
-| --- | --- |
-| 快速 | 单任务执行，不进行质量精炼 |
-| 均衡 | 简单问题快速处理，复杂问题自动规划 |
-| 深度 | 完整 DAG、评审与精炼流程 |
-
-来源策略支持自动选择、仅知识库和仅联网搜索。
-
-## 会话上下文与记忆
-
-研究工作台会把连续问题组织为 Conversation。每次请求可以选择：
-
-| 模式 | 行为 |
-| --- | --- |
-| 自动 | 从同一会话消息、摘要、有效研究产物和长期记忆中选择相关内容 |
-| 手动 | 只使用用户显式选择的内容 |
-| 关闭 | 不继承历史上下文 |
-| 独立研究 | 当前问题不继承会话内容，但仍可保留在当前会话中供查看 |
-
-运行前的上下文抽屉会展示候选内容、来源、相关性、Token 成本、时效和选择原因。
-运行后会保存不可变 `ContextSnapshot`，用于回看本次实际使用的内容。长会话可使用
-规则摘要和模型压缩，子任务会按关联内容构建各自的上下文。
-
-删除分为三个层级：
-
-- **仅本次排除**：只影响当前待执行请求。
-- **以后遗忘**：保留可见消息，但后续 Context Builder 不再使用该轮问答，并禁用衍生产物和记忆。
-- **彻底删除**：删除同一研究 run 的问题、回答、快照、产物和关联历史。
-
-精确结果缓存必须同时匹配问题、上下文指纹、执行策略、模型配置、知识库索引签名和
-时效桶。相似问题只会召回有效的细粒度 Research Artifact，并重新生成当前答案。
-系统不保存或展示模型隐藏思维链。
 
 ## 技术栈
 
-| 层级 | 主要技术 |
+| 层级 | 技术 |
 | --- | --- |
+| 前端 | React 19、TypeScript、Vite、Tailwind CSS、TanStack Router/Query、Zustand |
+| 前端交互 | React Flow、Recharts、react-markdown、eventsource-parser |
 | 后端 | Python 3.10+、FastAPI、Pydantic、SQLAlchemy、Alembic |
-| 前端 | React 19、TypeScript、Vite、TanStack Router/Query、Zustand |
-| 数据 | PostgreSQL、Qdrant、Redis |
-| 检索 | BGE、BM25、Cross-Encoder Reranker、RAPTOR、GraphRAG |
-| 解析 | pdfplumber、PaddleOCR、python-docx、BeautifulSoup |
-| 观测 | 本地 Trace、Langfuse（可选） |
+| 数据 | PostgreSQL、Redis、Qdrant |
+| 检索 | BGE、BM25、RRF、Cross-Encoder Reranker、RAPTOR、GraphRAG |
+| 文档解析 | pdfplumber、PaddleOCR、python-docx、BeautifulSoup |
+| 可观测 | 本地 Trace、Langfuse |
+| 部署 | Docker Compose、CPU/GPU 依赖锁文件 |
+
+## 项目结构
+
+```text
+MindForge/
+├── src/mindforge/
+│   ├── agents/          # Agent、Direct Answer 与 Orchestrator
+│   ├── api/             # FastAPI、REST、SSE 和接口 Schema
+│   ├── context/         # 上下文构建、压缩、快照和删除治理
+│   ├── ingestion/       # 文档解析、分块、Embedding、RAPTOR
+│   ├── retrieval/       # 向量、BM25、重排序与 GraphRAG
+│   ├── tools/           # RAG、搜索、代码和引用校验工具
+│   ├── models/          # Provider 注册表与模型适配器
+│   ├── memory/          # 工作、情节和语义记忆
+│   ├── services/        # 会话、索引、上下文和健康检查服务
+│   └── observability/   # Trace 与 Langfuse
+├── mindforge-web/       # React 前端
+├── migrations/          # Alembic 数据库迁移
+├── tests/               # 后端测试
+├── docker-compose.yml
+├── docker-compose.gpu.yml
+├── .env.example
+└── start.sh
+```
 
 ## 快速启动
 
-推荐在 Linux 服务器上使用 Docker Compose 部署。CPU 配置可以直接启动；GPU 配置需要
-可用的 NVIDIA 驱动、设备文件和动态库。
+推荐在 Linux 服务器上使用 Docker Compose 部署。
 
 ### 1. 准备配置
 
@@ -86,14 +120,8 @@ cd MindForge
 cp .env.example .env
 ```
 
-至少检查以下配置：
-
-- `POSTGRES_PASSWORD` 和与其一致的 `DATABASE_URL`
-- `APP_SECRET`
-- 使用的 LLM Provider、Base URL、API Key 和模型
-- `DOCKER_API_BIND_ADDRESS`、`API_ACCESS_TOKEN` 等访问控制项
-
-所有运行配置以项目根目录 `.env` 为准。完整字段和默认值见 `.env.example`。
+在 `.env` 中配置数据库密码、`DATABASE_URL`、`APP_SECRET`、LLM Provider、模型和
+API Key。完整配置字段见 `.env.example`。
 
 ### 2. 启动服务
 
@@ -113,9 +141,6 @@ docker compose \
   up -d --build
 ```
 
-MindForge 会同时启动应用、PostgreSQL、Qdrant 和 Redis，并在应用启动时自动执行
-数据库迁移。
-
 ### 3. 检查状态
 
 ```bash
@@ -124,176 +149,72 @@ docker compose ps
 docker compose logs -f mindforge
 ```
 
-默认访问地址为 `http://127.0.0.1:8000`，FastAPI 接口文档位于 `/docs`。
+默认访问地址为 `http://127.0.0.1:8000`，FastAPI 文档位于 `/docs`。
 
-停止服务：
+## 模型、搜索与上下文配置
 
-```bash
-docker compose down
-```
+设置页面可为 Planner、Researcher、Critic、Synthesizer 和 Direct Answer 分别选择
+模型。Provider 配置支持模型发现、工具调用、JSON 模式、流式用量统计和原生联网搜索。
 
-命名数据卷默认保留。不要在未备份的情况下删除数据卷。
+联网搜索支持 Provider 原生搜索、Tavily 和 DuckDuckGo。配置 `TAVILY_API_KEY` 后，
+可通过 `WEB_SEARCH_PREFER_TAVILY` 控制 Tavily 与原生搜索的优先级。
 
-## 远程访问
+上下文系统支持自动、手动、关闭和独立研究模式。长会话使用规则摘要和可选模型压缩，
+每次研究都会保存不可变 `ContextSnapshot` 供后续查看。
 
-生产环境应保持 `DOCKER_API_BIND_ADDRESS=127.0.0.1`，通过带 HTTPS 和身份认证的
-反向代理开放应用，并由反向代理为 `/api/*` 注入
-`Authorization: Bearer <API_ACCESS_TOKEN>`。
+## API 与 SSE
 
-仅在完全受控的测试网络中直接访问服务器端口时，可以配置：
-
-```dotenv
-DOCKER_API_BIND_ADDRESS=0.0.0.0
-API_ALLOW_INSECURE_REMOTE_ACCESS=true
-```
-
-测试结束后应恢复安全配置。PostgreSQL、Redis 和 Qdrant 端口不应暴露到公网。
-
-## 模型配置
-
-前端“设置”页面提供六类模型配置：
-
-| Provider | 用途 |
+| API | 作用 |
 | --- | --- |
-| OpenAI | OpenAI 原生 API |
-| DeepSeek | DeepSeek API |
-| Kimi | Moonshot/Kimi API 与原生搜索 |
-| GLM | 智谱 GLM API 与原生搜索 |
-| 通用接口 | 其他 OpenAI-compatible 云服务 |
-| 本地模型 | vLLM、Ollama、LM Studio 等兼容服务 |
+| `POST /api/v1/query` | 提交普通或 SSE 流式研究任务。 |
+| `POST /api/v1/query/cancel` | 按 `request_id` 取消流式研究。 |
+| `POST /api/v1/index-jobs` | 创建异步文档索引任务。 |
+| `DELETE /api/v1/index-jobs/{job_id}` | 取消索引任务。 |
+| `/api/v1/conversations/*` | 管理会话、消息和上下文。 |
+| `/api/v1/memories/*` | 管理用户长期记忆。 |
+| `/api/v1/documents/*` | 管理知识库文档和资产。 |
+| `/api/v1/settings` | 管理模型、检索和运行配置。 |
+| `/api/v1/observability/*` | 查看和管理 Trace。 |
+| `/api/v1/health` / `/api/v1/ready` | 检查服务与依赖就绪状态。 |
 
-填写 Base URL 和 API Key 后，可以从 Provider 的模型接口拉取模型列表，并分别为
-Planner、Researcher、Critic、Synthesizer 和 Direct Answer 选择模型。通用接口和本地服务需要正确
-声明工具调用、JSON 模式及原生搜索能力。
-
-设置页保存的 API Key 会加密存入 PostgreSQL，同时同步根目录 `.env`；接口返回时只
-展示脱敏值。`LLM_MODEL_PRICING` 用于费用估算，未配置价格的模型会显示费用不可用，
-不会错误显示为零费用。
-
-## 联网搜索
-
-联网能力支持 Provider 原生搜索、Tavily 和 DuckDuckGo。配置 `TAVILY_API_KEY` 后默认优先使用
-Tavily；将 `WEB_SEARCH_PREFER_TAVILY=false` 可恢复原生搜索优先。DuckDuckGo 通过
-`WEB_SEARCH_DUCKDUCKGO_ENABLED` 显式启用。
-
-支持原生搜索的模型可以直接联网；不支持原生搜索的模型可配置辅助搜索以返回可核验的
-外部来源。无可用搜索来源时，系统会按配置降级且不会伪造引用。
-
-## 知识库
-
-支持上传：
-
-- `.pdf`
-- `.docx`
-- `.html` / `.htm`
-- `.md`
-- `.txt`
-
-上传任务异步执行，前端展示上传与索引进度，并支持取消。PDF 解析会按内容自动选择
-原生文本提取或 OCR，同时处理表格、图片和版面元素。
-
-基础索引包含向量、BM25 和重排序。上传时可选：
-
-- **RAPTOR**：为长文档建立层次摘要索引。
-- **GraphRAG**：抽取实体、关系和社区摘要。
-- **视觉索引**：配置视觉模型后为图片资产生成可检索描述。
-
-文档列表会显示实际应用的索引类型，并支持启用、停用、查看内容和删除文档。
-
-## 可观测与历史
-
-每次研究只创建一个顶层 Orchestrator Trace。本地观测页面提供：
-
-- 任务状态、耗时和失败摘要
-- Planner、Researcher、Critic、Synthesizer 执行链路
-- 模型与工具调用详情
-- Token 用量和费用估算
-- Trace 搜索、筛选与删除
-
-Langfuse 是可选的外部观测后端。配置
-`OBSERVABILITY_LANGFUSE_PUBLIC_KEY`、`OBSERVABILITY_LANGFUSE_SECRET_KEY` 和
-`OBSERVABILITY_LANGFUSE_HOST` 后，同一研究链路会同步到 Langfuse；未配置时本地
-Trace 仍可使用。
-
-研究历史和观测记录相互独立，均支持单条删除和清空。失败研究会保留可追踪的阶段、
-错误类型和原因。
-
-上下文快照与 Trace 也相互独立：Trace 描述执行过程，Context Snapshot 描述本次
-Agent 实际消费的历史内容。
+流式研究会发送路由、规划、子任务、综合、评审、精炼、答案增量、取消和完成状态。前端
+使用请求标识处理进度更新和取消操作。
 
 ## 配置分类
 
-| 配置前缀 | 作用 |
+| 前缀 | 用途 |
 | --- | --- |
-| `API_*` | 服务地址、鉴权、上传限制和索引并发 |
-| `LLM_*` | Provider、模型、Embedding 和费用 |
-| `AGENT_*` | 研究模式、直答路由、超时、并发、任务和工具限制 |
-| `WEB_SEARCH_*` / `TAVILY_*` | 联网搜索与降级策略 |
-| `RETRIEVAL_*` | 混合检索、重排序和相关性阈值 |
-| `PARSER_*` / `VISUAL_*` | 文档、OCR、表格、图片和视觉解析 |
-| `RAPTOR_*` / `GRAPH_*` | 层次索引与图谱索引 |
-| `OBSERVABILITY_*` | 本地 Trace 与 Langfuse |
-| `CONTEXT_*` | 会话上下文、候选召回、Token 预算、摘要、压缩与快照保留 |
-| `MEMORY_*` | 工作记忆、旧版语义记忆和长期偏好捕获 |
-| `VITE_*` | 前端请求、研究和流式渲染限制 |
+| `API_*` | 服务地址、鉴权、上传限制和索引并发。 |
+| `LLM_*` | Provider、角色模型、Embedding 和费用。 |
+| `AGENT_*` | 研究模式、直接回答、超时、并发和任务限制。 |
+| `WEB_SEARCH_*` / `TAVILY_*` | 联网搜索策略。 |
+| `RETRIEVAL_*` | 召回、重排序和阈值。 |
+| `PARSER_*` / `VISUAL_*` | 文档、OCR、表格、图片和视觉解析。 |
+| `RAPTOR_*` / `GRAPH_*` | 层次索引和图谱索引。 |
+| `CONTEXT_*` / `MEMORY_*` | 会话上下文、压缩、快照和记忆。 |
+| `OBSERVABILITY_*` | Trace 与 Langfuse。 |
+| `SANDBOX_*` | 代码执行限制。 |
+| `VITE_*` | 前端请求和流式渲染。 |
 
-修改 `.env` 后，影响进程初始化、模型加载或前端构建的配置需要重新构建并启动服务。
-
-## 本地开发与验证
-
-一体化启动脚本：
+## 开发与验证
 
 ```bash
-bash start.sh
-bash start.sh --dev
-```
-
-质量检查与 CI 一致：
-
-```bash
-python3 -m pip install --require-hashes -r requirements-dev.lock
 ruff check src/ tests/
 pytest tests/ -v -m "not integration"
 
-npm --prefix mindforge-web ci
 npm --prefix mindforge-web run lint
 npm --prefix mindforge-web run test
 npm --prefix mindforge-web run build
 
-cp .env.example .env
 docker compose config --quiet
-```
-
-## 项目结构
-
-```text
-MindForge/
-├── src/mindforge/
-│   ├── agents/          # 四 Agent、Direct Answer 与 Orchestrator
-│   ├── api/             # FastAPI、SSE、设置与资源接口
-│   ├── context/         # 上下文解析、排序、预算、摘要、快照与删除传播
-│   ├── ingestion/       # 文档解析、分块、Embedding、RAPTOR
-│   ├── retrieval/       # 向量、BM25、重排序、GraphRAG
-│   ├── repositories/    # PostgreSQL 仓储与用户隔离查询
-│   ├── services/        # 会话、上下文和索引应用服务
-│   ├── models/          # 模型与原生搜索适配器
-│   ├── memory/          # 工作、情节与语义记忆
-│   └── observability/   # 本地 Trace 与 Langfuse
-├── mindforge-web/       # React 前端
-├── migrations/         # Alembic 数据库迁移
-├── tests/              # 后端测试
-├── docker-compose.yml
-├── docker-compose.gpu.yml
-├── .env.example
-└── start.sh
 ```
 
 ## 安全说明
 
 - `.env`、运行数据、索引、Trace、模型缓存和本地文档不进入 Git。
-- 不要在代码、README、测试或脚本中写入真实 API Key、密码和服务器信息。
-- 对外部署必须使用 HTTPS、访问控制和强随机密钥。
-- 上传限制、解析限制、代码沙箱和并发限制均应按服务器资源调整。
+- API Key 加密保存，接口返回时展示脱敏值。
+- 对外部署使用 HTTPS、访问控制和强随机密钥。
+- 服务提供 CORS 配置、安全响应头、上传限制、模型发现保护和代码执行限制。
 
 ## License
 
