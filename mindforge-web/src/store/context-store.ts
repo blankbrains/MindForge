@@ -52,6 +52,67 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "上下文请求失败。";
 }
 
+function errorStatus(error: unknown): number | null {
+  if (
+    typeof error === "object"
+    && error !== null
+    && "status" in error
+    && typeof (error as { status?: unknown }).status === "number"
+  ) {
+    return (error as { status: number }).status;
+  }
+  return null;
+}
+
+function latestRunId(conversation: ConversationDetail): string | null {
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    const runId = conversation.messages[index]?.run_id;
+    if (typeof runId === "string" && runId.trim()) {
+      return runId;
+    }
+  }
+  return null;
+}
+
+function affectedMessageContextIds(
+  conversation: ConversationDetail | null,
+  messageId: string,
+): Set<string> {
+  const target = conversation?.messages.find(
+    (message) => message.message_id === messageId,
+  );
+  const affectedIds =
+    target?.run_id
+      ? conversation?.messages
+          .filter((message) => message.run_id === target.run_id)
+          .map((message) => message.message_id)
+      : [messageId];
+  return new Set(
+    (affectedIds ?? [messageId]).flatMap((id) => [id, `message:${id}`]),
+  );
+}
+
+async function restoreLatestSnapshot(
+  conversation: ConversationDetail,
+): Promise<{ snapshot: ContextSnapshot | null; error: string | null }> {
+  const runId = latestRunId(conversation);
+  if (!runId) return { snapshot: null, error: null };
+  try {
+    const snapshot = await api.get<ContextSnapshot>(
+      `/research-runs/${runId}/context`,
+    );
+    return { snapshot, error: null };
+  } catch (error) {
+    if (errorStatus(error) === 404) {
+      return { snapshot: null, error: null };
+    }
+    return {
+      snapshot: null,
+      error: `最近一次上下文快照恢复失败：${errorMessage(error)}`,
+    };
+  }
+}
+
 export const useContextStore = create<ContextState>((set, get) => ({
   conversations: [],
   activeConversationId: null,
@@ -69,6 +130,7 @@ export const useContextStore = create<ContextState>((set, get) => ({
 
   initialize: async () => {
     const generation = ++loadGeneration;
+    const snapshotRequestGeneration = ++snapshotGeneration;
     set({ loading: true, error: null });
     try {
       let conversations = await api.get<Conversation[]>("/conversations");
@@ -87,14 +149,22 @@ export const useContextStore = create<ContextState>((set, get) => ({
       const detail = await api.get<ConversationDetail>(
         `/conversations/${activeId}`,
       );
+      const restored = await restoreLatestSnapshot(detail);
       if (generation !== loadGeneration) return;
       set({
         conversations,
         activeConversationId: activeId,
         activeConversation: detail,
         contextMode: detail.context_mode,
+        snapshot:
+          snapshotRequestGeneration === snapshotGeneration
+            ? restored.snapshot
+            : get().snapshot,
         loading: false,
-        error: null,
+        error:
+          snapshotRequestGeneration === snapshotGeneration
+            ? restored.error
+            : get().error,
       });
     } catch (error) {
       if (generation !== loadGeneration) return;
@@ -138,12 +208,18 @@ export const useContextStore = create<ContextState>((set, get) => ({
     if (conversationId === get().activeConversationId) return;
     const generation = ++loadGeneration;
     previewGeneration += 1;
-    snapshotGeneration += 1;
-    set({ loading: true, error: null });
+    const snapshotRequestGeneration = ++snapshotGeneration;
+    set({
+      loading: true,
+      error: null,
+      preview: null,
+      snapshot: null,
+    });
     try {
       const detail = await api.get<ConversationDetail>(
         `/conversations/${conversationId}`,
       );
+      const restored = await restoreLatestSnapshot(detail);
       if (generation !== loadGeneration) return;
       set({
         activeConversationId: conversationId,
@@ -153,8 +229,15 @@ export const useContextStore = create<ContextState>((set, get) => ({
         selectedContextIds: [],
         excludedContextIds: [],
         preview: null,
-        snapshot: null,
+        snapshot:
+          snapshotRequestGeneration === snapshotGeneration
+            ? restored.snapshot
+            : get().snapshot,
         loading: false,
+        error:
+          snapshotRequestGeneration === snapshotGeneration
+            ? restored.error
+            : get().error,
       });
     } catch (error) {
       if (generation !== loadGeneration) return;
@@ -265,6 +348,7 @@ export const useContextStore = create<ContextState>((set, get) => ({
 
   previewContext: async (task) => {
     const generation = ++previewGeneration;
+    snapshotGeneration += 1;
     const state = get();
     if (!state.activeConversationId || !task.trim()) {
       set({ preview: null, previewLoading: false });
@@ -339,19 +423,26 @@ export const useContextStore = create<ContextState>((set, get) => ({
   },
 
   forgetMessage: async (messageId) => {
-    const conversationId = get().activeConversationId;
+    const current = get();
+    const conversationId = current.activeConversationId;
     if (!conversationId) return;
+    const affectedIds = affectedMessageContextIds(
+      current.activeConversation,
+      messageId,
+    );
     try {
       await api.post(
         `/conversations/${conversationId}/messages/${messageId}/forget`,
       );
+      previewGeneration += 1;
       set((state) => ({
         selectedContextIds: state.selectedContextIds.filter(
-          (item) => item !== `message:${messageId}`,
+          (item) => !affectedIds.has(item),
         ),
         excludedContextIds: state.excludedContextIds.filter(
-          (item) => item !== `message:${messageId}`,
+          (item) => !affectedIds.has(item),
         ),
+        preview: null,
       }));
       await get().refreshConversation();
     } catch (error) {
@@ -360,19 +451,34 @@ export const useContextStore = create<ContextState>((set, get) => ({
   },
 
   deleteMessage: async (messageId) => {
-    const conversationId = get().activeConversationId;
+    const current = get();
+    const conversationId = current.activeConversationId;
     if (!conversationId) return;
+    const target = current.activeConversation?.messages.find(
+      (message) => message.message_id === messageId,
+    );
+    const affectedIds = affectedMessageContextIds(
+      current.activeConversation,
+      messageId,
+    );
     try {
       await api.delete(
         `/conversations/${conversationId}/messages/${messageId}`,
       );
+      previewGeneration += 1;
+      snapshotGeneration += 1;
       set((state) => ({
         selectedContextIds: state.selectedContextIds.filter(
-          (item) => item !== `message:${messageId}`,
+          (item) => !affectedIds.has(item),
         ),
         excludedContextIds: state.excludedContextIds.filter(
-          (item) => item !== `message:${messageId}`,
+          (item) => !affectedIds.has(item),
         ),
+        preview: null,
+        snapshot:
+          target?.run_id && state.snapshot?.run_id === target.run_id
+            ? null
+            : state.snapshot,
       }));
       await get().refreshConversation();
     } catch (error) {

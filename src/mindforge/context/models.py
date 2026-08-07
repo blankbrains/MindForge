@@ -128,6 +128,19 @@ class ContextBundle:
                 "rerank_score": item.score,
                 "context_source_type": item.source_type,
                 "context_source_id": item.source_id,
+                "context_pinned": item.pinned,
+                "context_explicitly_selected": item.explicitly_selected,
+                "context_referenced": bool(
+                    item.metadata.get("referenced_by_query")
+                ),
+                "context_latest_turn": bool(
+                    item.metadata.get("latest_turn")
+                ),
+                "context_follow_up_turn": bool(
+                    self.requires_context
+                    and item.metadata.get("latest_turn")
+                ),
+                "context_selection_reason": item.selection_reason,
                 "untrusted_content": True,
             }
             for item in self.items

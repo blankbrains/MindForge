@@ -14,7 +14,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from mindforge.models.base import BaseLLM, ChatMessage, ChatResult, LLMFactory
+from mindforge.models.base import (
+    BaseLLM,
+    ChatMessage,
+    ChatResult,
+    LLMFactory,
+    contains_textual_tool_protocol,
+    extract_textual_tool_calls,
+)
 from mindforge.config import get_settings
 from mindforge.tools.base import BaseTool
 
@@ -171,6 +178,8 @@ class BaseAgent(ABC):
     """
 
     model_role = "researcher"
+    output_token_role: str | None = None
+    deepseek_thinking_mode = "default"
 
     def __init__(
         self,
@@ -195,7 +204,27 @@ class BaseAgent(ABC):
                 self.model_role,
                 _provider,
             )
-            self._llm = LLMFactory.create(_provider, _model)
+            token_role = self.output_token_role or self.model_role
+            max_output_tokens = getattr(
+                settings.agent,
+                f"{token_role}_max_output_tokens",
+                None,
+            )
+            factory_kwargs = (
+                {"max_tokens": int(max_output_tokens)}
+                if isinstance(max_output_tokens, int)
+                and not isinstance(max_output_tokens, bool)
+                else {}
+            )
+            if str(_provider).strip().lower() == "deepseek":
+                thinking_mode = self.deepseek_thinking_mode
+                if thinking_mode in {"enabled", "disabled"}:
+                    factory_kwargs["thinking_mode"] = thinking_mode
+            self._llm = LLMFactory.create(
+                _provider,
+                _model,
+                **factory_kwargs,
+            )
 
         self._tools: list[BaseTool] = tools or []
         self._tool_dict: dict[str, BaseTool] = {t.name: t for t in self._tools}
@@ -238,6 +267,7 @@ class BaseAgent(ABC):
         temperature: Optional[float] = None,
         max_attempts: int = 3,
         deadline: float | None = None,
+        max_output_tokens: int | None = None,
         _llm_override: Any = None,
     ) -> ChatResult:
         """Call the LLM with 3-attempt retry and exponential backoff."""
@@ -265,6 +295,7 @@ class BaseAgent(ABC):
                     tools=tools,
                     response_format=response_format,
                     temperature=temp,
+                    max_output_tokens=max_output_tokens,
                 ),
                 timeout=timeout_seconds,
             )
@@ -292,6 +323,7 @@ class BaseAgent(ABC):
                         "attempt": attempt + 1,
                         "stage": "llm_request",
                         "timeout_seconds": timeout_seconds,
+                        "max_output_tokens": max_output_tokens,
                     },
                 ) as span:
                     span.input = {
@@ -394,6 +426,7 @@ class BaseAgent(ABC):
         *,
         temperature: Optional[float] = None,
         max_attempts: int = 3,
+        max_output_tokens: int | None = None,
         _llm_override: Any = None,
     ) -> AsyncIterator[Any]:
         """Stream one LLM response with the same timeout, retry, and trace policy."""
@@ -423,6 +456,7 @@ class BaseAgent(ABC):
                         "attempt": attempt + 1,
                         "stage": "llm_stream",
                         "timeout_seconds": request_timeout,
+                        "max_output_tokens": max_output_tokens,
                     },
                 )
                 if tracer is not None
@@ -448,11 +482,16 @@ class BaseAgent(ABC):
                             messages=messages,
                             temperature=temp,
                             stream=True,
+                            max_output_tokens=max_output_tokens,
                         ),
                         timeout=request_timeout,
                     )
                     iterator = stream.__aiter__()
                     event_count = 0
+                    content_event_count = 0
+                    heartbeat_event_count = 0
+                    finish_reason = ""
+                    reasoning_only = False
                     while True:
                         try:
                             event = await asyncio.wait_for(
@@ -462,10 +501,27 @@ class BaseAgent(ABC):
                         except StopAsyncIteration:
                             break
                         event_count += 1
+                        if event.type == "chunk" and event.content:
+                            content_event_count += 1
+                        elif event.type == "heartbeat":
+                            heartbeat_event_count += 1
+                        elif event.type == "done":
+                            finish_reason = str(
+                                getattr(event, "finish_reason", "") or ""
+                            )
+                            reasoning_only = bool(
+                                getattr(event, "reasoning_only", False)
+                            )
                         emitted_event = True
                         yield event
                     if span is not None:
-                        span.output = {"event_count": event_count}
+                        span.output = {
+                            "event_count": event_count,
+                            "content_event_count": content_event_count,
+                            "heartbeat_event_count": heartbeat_event_count,
+                            "finish_reason": finish_reason,
+                            "reasoning_only": reasoning_only,
+                        }
                     return
             except asyncio.CancelledError:
                 if span is not None:
@@ -762,6 +818,8 @@ class BaseAgent(ABC):
         require_sources: bool = False,
         source_requirement: str = "required",
         deadline: float | None = None,
+        final_answer_instruction: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> AgentResult:
         """Run the LLM tool-calling loop (ReAct / function calling).
 
@@ -836,6 +894,10 @@ class BaseAgent(ABC):
         strict_sources = (
             require_sources and source_requirement == "required"
         )
+        bounded_final_instruction = (
+            str(final_answer_instruction or "").strip()[:2_000]
+            or "请直接基于现有信息生成完整最终答案。"
+        )
         llm_timeout = float(
             getattr(self._settings.agent, "llm_request_timeout", 45)
         )
@@ -901,6 +963,7 @@ class BaseAgent(ABC):
                         conv,
                         tools=tools,
                         deadline=deadline,
+                        max_output_tokens=max_output_tokens,
                         _llm_override=_llm_override,
                     ),
                     timeout=remaining,
@@ -908,6 +971,7 @@ class BaseAgent(ABC):
             return await self._chat(
                 conv,
                 tools=tools,
+                max_output_tokens=max_output_tokens,
                 _llm_override=_llm_override,
             )
 
@@ -1078,7 +1142,8 @@ class BaseAgent(ABC):
                             "## 已检索证据\n\n"
                             f"{tool_output}\n\n"
                             "请仅基于以上证据回答；有来源时使用对应 [N] "
-                            "引用，不要编造来源。"
+                            "引用，不要编造来源。\n"
+                            f"{bounded_final_instruction}"
                         ),
                     )
                 )
@@ -1098,7 +1163,8 @@ class BaseAgent(ABC):
                         role="user",
                         content=(
                             "证据收集已经完成。不要再调用任何工具；"
-                            "请直接基于现有证据生成完整最终答案。"
+                            "请直接基于现有证据完成分配产物。\n"
+                            f"{bounded_final_instruction}"
                         ),
                     )
                 )
@@ -1113,6 +1179,7 @@ class BaseAgent(ABC):
                             "严格遵守用户指定的篇幅、句数和输出格式；"
                             "不要在正文中追加来源免责声明，系统会通过结构化状态"
                             "单独提示来源情况。不要编造引用或声称已经联网检索成功。"
+                            f"\n{bounded_final_instruction}"
                         ),
                     )
                 )
@@ -1131,6 +1198,11 @@ class BaseAgent(ABC):
                 if force_model_only_generation or force_text_generation
                 else self._get_tool_schemas(active_tool_names)
             )
+            exposed_tool_names = {
+                str(schema.get("function", {}).get("name", ""))
+                for schema in round_tool_schemas
+                if isinstance(schema, dict)
+            }
             result = await chat_with_deadline(
                 tools=(
                     round_tool_schemas
@@ -1140,11 +1212,55 @@ class BaseAgent(ABC):
                     else None
                 ),
             )
+            protocol_detected = contains_textual_tool_protocol(
+                result.content
+            )
+            candidate_tool_calls = list(result.tool_calls or [])
+            if protocol_detected:
+                cleaned_content, textual_calls = (
+                    extract_textual_tool_calls(result.content)
+                )
+                result.content = cleaned_content
+                if not candidate_tool_calls:
+                    candidate_tool_calls = textual_calls
+            allowed_tool_calls = [
+                call
+                for call in candidate_tool_calls
+                if str(call.get("function", {}).get("name", ""))
+                in exposed_tool_names
+            ]
+            boundary_rejected_calls = (
+                len(candidate_tool_calls) - len(allowed_tool_calls)
+            )
+            tool_calls_rejected += boundary_rejected_calls
+            result.tool_calls = allowed_tool_calls or None
 
             # Accumulate token usage
             if result.usage:
                 for k, v in result.usage.items():
                     aggregated_usage[k] = aggregated_usage.get(k, 0) + (v or 0)
+
+            if (
+                protocol_detected or boundary_rejected_calls
+            ) and not result.tool_calls:
+                conv.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=result.content,
+                    )
+                )
+                conv.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            "上一条输出包含无法解析的内部工具协议。不要展示或"
+                            "重复任何 DSML、XML、tool_calls 或 invoke 标签；"
+                            "请直接基于已有上下文和工具结果生成最终答案。"
+                        ),
+                    )
+                )
+                force_text_generation = True
+                continue
 
             # --- No tool calls → final answer ---
             if not result.tool_calls:
@@ -1256,7 +1372,13 @@ class BaseAgent(ABC):
                 final_result = await chat_with_deadline(
                     tools=None,  # no tools allowed – force text answer
                 )
-                final_content = final_result.content or ""
+                candidate = final_result.content or ""
+                final_content = (
+                    ""
+                    if final_result.tool_calls
+                    or contains_textual_tool_protocol(candidate)
+                    else candidate
+                )
                 if final_content:
                     conv.append(ChatMessage(role="assistant", content=final_content))
                 if final_result.usage:
@@ -1284,7 +1406,13 @@ class BaseAgent(ABC):
                 citation_result = await chat_with_deadline(
                     tools=None,
                 )
-                if citation_result.content.strip():
+                if (
+                    not citation_result.tool_calls
+                    and not contains_textual_tool_protocol(
+                        citation_result.content
+                    )
+                    and citation_result.content.strip()
+                ):
                     final_content = citation_result.content
                     conv.append(
                         ChatMessage(
@@ -1312,6 +1440,7 @@ class BaseAgent(ABC):
                     msg.role == "assistant"
                     and msg.content
                     and not msg.tool_calls
+                    and not contains_textual_tool_protocol(msg.content)
                 ):
                     final_content = msg.content
                     break
@@ -1458,11 +1587,14 @@ class BaseAgent(ABC):
             "官网",
             "官方网站",
             "最新",
+            "目前",
+            "现在的",
             "当前版本",
             "发布日期",
             "实时",
             "today",
             "latest",
+            "current",
             "official website",
         )
         if "web_search" in available and any(

@@ -161,6 +161,17 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
         });
         break;
 
+      case "routing":
+        set({
+          phase:
+            event.status === "start"
+              ? "routing"
+              : event.route === "research"
+                ? "planning"
+                : "reviewing",
+        });
+        break;
+
       case "planning":
         set({
           planning: event.status === "start",

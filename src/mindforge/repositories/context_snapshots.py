@@ -3,13 +3,32 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from enum import Enum
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from mindforge.context.models import ContextBundle
 from mindforge.db import ContextSnapshot, ContextSnapshotItem
+
+
+def _json_compatible(value: Any) -> Any:
+    """Convert supported structured values into PostgreSQL JSON primitives."""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return _json_compatible(value.value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_compatible(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_json_compatible(item) for item in value]
+    return value
 
 
 def delete_expired(
@@ -72,11 +91,13 @@ def create(
                 selection_reason=item.selection_reason[:200],
                 pinned=item.pinned,
                 freshness_status=item.freshness_status,
-                metadata_json={
-                    **dict(item.metadata),
-                    "title": item.title,
-                    "explicitly_selected": item.explicitly_selected,
-                },
+                metadata_json=_json_compatible(
+                    {
+                        **dict(item.metadata),
+                        "title": item.title,
+                        "explicitly_selected": item.explicitly_selected,
+                    }
+                ),
             )
         )
     db.flush()

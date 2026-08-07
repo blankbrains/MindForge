@@ -9,26 +9,36 @@ import logging
 import re
 import time
 from contextlib import aclosing, nullcontext
-from typing import Any, AsyncIterator, Optional
+from dataclasses import replace
+from typing import Any, AsyncIterator, Callable, Optional
 
 from mindforge.agents.base import AgentResult
+from mindforge.agents.direct_answer import (
+    DirectAnswerAgent,
+    DirectAnswerDecision,
+)
 from mindforge.agents.planner import PlannerAgent, ResearchPlan, SubTask
 from mindforge.agents.researcher import ResearcherAgent
-from mindforge.agents.response_guidance import is_conversational_task
 from mindforge.agents.critic import CriticAgent, CriticScore
+from mindforge.agents.response_guidance import response_profile
 from mindforge.agents.synthesizer import SynthesizerAgent
 from mindforge.tools.citation_verifier import CitationVerifier
 from mindforge.tools.code_executor import CodeExecutor
 from mindforge.tools.rag_tool import RAGTool
 from mindforge.tools.web_search import WebSearchTool
 from mindforge.config import get_settings
+from mindforge.interaction import (
+    ConversationalTurn,
+    classify_conversational_turn,
+    is_conversational_task,
+)
 from mindforge.memory import WorkingMemory
 from mindforge.models.base import LLMFactory
 from mindforge.context.models import ContextBundle, ResearchRequestContext
 
 logger = logging.getLogger(__name__)
 
-_RESEARCH_CACHE_SCHEMA_VERSION = 5
+_RESEARCH_CACHE_SCHEMA_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # Orchestrator
@@ -63,6 +73,7 @@ class Orchestrator:
         researcher: Optional[ResearcherAgent] = None,
         critic: Optional[CriticAgent] = None,
         synthesizer: Optional[SynthesizerAgent] = None,
+        direct_answer: Optional[DirectAnswerAgent] = None,
         episodic_memory: Any = None,
         semantic_memory: Any = None,
         tracer: Any = None,
@@ -70,6 +81,15 @@ class Orchestrator:
         self._settings = get_settings()
         self._research_semaphore = asyncio.Semaphore(
             self._settings.agent.max_concurrent_research
+        )
+        self._direct_answer_semaphore = asyncio.Semaphore(
+            int(
+                getattr(
+                    self._settings.agent,
+                    "direct_answer_max_concurrent",
+                    8,
+                )
+            )
         )
         self._subtask_semaphore = asyncio.Semaphore(
             self._settings.agent.max_concurrent_subtasks
@@ -80,6 +100,19 @@ class Orchestrator:
 
         self._planner_injected = planner is not None
         self._planner = planner or PlannerAgent()
+        core_agent_injected = any(
+            agent is not None
+            for agent in (planner, researcher, critic, synthesizer)
+        )
+        self._direct_answer = (
+            direct_answer
+            if direct_answer is not None
+            else (
+                None
+                if core_agent_injected
+                else DirectAnswerAgent()
+            )
+        )
 
         if researcher is None:
             provider = self._settings.llm.llm_provider
@@ -112,6 +145,9 @@ class Orchestrator:
                         self._settings.web_search
                         .native_failure_cooldown_seconds
                     ),
+                    prefer_tavily=(
+                        self._settings.web_search.prefer_tavily
+                    ),
                 )
                 if web_search.available:
                     researcher_tools.append(web_search)
@@ -135,12 +171,13 @@ class Orchestrator:
         self._tracer = tracer
         if tracer is not None:
             for agent in (
+                self._direct_answer,
                 self._planner,
                 self._researcher,
                 self._critic,
                 self._synthesizer,
             ):
-                if hasattr(agent, "_tracer"):
+                if agent is not None and hasattr(agent, "_tracer"):
                     agent._tracer = tracer
 
     def close(self) -> None:
@@ -186,15 +223,35 @@ class Orchestrator:
                         else None
                     ),
                 }
-            execution_task = (
-                context_bundle.standalone_query
-                if context_bundle is not None
-                else task
-            )
-            result = await self._run_with_limit(
-                execution_task,
-                context_bundle=context_bundle,
-            )
+            conversational_turn = classify_conversational_turn(task)
+            if conversational_turn is not None:
+                result = self._build_conversational_result(
+                    conversational_turn,
+                    context_bundle=context_bundle,
+                )
+            else:
+                execution_task = (
+                    context_bundle.standalone_query
+                    if context_bundle is not None
+                    else task
+                )
+                direct_result = await self._try_direct_answer(
+                    execution_task,
+                    consideration_task=task,
+                    context_bundle=context_bundle,
+                )
+                if direct_result is not None:
+                    result = direct_result
+                else:
+                    research_kwargs: dict[str, Any] = {}
+                    if request_context is not None:
+                        research_kwargs["request_context"] = request_context
+                    if context_bundle is not None:
+                        research_kwargs["context_bundle"] = context_bundle
+                    result = await self._run_with_limit(
+                        execution_task,
+                        **research_kwargs,
+                    )
             self._attach_trace_id(result)
             self._finish_root_span(root_span, result)
             return result
@@ -203,6 +260,7 @@ class Orchestrator:
         self,
         task: str,
         *,
+        request_context: ResearchRequestContext | None = None,
         context_bundle: ContextBundle | None = None,
     ) -> AgentResult:
         """Execute one research request within the process-wide budget."""
@@ -226,9 +284,12 @@ class Orchestrator:
                 data={"error": "research_queue_timeout"},
             )
         try:
-            if context_bundle is None:
-                return await self._run_unlimited(task)
-            return await self._run_unlimited(task, context_bundle=context_bundle)
+            run_kwargs: dict[str, Any] = {}
+            if request_context is not None:
+                run_kwargs["request_context"] = request_context
+            if context_bundle is not None:
+                run_kwargs["context_bundle"] = context_bundle
+            return await self._run_unlimited(task, **run_kwargs)
         finally:
             self._research_semaphore.release()
 
@@ -236,6 +297,7 @@ class Orchestrator:
         self,
         task: str,
         *,
+        request_context: ResearchRequestContext | None = None,
         context_bundle: ContextBundle | None = None,
     ) -> AgentResult:
         """Execute the full research pipeline for *task*.
@@ -265,23 +327,18 @@ class Orchestrator:
         # ------------------------------------------------------------------
         timeout_seconds = self._settings.agent.research_timeout
         try:
-            pipeline = (
-                self._run_pipeline(
-                    task,
-                    total_usage,
-                    total_cost,
-                    pipeline_log,
-                    start_time,
-                )
-                if context_bundle is None
-                else self._run_pipeline(
-                    task,
-                    total_usage,
-                    total_cost,
-                    pipeline_log,
-                    start_time,
-                    context_bundle=context_bundle,
-                )
+            pipeline_kwargs: dict[str, Any] = {}
+            if request_context is not None:
+                pipeline_kwargs["request_context"] = request_context
+            if context_bundle is not None:
+                pipeline_kwargs["context_bundle"] = context_bundle
+            pipeline = self._run_pipeline(
+                task,
+                total_usage,
+                total_cost,
+                pipeline_log,
+                start_time,
+                **pipeline_kwargs,
             )
             core_result = await asyncio.wait_for(
                 pipeline,
@@ -341,11 +398,13 @@ class Orchestrator:
         pipeline_log: dict[str, Any],
         start_time: float,
         *,
+        request_context: ResearchRequestContext | None = None,
         context_bundle: ContextBundle | None = None,
     ) -> AgentResult:
         """Core pipeline steps — separated for timeout wrapping."""
         working_memory = await self._create_working_memory(
             task,
+            request_context=request_context,
             context_bundle=context_bundle,
         )
 
@@ -507,7 +566,12 @@ class Orchestrator:
         )
         final_critic: Optional[CriticScore] = None
         refine_count = 0
+        refine_attempts = 0
+        refinement_rejections = 0
         refinement_failure: str | None = None
+        best_draft = current_draft
+        best_critic: CriticScore | None = None
+        evaluating_candidate = False
 
         if not self._should_run_critic(task, plan):
             logger.info("快速模式，跳过 Critic 评估")
@@ -533,45 +597,123 @@ class Orchestrator:
                             "overall": critic_score.overall,
                             "should_refine": critic_score.should_refine,
                         }
-                final_critic = critic_score
                 self._accumulate_usage(
                     total_usage,
                     critic_score,
                     total_cost,
+                )
+                if evaluating_candidate and best_critic is not None:
+                    baseline_needs_depth = (
+                        self._report_needs_depth_refinement(
+                            task,
+                            best_draft,
+                            plan,
+                        )
+                    )
+                    candidate_needs_depth = (
+                        self._report_needs_depth_refinement(
+                            task,
+                            current_draft,
+                            plan,
+                        )
+                    )
+                    if not self._is_refinement_improvement(
+                        critic_score,
+                        best_critic,
+                        candidate_draft=current_draft,
+                        baseline_draft=best_draft,
+                        baseline_needs_depth_refinement=(
+                            baseline_needs_depth
+                        ),
+                        candidate_needs_depth_refinement=(
+                            candidate_needs_depth
+                        ),
+                    ):
+                        refinement_rejections += 1
+                        current_draft = best_draft
+                        final_critic = best_critic
+                        pipeline_log["critic"] = {
+                            "evaluations": evaluation_round + 1,
+                            "refine_attempts": refine_attempts,
+                            "refine_rounds": refine_count,
+                            "overall_score": best_critic.overall,
+                            "refined": refine_count > 0,
+                            "refinement_rejected": True,
+                            "candidate_score": critic_score.overall,
+                        }
+                        logger.info(
+                            "Report refinement rejected; keeping the "
+                            "higher-quality draft."
+                        )
+                        break
+                    best_draft = current_draft
+                    best_critic = critic_score
+                    final_critic = critic_score
+                    refine_count += 1
+                    evaluating_candidate = False
+                else:
+                    best_draft = current_draft
+                    best_critic = critic_score
+                    final_critic = critic_score
+                needs_depth_refinement = (
+                    self._report_needs_depth_refinement(
+                        task,
+                        current_draft,
+                        plan,
+                    )
                 )
                 if critic_score.evaluation_status == "failed":
                     pipeline_log["critic"] = {
                         "status": "failed",
                         "reason": critic_score.evaluation_error,
                     }
-                    break
+                    if (
+                        not needs_depth_refinement
+                        or refine_attempts >= max_refine
+                    ):
+                        break
 
                 if (
-                    not self._should_refine_report(critic_score)
-                    or refine_count >= max_refine
+                    (
+                        not needs_depth_refinement
+                        and critic_score.evaluation_status == "evaluated"
+                        and not self._should_refine_report(critic_score)
+                    )
+                    or refine_attempts >= max_refine
                 ):
                     pipeline_log["critic"] = {
                         "evaluations": evaluation_round + 1,
+                        "refine_attempts": refine_attempts,
                         "refine_rounds": refine_count,
                         "overall_score": critic_score.overall,
                         "refined": refine_count > 0,
                     }
                     break
 
+                refinement_feedback = (
+                    critic_score
+                    if critic_score.evaluation_status == "evaluated"
+                    else self._depth_refinement_feedback(
+                        task,
+                        current_draft,
+                        critic_score,
+                    )
+                )
                 # Refine: re-synthesize with critic feedback
                 try:
                     with self._agent_span(
                         "synthesizer",
                         metadata={
                             "phase": "refine",
-                            "round": refine_count + 1,
+                            "round": refine_attempts + 1,
                         },
                     ) as synthesizer_span:
                         refined_result = await self._synthesizer.synthesize(
                             task=task,
                             subtask_results=subtask_outputs,
                             all_sources=all_sources,
-                            critic_feedback=critic_score,
+                            critic_feedback=refinement_feedback,
+                            current_draft=current_draft,
                             max_attempts=1,
                         )
                         if synthesizer_span is not None:
@@ -583,6 +725,7 @@ class Orchestrator:
                     refinement_failure = self._describe_exception(exc)
                     pipeline_log["critic"] = {
                         "evaluations": evaluation_round + 1,
+                        "refine_attempts": refine_attempts,
                         "refine_rounds": refine_count,
                         "overall_score": critic_score.overall,
                         "refined": refine_count > 0,
@@ -606,6 +749,7 @@ class Orchestrator:
                     )
                     pipeline_log["critic"] = {
                         "evaluations": evaluation_round + 1,
+                        "refine_attempts": refine_attempts,
                         "refine_rounds": refine_count,
                         "overall_score": critic_score.overall,
                         "refined": refine_count > 0,
@@ -613,8 +757,12 @@ class Orchestrator:
                         "reason": refinement_failure,
                     }
                     break
-                current_draft = refined_result.output
-                refine_count += 1
+                current_draft = self._strip_unbacked_citations(
+                    refined_result.output,
+                    all_sources,
+                )
+                refine_attempts += 1
+                evaluating_candidate = True
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         total_cost_usd, cost_status = self._cost_summary(total_cost)
@@ -635,6 +783,7 @@ class Orchestrator:
             cost_status=cost_status,
             pipeline_log=pipeline_log,
             refinement_failure=refinement_failure,
+            refinement_rejections=refinement_rejections,
             citation_verification=citation_verification,
         )
         self._attach_context_metadata(result, context_bundle)
@@ -681,16 +830,116 @@ class Orchestrator:
                         else None
                     ),
                 }
-            execution_task = (
-                context_bundle.standalone_query
-                if context_bundle is not None
-                else task
-            )
             try:
+                conversational_turn = classify_conversational_turn(task)
+                if conversational_turn is not None:
+                    result = self._build_conversational_result(
+                        conversational_turn,
+                        context_bundle=context_bundle,
+                    )
+                    self._attach_trace_id(result)
+                    final_result = result
+                    trace_id = result.trace_id
+                    chunk_event: dict[str, Any] = {
+                        "type": "answer_chunk",
+                        "content": result.output,
+                    }
+                    done_event: dict[str, Any] = {
+                        "type": "done",
+                        "result": result,
+                    }
+                    if trace_id:
+                        chunk_event["trace_id"] = trace_id
+                        done_event["trace_id"] = trace_id
+                    yield chunk_event
+                    yield done_event
+                    return
+                execution_task = (
+                    context_bundle.standalone_query
+                    if context_bundle is not None
+                    else task
+                )
+                direct_progress: asyncio.Queue[dict[str, Any] | object] = (
+                    asyncio.Queue()
+                )
+                direct_finished = object()
+                direct_result_holder: dict[str, AgentResult | None] = {}
+
+                async def run_direct_answer() -> None:
+                    try:
+                        direct_result_holder["result"] = (
+                            await self._try_direct_answer(
+                                execution_task,
+                                consideration_task=task,
+                                context_bundle=context_bundle,
+                                progress_callback=direct_progress.put_nowait,
+                            )
+                        )
+                    finally:
+                        direct_progress.put_nowait(direct_finished)
+
+                direct_task = asyncio.create_task(run_direct_answer())
+                try:
+                    while True:
+                        progress_event = await direct_progress.get()
+                        if progress_event is direct_finished:
+                            break
+                        if not isinstance(progress_event, dict):
+                            raise RuntimeError(
+                                "Direct-answer progress produced an invalid event."
+                            )
+                        trace_id = self._current_trace_id()
+                        if trace_id:
+                            progress_event = {
+                                **progress_event,
+                                "trace_id": trace_id,
+                            }
+                        yield progress_event
+                    await direct_task
+                finally:
+                    if not direct_task.done():
+                        direct_task.cancel()
+                        await asyncio.gather(
+                            direct_task,
+                            return_exceptions=True,
+                        )
+                direct_result = direct_result_holder.get("result")
+                if direct_result is not None:
+                    self._attach_trace_id(direct_result)
+                    final_result = direct_result
+                    trace_id = direct_result.trace_id
+                    chunk_size = min(
+                        256,
+                        int(self._settings.agent.stream_chunk_size),
+                    )
+                    for offset in range(0, len(direct_result.output), chunk_size):
+                        chunk_event = {
+                            "type": "answer_chunk",
+                            "content": direct_result.output[
+                                offset : offset + chunk_size
+                            ],
+                        }
+                        if trace_id:
+                            chunk_event["trace_id"] = trace_id
+                        yield chunk_event
+                        await asyncio.sleep(0)
+                    done_event = {
+                        "type": "done",
+                        "result": direct_result,
+                    }
+                    if trace_id:
+                        done_event["trace_id"] = trace_id
+                    yield done_event
+                    return
+                stream_kwargs: dict[str, Any] = {}
+                if request_context is not None:
+                    stream_kwargs["request_context"] = request_context
+                if context_bundle is not None:
+                    stream_kwargs["context_bundle"] = context_bundle
                 async with aclosing(
                     self._stream_run_with_limit(
                         execution_task,
-                        context_bundle=context_bundle,
+                        **stream_kwargs,
                     )
                 ) as limited_stream:
                     async for event in limited_stream:
@@ -722,6 +971,7 @@ class Orchestrator:
         self,
         task: str,
         *,
+        request_context: ResearchRequestContext | None = None,
         context_bundle: ContextBundle | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream the research pipeline under the configured overall timeout."""
@@ -755,13 +1005,14 @@ class Orchestrator:
             stream_finished = object()
 
             async def pump_events() -> None:
-                pipeline_source = (
-                    self._stream_pipeline(task)
-                    if context_bundle is None
-                    else self._stream_pipeline(
-                        task,
-                        context_bundle=context_bundle,
-                    )
+                pipeline_kwargs: dict[str, Any] = {}
+                if request_context is not None:
+                    pipeline_kwargs["request_context"] = request_context
+                if context_bundle is not None:
+                    pipeline_kwargs["context_bundle"] = context_bundle
+                pipeline_source = self._stream_pipeline(
+                    task,
+                    **pipeline_kwargs,
                 )
                 async with aclosing(
                     pipeline_source
@@ -822,6 +1073,7 @@ class Orchestrator:
         self,
         task: str,
         *,
+        request_context: ResearchRequestContext | None = None,
         context_bundle: ContextBundle | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Execute the pipeline and yield events for streaming UIs.
@@ -852,6 +1104,7 @@ class Orchestrator:
             return
         working_memory = await self._create_working_memory(
             task,
+            request_context=request_context,
             context_bundle=context_bundle,
         )
 
@@ -1036,7 +1289,12 @@ class Orchestrator:
         )
         final_critic: Optional[CriticScore] = None
         refine_count = 0
+        refine_attempts = 0
+        refinement_rejections = 0
         refinement_failure: str | None = None
+        best_draft = current_draft
+        best_critic: CriticScore | None = None
+        evaluating_candidate = False
 
         if not self._should_run_critic(task, plan):
             logger.info("快速模式，跳过 Critic 评估")
@@ -1061,7 +1319,6 @@ class Orchestrator:
                             "overall": critic_score.overall,
                             "should_refine": critic_score.should_refine,
                         }
-                final_critic = critic_score
                 self._accumulate_usage(
                     total_usage,
                     critic_score,
@@ -1073,30 +1330,101 @@ class Orchestrator:
                     "score": critic_score,
                     "round": evaluation_round + 1,
                 }
-                if critic_score.evaluation_status == "failed":
-                    break
-
+                if evaluating_candidate and best_critic is not None:
+                    baseline_needs_depth = (
+                        self._report_needs_depth_refinement(
+                            task,
+                            best_draft,
+                            plan,
+                        )
+                    )
+                    candidate_needs_depth = (
+                        self._report_needs_depth_refinement(
+                            task,
+                            current_draft,
+                            plan,
+                        )
+                    )
+                    if not self._is_refinement_improvement(
+                        critic_score,
+                        best_critic,
+                        candidate_draft=current_draft,
+                        baseline_draft=best_draft,
+                        baseline_needs_depth_refinement=(
+                            baseline_needs_depth
+                        ),
+                        candidate_needs_depth_refinement=(
+                            candidate_needs_depth
+                        ),
+                    ):
+                        refinement_rejections += 1
+                        current_draft = best_draft
+                        final_critic = best_critic
+                        logger.info(
+                            "Report refinement rejected; keeping the "
+                            "higher-quality draft."
+                        )
+                        break
+                    best_draft = current_draft
+                    best_critic = critic_score
+                    final_critic = critic_score
+                    refine_count += 1
+                    evaluating_candidate = False
+                else:
+                    best_draft = current_draft
+                    best_critic = critic_score
+                    final_critic = critic_score
+                needs_depth_refinement = (
+                    self._report_needs_depth_refinement(
+                        task,
+                        current_draft,
+                        plan,
+                    )
+                )
                 if (
-                    not self._should_refine_report(critic_score)
-                    or refine_count >= max_refine
+                    critic_score.evaluation_status == "failed"
+                    and (
+                        not needs_depth_refinement
+                        or refine_attempts >= max_refine
+                    )
                 ):
                     break
 
-                yield {"type": "refining", "round": refine_count + 1}
+                if (
+                    (
+                        not needs_depth_refinement
+                        and critic_score.evaluation_status == "evaluated"
+                        and not self._should_refine_report(critic_score)
+                    )
+                    or refine_attempts >= max_refine
+                ):
+                    break
 
+                yield {"type": "refining", "round": refine_attempts + 1}
+
+                refinement_feedback = (
+                    critic_score
+                    if critic_score.evaluation_status == "evaluated"
+                    else self._depth_refinement_feedback(
+                        task,
+                        current_draft,
+                        critic_score,
+                    )
+                )
                 try:
                     with self._agent_span(
                         "synthesizer",
                         metadata={
                             "phase": "refine",
-                            "round": refine_count + 1,
+                            "round": refine_attempts + 1,
                         },
                     ) as synthesizer_span:
                         refined_result = await self._synthesizer.synthesize(
                             task=task,
                             subtask_results=subtask_outputs,
                             all_sources=all_sources,
-                            critic_feedback=critic_score,
+                            critic_feedback=refinement_feedback,
+                            current_draft=current_draft,
                             max_attempts=1,
                         )
                         if synthesizer_span is not None:
@@ -1122,8 +1450,12 @@ class Orchestrator:
                         or "报告精炼返回空结果。"
                     )
                     break
-                current_draft = refined_result.output
-                refine_count += 1
+                current_draft = self._strip_unbacked_citations(
+                    refined_result.output,
+                    all_sources,
+                )
+                refine_attempts += 1
+                evaluating_candidate = True
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         total_cost_usd, cost_status = self._cost_summary(total_cost)
@@ -1143,6 +1475,7 @@ class Orchestrator:
             total_cost_usd=total_cost_usd,
             cost_status=cost_status,
             refinement_failure=refinement_failure,
+            refinement_rejections=refinement_rejections,
             citation_verification=citation_verification,
         )
         self._attach_context_metadata(result, context_bundle)
@@ -1157,6 +1490,577 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _try_direct_answer(
+        self,
+        task: str,
+        *,
+        consideration_task: str | None = None,
+        context_bundle: ContextBundle | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentResult | None:
+        agent = getattr(self, "_direct_answer", None)
+        if agent is None:
+            return None
+        started = time.perf_counter()
+        routing_started = False
+        routing_completed = False
+
+        def report_progress(event: dict[str, Any]) -> None:
+            if progress_callback is not None:
+                progress_callback(event)
+
+        try:
+            routing_task = consideration_task or task
+            if not agent.should_consider(routing_task):
+                return None
+            routing_started = True
+            report_progress({"type": "routing", "status": "start"})
+
+            async def decide() -> DirectAnswerDecision:
+                with self._agent_span("direct_answer") as span:
+                    if span is not None:
+                        span.input = {
+                            "task": task,
+                            "consideration_task": routing_task,
+                            "context_items": (
+                                len(context_bundle.items)
+                                if context_bundle is not None
+                                else 0
+                            ),
+                        }
+                    decision = await agent.decide(
+                        task,
+                        context_bundle=context_bundle,
+                    )
+                    if span is not None:
+                        span.output = {
+                            "route": decision.route,
+                            "confidence": decision.confidence,
+                            "model": decision.model,
+                            "answer_chars": len(decision.answer),
+                        }
+                return decision
+
+            semaphore = getattr(self, "_direct_answer_semaphore", None)
+            if semaphore is None:
+                decision = await decide()
+            else:
+                async with semaphore:
+                    decision = await decide()
+            report_progress(
+                {
+                    "type": "routing",
+                    "status": "done",
+                    "route": decision.route,
+                }
+            )
+            routing_completed = True
+            if decision.route != "direct_answer" or not decision.answer:
+                return None
+            evaluation_task = routing_task
+            current_answer = decision.answer
+            plan = self._direct_answer_plan(
+                evaluation_task,
+                decision,
+                status="in_progress",
+            )
+            report_progress({"type": "planning", "status": "start"})
+            report_progress({"type": "planning", "status": "done"})
+            report_progress(
+                {
+                    "type": "plan_ready",
+                    "plan": ResearchPlan.from_dict(plan.to_dict()),
+                }
+            )
+            report_progress(
+                {
+                    "type": "subtask_start",
+                    "task_id": "direct-answer",
+                    "description": plan.subtasks[0].description,
+                }
+            )
+            critic_history: list[CriticScore] = []
+            refinement_results: list[AgentResult] = []
+            refinement_failure: str | None = None
+            refinement_rejections = 0
+            refine_count = 0
+            refine_attempts = 0
+            best_answer = current_answer
+            best_critic: CriticScore | None = None
+            evaluating_candidate = False
+            max_refine = self._max_direct_refine_rounds(
+                evaluation_task,
+            )
+            for evaluation_round in range(max_refine + 1):
+                with self._agent_span(
+                    "critic",
+                    metadata={
+                        "round": evaluation_round + 1,
+                        "route": "direct_answer",
+                    },
+                ) as critic_span:
+                    critic_score = await self._critic.evaluate(
+                        task=evaluation_task,
+                        draft=current_answer,
+                        sources=[],
+                    )
+                    if critic_span is not None:
+                        critic_span.input = {
+                            "draft_chars": len(current_answer),
+                            "source_count": 0,
+                        }
+                        critic_span.output = {
+                            "overall": critic_score.overall,
+                            "should_refine": critic_score.should_refine,
+                            "evaluation_status": critic_score.evaluation_status,
+                        }
+                critic_history.append(critic_score)
+                report_progress(
+                    {
+                        "type": "critic_feedback",
+                        "score": critic_score.to_dict(),
+                        "round": evaluation_round + 1,
+                    }
+                )
+                if evaluating_candidate and best_critic is not None:
+                    baseline_needs_depth = (
+                        self._direct_answer_needs_depth_refinement(
+                            evaluation_task,
+                            best_answer,
+                        )
+                    )
+                    candidate_needs_depth = (
+                        self._direct_answer_needs_depth_refinement(
+                            evaluation_task,
+                            current_answer,
+                        )
+                    )
+                    if not self._is_refinement_improvement(
+                        critic_score,
+                        best_critic,
+                        candidate_draft=current_answer,
+                        baseline_draft=best_answer,
+                        baseline_needs_depth_refinement=(
+                            baseline_needs_depth
+                        ),
+                        candidate_needs_depth_refinement=(
+                            candidate_needs_depth
+                        ),
+                    ):
+                        refinement_rejections += 1
+                        current_answer = best_answer
+                        break
+                    best_answer = current_answer
+                    best_critic = critic_score
+                    refine_count += 1
+                    evaluating_candidate = False
+                else:
+                    best_answer = current_answer
+                    best_critic = critic_score
+                needs_depth_refinement = (
+                    self._direct_answer_needs_depth_refinement(
+                        evaluation_task,
+                        current_answer,
+                    )
+                )
+                if (
+                    critic_score.evaluation_status == "failed"
+                    and not needs_depth_refinement
+                ):
+                    break
+                if (
+                    refine_attempts >= max_refine
+                    or (
+                        not needs_depth_refinement
+                        and critic_score.evaluation_status == "evaluated"
+                        and not self._should_refine_report(critic_score)
+                    )
+                ):
+                    break
+                refinement_feedback = (
+                    critic_score
+                    if critic_score.evaluation_status == "evaluated"
+                    else self._depth_refinement_feedback(
+                        evaluation_task,
+                        current_answer,
+                        critic_score,
+                    )
+                )
+                report_progress(
+                    {
+                        "type": "refining",
+                        "round": refine_attempts + 1,
+                    }
+                )
+                try:
+                    with self._agent_span(
+                        "synthesizer",
+                        metadata={
+                            "phase": "direct_answer_refine",
+                            "round": evaluation_round + 1,
+                        },
+                    ) as synthesizer_span:
+                        refined_result = await self._synthesizer.synthesize(
+                            task=evaluation_task,
+                            subtask_results=[
+                                {
+                                    "task_id": "direct-answer",
+                                    "description": (
+                                        "无需外部检索的稳定知识回答草稿"
+                                    ),
+                                    "output": current_answer,
+                                    "success": True,
+                                }
+                            ],
+                            all_sources=[],
+                            critic_feedback=refinement_feedback,
+                            current_draft=current_answer,
+                            max_attempts=1,
+                        )
+                        if synthesizer_span is not None:
+                            synthesizer_span.input = {
+                                "draft_chars": len(current_answer),
+                                "requested_depth": response_profile(
+                                    evaluation_task
+                                ).depth,
+                            }
+                            synthesizer_span.output = {
+                                "success": refined_result.success,
+                                "output_chars": len(refined_result.output),
+                            }
+                except Exception as exc:
+                    refinement_failure = self._describe_exception(exc)
+                    logger.warning(
+                        "Direct-answer refinement failed; keeping the last "
+                        "valid draft: %s",
+                        refinement_failure,
+                    )
+                    break
+                if not refined_result.success or not refined_result.output.strip():
+                    refinement_failure = str(
+                        refined_result.data.get("failure_reason")
+                        or "直接回答精炼返回空结果。"
+                    )
+                    break
+                current_answer = refined_result.output.strip()
+                refinement_results.append(refined_result)
+                refine_attempts += 1
+                evaluating_candidate = True
+
+            final_decision = replace(decision, answer=current_answer)
+            final_critic = best_critic or critic_history[-1]
+            direct_agent_result = AgentResult(
+                agent_name="direct_answer",
+                success=True,
+                output=current_answer,
+                data={"sources": []},
+                metadata={"route": "direct_answer"},
+                token_usage=final_decision.token_usage,
+                latency_ms=decision.latency_ms,
+                cost_usd=decision.cost_usd,
+                cost_status=decision.cost_status,
+            )
+            plan.subtasks[0].status = "completed"
+            plan.subtasks[0].result = direct_agent_result
+            result = self._build_direct_answer_result(
+                final_decision,
+                critic_score=final_critic,
+                critic_history=critic_history,
+                refinement_results=refinement_results,
+                refine_count=refine_count,
+                refinement_rejections=refinement_rejections,
+                refinement_failure=refinement_failure,
+                plan=plan,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                context_bundle=context_bundle,
+            )
+            report_progress(
+                {
+                    "type": "subtask_result",
+                    "task_id": "direct-answer",
+                    "result": direct_agent_result,
+                }
+            )
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if routing_started and not routing_completed:
+                report_progress(
+                    {
+                        "type": "routing",
+                        "status": "done",
+                        "route": "research",
+                    }
+                )
+            logger.warning(
+                "Direct-answer preflight failed; continuing with research.",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _direct_answer_plan(
+        task: str,
+        decision: DirectAnswerDecision,
+        *,
+        status: str,
+    ) -> ResearchPlan:
+        direct_agent_result = AgentResult(
+            agent_name="direct_answer",
+            success=True,
+            output=decision.answer,
+            data={"sources": []},
+            metadata={"route": "direct_answer"},
+            token_usage=decision.token_usage,
+            latency_ms=decision.latency_ms,
+            cost_usd=decision.cost_usd,
+            cost_status=decision.cost_status,
+        )
+        return ResearchPlan(
+            plan_id=f"direct-answer-{int(time.time() * 1000):x}"[-20:],
+            original_task=task,
+            subtasks=[
+                SubTask(
+                    task_id="direct-answer",
+                    description=(
+                        "基于稳定通用知识和当前可见上下文直接回答，"
+                        "无需外部检索。"
+                    ),
+                    task_type="analysis",
+                    dependencies=[],
+                    status=status,
+                    priority=1,
+                    result=direct_agent_result if status == "completed" else None,
+                    subtopics=["直接回答", "质量评审"],
+                )
+            ],
+            reasoning=(
+                "模型判断该问题不需要外部检索；保留单任务计划和质量评审，"
+                "并在深度或质量不足时执行一次受控精炼。"
+            ),
+            planner_status="direct",
+        )
+
+    def _build_direct_answer_result(
+        self,
+        decision: DirectAnswerDecision,
+        *,
+        critic_score: CriticScore,
+        critic_history: list[CriticScore] | None = None,
+        refinement_results: list[AgentResult] | None = None,
+        refine_count: int | None = None,
+        refinement_rejections: int = 0,
+        refinement_failure: str | None = None,
+        plan: ResearchPlan,
+        latency_ms: float,
+        context_bundle: ContextBundle | None,
+    ) -> AgentResult:
+        total_usage: dict[str, int] = {}
+        total_cost = self._new_cost_accumulator()
+        self._accumulate_usage(total_usage, decision, total_cost)
+        evaluated_scores = critic_history or [critic_score]
+        for score in evaluated_scores:
+            self._accumulate_usage(total_usage, score, total_cost)
+        for refined_result in refinement_results or []:
+            self._accumulate_usage(total_usage, refined_result, total_cost)
+        cost_usd, cost_status = self._cost_summary(total_cost)
+        quality_status = (
+            "evaluation_failed"
+            if critic_score.evaluation_status == "failed"
+            else "evaluated"
+        )
+        quality = (
+            critic_score.overall
+            if critic_score.evaluation_status == "evaluated"
+            else None
+        )
+        threshold = float(self._settings.agent.critic_threshold)
+        below_threshold = quality is not None and quality < threshold
+        depth_incomplete = self._direct_answer_needs_depth_refinement(
+            plan.original_task,
+            decision.answer,
+        )
+        outcome = (
+            "degraded"
+            if (
+                below_threshold
+                or quality_status == "evaluation_failed"
+                or depth_incomplete
+                or refinement_failure is not None
+            )
+            else "success"
+        )
+        failure_reason = (
+            (
+                f"直接回答质量评分 {quality:.1f}/10 未达到验收阈值。"
+                if below_threshold and quality is not None
+                else None
+            )
+            or (
+                f"直接回答评审失败：{critic_score.evaluation_error}"
+                if quality_status == "evaluation_failed"
+                else None
+            )
+            or (
+                "直接回答在精炼后仍未达到用户要求的详细程度。"
+                if depth_incomplete
+                else None
+            )
+            or (
+                f"直接回答精炼失败：{refinement_failure}"
+                if refinement_failure
+                else None
+            )
+        )
+        refine_rounds = (
+            len(refinement_results or [])
+            if refine_count is None
+            else refine_count
+        )
+        result = AgentResult(
+            agent_name="orchestrator",
+            success=True,
+            output=decision.answer,
+            data={
+                "sources": [],
+                "intent": "direct_answer",
+                "route_reason": decision.reason,
+                "route_confidence": decision.confidence,
+                "critic_score": critic_score.to_dict(),
+                "critic_history": [
+                    score.to_dict() for score in evaluated_scores
+                ],
+                "refine_rounds": refine_rounds,
+                "refinement_rejections": refinement_rejections,
+                "plan": plan.to_dict(),
+            },
+            metadata={
+                "quality": quality,
+                "quality_status": quality_status,
+                "cost": cost_usd,
+                "cost_status": cost_status,
+                "subtask_count": 1,
+                "completed_subtask_count": 1,
+                "failed_subtask_count": 0,
+                "refine_rounds": refine_rounds,
+                "refinement_status": (
+                    "failed"
+                    if refinement_failure
+                    else (
+                        "rejected"
+                        if refinement_rejections and refine_rounds == 0
+                        else (
+                            "completed"
+                            if refine_rounds > 0
+                            else "not_needed"
+                        )
+                    )
+                ),
+                "model": decision.model,
+                "outcome": outcome,
+                "route": "direct_answer",
+                "grounding_status": "not_required",
+                "citation_status": "not_applicable",
+            },
+            token_usage=total_usage,
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
+            cost_status=cost_status,
+        )
+        if failure_reason:
+            result.data["partial_failure"] = failure_reason
+            result.metadata["failure_reason"] = failure_reason
+        Orchestrator._attach_context_metadata(result, context_bundle)
+        return result
+
+    @staticmethod
+    def _direct_answer_needs_depth_refinement(
+        task: str,
+        answer: str,
+    ) -> bool:
+        profile = response_profile(task)
+        if profile.depth != "deep" or profile.min_chars is None:
+            return False
+        minimum_acceptable = max(1_600, int(profile.min_chars * 0.9))
+        return len(answer.strip()) < minimum_acceptable
+
+    @staticmethod
+    def _report_needs_depth_refinement(
+        task: str,
+        draft: str,
+        plan: ResearchPlan,
+    ) -> bool:
+        profile = response_profile(
+            task,
+            subtask_count=len(plan.subtasks),
+            final_report=True,
+        )
+        if profile.depth != "deep" or profile.min_chars is None:
+            return False
+        minimum_acceptable = max(2_400, int(profile.min_chars * 0.9))
+        return len(draft.strip()) < minimum_acceptable
+
+    @staticmethod
+    def _depth_refinement_feedback(
+        task: str,
+        draft: str,
+        failed_score: CriticScore,
+    ) -> CriticScore:
+        profile = response_profile(task, final_report=True)
+        target = profile.min_chars or max(2_400, len(draft))
+        return CriticScore(
+            issues=[
+                (
+                    "当前草稿未达到用户显式要求的详细程度，核心主题、"
+                    "关键条件、例子、限制或实践建议仍有缺口。"
+                )
+            ],
+            suggestions=[
+                (
+                    "基于现有草稿和可见上下文补齐缺失维度，保持信息密度，"
+                    f"正文以不少于约 {target} 个中文字符为目标；"
+                    "不得重复结论、虚构事实或编造引用。"
+                )
+            ],
+            should_refine=True,
+            evaluation_status="failed",
+            evaluation_error=failed_score.evaluation_error,
+        )
+
+    @staticmethod
+    def _build_conversational_result(
+        turn: ConversationalTurn,
+        *,
+        context_bundle: ContextBundle | None,
+    ) -> AgentResult:
+        result = AgentResult(
+            agent_name="orchestrator",
+            success=True,
+            output=turn.response,
+            data={
+                "sources": [],
+                "intent": "conversation",
+                "conversation_kind": turn.kind,
+                "critic_score": None,
+                "refine_rounds": 0,
+            },
+            metadata={
+                "quality": None,
+                "quality_status": "not_evaluated",
+                "cost": None,
+                "cost_status": "not_applicable",
+                "subtask_count": 0,
+                "refine_rounds": 0,
+                "model": "deterministic-router",
+                "outcome": "success",
+                "route": "conversation",
+            },
+            cost_status="not_applicable",
+        )
+        Orchestrator._attach_context_metadata(result, context_bundle)
+        return result
 
     _DEEP_RESEARCH_MARKERS = (
         "深入",
@@ -1263,6 +2167,8 @@ class Orchestrator:
     def _create_direct_comparison_plan(
         task: str,
     ) -> ResearchPlan | None:
+        if not PlannerAgent._is_comparison_task(task):
+            return None
         subjects = PlannerAgent._comparison_subjects(task)
         if subjects is None:
             return None
@@ -1310,8 +2216,35 @@ class Orchestrator:
         return self._research_mode() != "fast"
 
     def _max_refine_rounds(self, plan: ResearchPlan) -> int:
-        del plan
-        return max(0, self._settings.agent.max_refine_rounds)
+        if self._research_mode() == "fast":
+            return 0
+        profile = response_profile(
+            plan.original_task,
+            subtask_count=len(plan.subtasks),
+            final_report=True,
+        )
+        if (
+            self._research_mode() == "balanced"
+            and len(plan.subtasks) <= 1
+            and profile.depth != "deep"
+        ):
+            return 0
+        configured = max(0, self._settings.agent.max_refine_rounds)
+        if self._research_mode() == "balanced":
+            return min(1, configured)
+        return configured
+
+    def _max_direct_refine_rounds(self, task: str) -> int:
+        del task
+        if self._research_mode() == "fast":
+            return 0
+        configured = max(
+            0,
+            int(self._settings.agent.max_refine_rounds),
+        )
+        if self._research_mode() == "balanced":
+            return min(1, configured)
+        return configured
 
     def _should_refine_report(self, score: CriticScore) -> bool:
         if self._research_mode() == "balanced":
@@ -1329,6 +2262,59 @@ class Orchestrator:
                 )
             )
         return score.should_refine
+
+    @staticmethod
+    def _is_refinement_improvement(
+        candidate: CriticScore,
+        baseline: CriticScore,
+        *,
+        candidate_draft: str,
+        baseline_draft: str,
+        baseline_needs_depth_refinement: bool = False,
+        candidate_needs_depth_refinement: bool = False,
+    ) -> bool:
+        """Accept only revisions that improve measured quality without regressions."""
+        if candidate.evaluation_status != "evaluated":
+            return (
+                baseline.evaluation_status != "evaluated"
+                and len(candidate_draft.strip())
+                >= max(1, int(len(baseline_draft.strip()) * 1.2))
+            )
+        if baseline.evaluation_status != "evaluated":
+            return True
+
+        candidate_violations = len(candidate.contract_violations)
+        baseline_violations = len(baseline.contract_violations)
+        dimensions = (
+            "completeness",
+            "accuracy",
+            "depth",
+            "clarity",
+            "citations",
+        )
+        largest_regression = max(
+            getattr(baseline, dimension) - getattr(candidate, dimension)
+            for dimension in dimensions
+        )
+        if candidate_violations > baseline_violations:
+            return False
+        if (
+            baseline_needs_depth_refinement
+            and not candidate_needs_depth_refinement
+        ):
+            return (
+                candidate.overall >= baseline.overall - 0.2
+                and largest_regression <= 0.5
+            )
+        if candidate_violations < baseline_violations:
+            return (
+                candidate.overall >= baseline.overall - 0.2
+                and largest_regression <= 0.5
+            )
+        return (
+            candidate.overall >= baseline.overall + 0.2
+            and largest_regression <= 0.5
+        )
 
     def _get_tracer(self) -> Any:
         observability = getattr(self._settings, "observability", None)
@@ -1410,6 +2396,7 @@ class Orchestrator:
             "subtask_count": result.metadata.get("subtask_count", 0),
             "from_cache": bool(result.data.get("from_cache")),
             "report_chars": len(result.output),
+            "route": result.metadata.get("route", "research"),
         }
         outcome = str(result.metadata.get("outcome") or "").strip().lower()
         root_span.metadata["status"] = (
@@ -1427,7 +2414,7 @@ class Orchestrator:
         subtask: SubTask,
         plan: ResearchPlan,
         *,
-        shared_context: str = "",
+        working_memory: WorkingMemory,
     ) -> AgentResult:
         """Execute a single subtask with a timeout.
 
@@ -1473,11 +2460,31 @@ class Orchestrator:
             )
             dependency_context = dependency_context.strip()[:max_context_chars]
             remaining = max(0, max_context_chars - len(dependency_context))
-            bounded_shared_context = shared_context.strip()[:remaining]
+            context_settings = getattr(self._settings, "context", None)
+            context_view = working_memory.get_relevant_context(
+                subtask.description,
+                max_chars=remaining,
+                include_types={"context", "thought"},
+                min_relevance=float(
+                    getattr(
+                        context_settings,
+                        "subtask_context_min_relevance",
+                        0.08,
+                    )
+                ),
+                max_items=int(
+                    getattr(
+                        context_settings,
+                        "subtask_context_max_items",
+                        8,
+                    )
+                ),
+                allowed_producer_ids=set(subtask.dependencies),
+            )
             context = "\n\n".join(
                 section
                 for section in (
-                    bounded_shared_context,
+                    context_view.text,
                     dependency_context,
                 )
                 if section
@@ -1493,6 +2500,7 @@ class Orchestrator:
                     researcher_span.input = {
                         "description": subtask.description,
                         "context_chars": len(context),
+                        **context_view.to_dict(),
                     }
                 researcher_kwargs: dict[str, Any] = {
                     "context": context or None,
@@ -1575,6 +2583,10 @@ class Orchestrator:
                         "output_chars": len(result.output),
                         "source_count": len(result.data.get("sources", [])),
                     }
+            result.data = {
+                **result.data,
+                "context_scope": context_view.to_dict(),
+            }
             return result
         except asyncio.TimeoutError:
             message = (
@@ -1624,23 +2636,12 @@ class Orchestrator:
         total_usage: dict[str, int],
         total_cost: dict[str, Any],
     ) -> list[SubTask]:
-        max_context_chars = int(
-            getattr(
-                self._settings.agent,
-                "research_context_max_chars",
-                12_000,
-            )
-        )
-        shared_context = working_memory.get_context_string(
-            max_chars=max_context_chars,
-            include_types={"context", "thought"},
-        )
         results = await asyncio.gather(
             *[
                 self._execute_subtask(
                     st,
                     plan,
-                    shared_context=shared_context,
+                    working_memory=working_memory,
                 )
                 for st in ready
             ],
@@ -1755,6 +2756,32 @@ class Orchestrator:
                     result.data.get("source_warning"),
                 )
                 if result
+                else None
+            ),
+            "source_requirement": (
+                result.data.get("source_requirement")
+                if result and result.data
+                else None
+            ),
+            "output_mode": (
+                result.metadata.get(
+                    "output_mode",
+                    result.data.get("output_mode"),
+                )
+                if result
+                else None
+            ),
+            "contract_version": (
+                result.metadata.get(
+                    "contract_version",
+                    result.data.get("contract_version"),
+                )
+                if result
+                else None
+            ),
+            "context_scope": (
+                result.data.get("context_scope")
+                if result and result.data
                 else None
             ),
             "error": error,
@@ -2053,11 +3080,17 @@ class Orchestrator:
         self,
         task: str,
         *,
+        request_context: ResearchRequestContext | None = None,
         context_bundle: ContextBundle | None = None,
     ) -> WorkingMemory:
         memory = WorkingMemory()
         if context_bundle is not None:
             memory.add_context(context_bundle.to_working_chunks())
+            return memory
+        if request_context is not None and (
+            request_context.independent
+            or request_context.context_mode == "disabled"
+        ):
             return memory
         if self._semantic_memory is None:
             return memory
@@ -2118,7 +3151,14 @@ class Orchestrator:
         sources = result.data.get("sources", [])
         if isinstance(sources, list):
             memory.add_context(
-                [source for source in sources if isinstance(source, dict)]
+                [
+                    {
+                        **source,
+                        "producer_subtask_id": subtask.task_id,
+                    }
+                    for source in sources
+                    if isinstance(source, dict)
+                ]
             )
 
     async def _store_memories(
@@ -2214,6 +3254,7 @@ class Orchestrator:
         cost_status: str,
         pipeline_log: dict[str, Any] | None = None,
         refinement_failure: str | None = None,
+        refinement_rejections: int = 0,
         citation_verification: dict[str, Any] | None = None,
     ) -> AgentResult:
         completed_subtasks = sum(
@@ -2286,6 +3327,14 @@ class Orchestrator:
                 "报告精炼未完成，当前展示最后一个有效版本。"
                 f" 原因：{refinement_failure}"
             )
+        if self._report_needs_depth_refinement(
+            plan.original_task,
+            output,
+            plan,
+        ):
+            degradation_reasons.append(
+                "报告在精炼后仍未达到用户要求的详细程度。"
+            )
         if (
             citation_verification is not None
             and not citation_verification.get("valid", True)
@@ -2313,6 +3362,7 @@ class Orchestrator:
             "sources": sources,
             "critic_score": (final_critic.to_dict() if final_critic else None),
             "refine_rounds": refine_count,
+            "refinement_rejections": refinement_rejections,
             "citation_verification": citation_verification,
             "grounding_status": (
                 "model_only"
@@ -2357,7 +3407,15 @@ class Orchestrator:
             "refinement_status": (
                 "failed"
                 if refinement_failure
-                else ("completed" if refine_count > 0 else "not_needed")
+                else (
+                    "rejected"
+                    if refinement_rejections and refine_count == 0
+                    else (
+                        "completed"
+                        if refine_count > 0
+                        else "not_needed"
+                    )
+                )
             ),
             "model": self._settings.llm.llm_provider,
             "outcome": outcome,

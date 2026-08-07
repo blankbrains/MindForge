@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from mindforge.interaction import is_conversational_task
+
 
 ResponseDepth = Literal["concise", "focused", "standard", "deep", "code"]
 
@@ -33,28 +35,6 @@ class ResponseProfile:
         return f"{self.structure}{budget}"
 
 
-_CONVERSATIONAL_TASKS = frozenset(
-    {
-        "hi",
-        "hello",
-        "hey",
-        "你好",
-        "你好啊",
-        "你好呀",
-        "您好",
-        "嗨",
-        "在吗",
-        "早上好",
-        "上午好",
-        "下午好",
-        "晚上好",
-        "谢谢",
-        "多谢",
-        "再见",
-        "你是谁",
-        "你叫什么",
-    }
-)
 _CONCISE_MARKERS = (
     "一句话",
     "一两句",
@@ -131,13 +111,14 @@ _ENUMERATED_INTENT_RE = re.compile(
 
 
 def _normalize(task: str) -> str:
-    return " ".join(task.strip().casefold().split())
-
-
-def is_conversational_task(task: str) -> bool:
-    """Return whether a task is a bounded greeting or social exchange."""
-    normalized = _normalize(task)
-    return bool(normalized) and normalized in _CONVERSATIONAL_TASKS
+    current_task = task
+    for marker in ("当前问题：", "Current question:"):
+        if marker in current_task:
+            candidate = current_task.rsplit(marker, 1)[-1].strip()
+            if candidate:
+                current_task = candidate
+                break
+    return " ".join(current_task.strip().casefold().split())
 
 
 def classify_response_depth(
@@ -217,11 +198,11 @@ def response_profile(
     if depth == "focused":
         return ResponseProfile(
             depth=depth,
-            min_chars=1000,
-            max_chars=1800,
+            min_chars=500,
+            max_chars=1200,
             structure=(
                 "先给直接结论，再解释核心原理、关键条件、典型应用或例子以及必要限制；"
-                "通常使用 3-5 个有实际内容的自然小节，不展开与问题无关的背景。"
+                "通常使用 2-4 个有实际内容的自然小节，不展开与问题无关的背景。"
                 "章节数量是指导范围，不得创建空章节。"
             ),
         )
@@ -251,6 +232,53 @@ def response_profile(
             "章节必须服务于问题，不得为填充模板创建空章节或重复章节。"
         ),
     )
+
+
+def adaptive_output_token_budget(
+    task: str,
+    *,
+    task_type: str = "research",
+    subtask_count: int = 1,
+    final_report: bool = False,
+    hard_limit: int,
+) -> int:
+    """Return a task-aware output budget bounded by a production safety ceiling.
+
+    The hard limit remains authoritative for deep work. Smaller tasks receive
+    lower request budgets so providers cannot spend thousands of unnecessary
+    completion tokens after the requested answer is already complete.
+    """
+    bounded_hard_limit = max(1, int(hard_limit))
+    profile = response_profile(
+        task,
+        task_type=task_type,
+        subtask_count=subtask_count,
+        final_report=final_report,
+    )
+    explicit_deep_request = any(
+        marker in _normalize(task) for marker in _DEEP_MARKERS
+    )
+    if profile.depth == "code":
+        target = bounded_hard_limit
+    elif profile.depth == "concise":
+        target = 700
+    elif profile.depth == "focused":
+        target = 1_800
+    elif profile.depth == "standard":
+        target = (
+            5_200
+            if final_report and subtask_count >= 2
+            else 3_600
+        )
+    elif (
+        final_report
+        and subtask_count >= 2
+        and not explicit_deep_request
+    ):
+        target = 5_200
+    else:
+        target = bounded_hard_limit
+    return min(bounded_hard_limit, target)
 
 
 def build_response_guidance(

@@ -73,13 +73,16 @@ class OpenAIAdapter(BaseLLM):
     # ------------------------------------------------------------------
     async def chat(self, messages: List[ChatMessage], tools: Optional[List[dict]] = None,
                    response_format: Optional[dict] = None, temperature: float = 0.7,
-                   stream: bool = False) -> Union[ChatResult, AsyncIterator[StreamEvent]]:
+                   stream: bool = False,
+                   max_output_tokens: int | None = None) -> Union[ChatResult, AsyncIterator[StreamEvent]]:
         body = dict(
             model=self.model,
             messages=[self._to_openai_msg(m) for m in messages],
             temperature=temperature,
             **self._extra_kwargs,
         )
+        if max_output_tokens is not None:
+            body["max_tokens"] = int(max_output_tokens)
         if tools:
             body["tools"] = tools
         if response_format:
@@ -109,11 +112,7 @@ class OpenAIAdapter(BaseLLM):
             ]
 
         content = msg.content or ""
-        if (
-            not content
-            and response_format
-            and response_format.get("type") == "json_object"
-        ):
+        if not content:
             content = extract_json_object_from_reasoning(msg)
 
         return ChatResult(

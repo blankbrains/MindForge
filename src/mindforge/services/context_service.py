@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 from mindforge.config import get_settings
 from mindforge.context.artifacts import extract_artifacts
 from mindforge.context.builder import ContextBuilder
+from mindforge.context.compression import (
+    ConversationSummaryCompressor,
+)
 from mindforge.context.models import ContextBundle, ResearchRequestContext
 from mindforge.context.summaries import build_structured_summary
 from mindforge.db import (
@@ -20,6 +23,7 @@ from mindforge.db import (
     SessionLocal,
     get_default_user_id,
 )
+from mindforge.interaction import is_conversational_task
 from mindforge.repositories import (
     context_items,
     context_snapshots,
@@ -91,6 +95,7 @@ class ContextService:
                     role="user",
                     content=task,
                     run_id=run_id,
+                    include_in_context=not is_conversational_task(task),
                 )
                 recent = messages.list_context_eligible(
                     db,
@@ -316,6 +321,12 @@ class ContextService:
         metadata["reused_artifact_count"] = sum(
             item.source_type == "artifact" for item in prepared.bundle.items
         )
+        route = str(metadata.get("route") or "research")
+        conversational = route == "conversation"
+        artifact_eligible = route not in {
+            "conversation",
+            "direct_answer",
+        }
 
         with SessionLocal() as db:
             try:
@@ -336,20 +347,26 @@ class ContextService:
                     role="assistant" if success else "system_notice",
                     content=output or "研究任务未生成可见结果。",
                     run_id=prepared.request.run_id,
-                    include_in_context=success,
+                    include_in_context=success and not conversational,
                     metadata={
                         "success": success,
                         "context_snapshot_id": prepared.bundle.snapshot_id,
+                        "route": metadata.get("route"),
                     },
                 )
-                artifact_count = self._store_artifacts(
-                    db,
-                    prepared=prepared,
-                    result=result,
-                    assistant_message_id=assistant_message["message_id"],
+                artifact_count = (
+                    0
+                    if not artifact_eligible
+                    else self._store_artifacts(
+                        db,
+                        prepared=prepared,
+                        result=result,
+                        assistant_message_id=assistant_message["message_id"],
+                    )
                 )
                 metadata["research_artifact_count"] = artifact_count
-                self._capture_preference(db, prepared)
+                if not conversational:
+                    self._capture_preference(db, prepared)
                 self._refresh_summary(
                     db,
                     conversation_id=conversation.conversation_id,
@@ -418,6 +435,114 @@ class ContextService:
             except Exception:
                 db.rollback()
                 raise
+
+    async def refine_summary_with_model(
+        self,
+        *,
+        conversation_id: str,
+        compressor: ConversationSummaryCompressor | None = None,
+    ) -> dict[str, Any]:
+        """Replace a deterministic summary only with source-bound model output."""
+        with SessionLocal() as db:
+            user_id = get_default_user_id(db)
+            conversation = conversations.get(
+                db,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            if conversation is None:
+                return {"status": "conversation_not_found"}
+            active = context_items.get_active_summary(
+                db,
+                conversation_id=conversation_id,
+            )
+            if active is None:
+                return {"status": "summary_not_available"}
+            compression = dict(
+                (active.get("summary") or {}).get("_compression") or {}
+            )
+            if compression.get("method") == "model":
+                return {
+                    "status": "already_compressed",
+                    "summary_id": active["summary_id"],
+                }
+            source_ids = list(active.get("source_message_ids") or [])
+            rows = (
+                db.query(ConversationMessage)
+                .filter(
+                    ConversationMessage.conversation_id == conversation_id,
+                    ConversationMessage.message_id.in_(source_ids),
+                    ConversationMessage.deleted_at.is_(None),
+                    ConversationMessage.include_in_context.is_(True),
+                    ConversationMessage.role.in_(("user", "assistant")),
+                )
+                .order_by(ConversationMessage.sequence.asc())
+                .all()
+            )
+            serialized = [messages.serialize_message(row) for row in rows]
+            expected_summary_id = str(active["summary_id"])
+            fallback_summary = dict(active.get("summary") or {})
+
+        outcome = await (
+            compressor or ConversationSummaryCompressor()
+        ).compress(
+            serialized,
+            fallback_summary=fallback_summary,
+        )
+
+        with SessionLocal() as db:
+            current = context_items.get_active_summary(
+                db,
+                conversation_id=conversation_id,
+            )
+            if (
+                current is None
+                or current["summary_id"] != expected_summary_id
+            ):
+                return {
+                    "status": "stale",
+                    "attempt_status": outcome.status,
+                }
+            if outcome.status == "compressed":
+                replaced = context_items.replace_summary(
+                    db,
+                    conversation_id=conversation_id,
+                    from_sequence=current["from_sequence"],
+                    to_sequence=current["to_sequence"],
+                    summary=outcome.summary,
+                    source_message_ids=source_ids,
+                )
+                db.commit()
+                return {
+                    "status": "compressed",
+                    "summary_id": replaced.get("summary_id"),
+                    "model": outcome.model,
+                }
+
+            compression = dict(
+                (current.get("summary") or {}).get("_compression") or {}
+            )
+            compression.update(
+                {
+                    "method": "deterministic",
+                    "model_attempt_status": outcome.status,
+                    "model": outcome.model,
+                    "error": outcome.error,
+                }
+            )
+            updated = context_items.update_summary_compression_metadata(
+                db,
+                summary_id=expected_summary_id,
+                compression=compression,
+            )
+            if updated:
+                db.commit()
+            return {
+                "status": outcome.status,
+                "summary_id": expected_summary_id,
+                "model": outcome.model,
+                "error": outcome.error,
+            }
 
     def _store_artifacts(
         self,
@@ -505,9 +630,19 @@ class ContextService:
         )
         if len(rows) < threshold:
             return
-        source_rows = rows[: max(1, len(rows) - 6)]
-        serialized = [messages.serialize_message(row) for row in source_rows]
         settings = get_settings()
+        keep_recent = settings.context.summary_keep_recent_messages
+        source_rows = rows[: max(1, len(rows) - keep_recent)]
+        active = context_items.get_active_summary(
+            db,
+            conversation_id=conversation_id,
+        )
+        if (
+            active is not None
+            and int(active["to_sequence"]) >= source_rows[-1].sequence
+        ):
+            return
+        serialized = [messages.serialize_message(row) for row in source_rows]
         summary = build_structured_summary(
             serialized,
             max_tokens=settings.context.summary_max_tokens,

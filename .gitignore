@@ -47,6 +47,11 @@ htmlcov/
 # Node / Frontend
 node_modules/
 
+# Local test files
+tests/
+mindforge-web/**/*.test.ts
+mindforge-web/**/*.test.tsx
+
 # Claude Code local config
 .claude/
 CLAUDE.md

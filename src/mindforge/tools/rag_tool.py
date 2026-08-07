@@ -8,6 +8,10 @@ import re
 import time
 from typing import Any, Optional
 
+from mindforge.interaction import (
+    classify_conversational_turn,
+    is_conversational_task,
+)
 from mindforge.tools.base import BaseTool, ToolResult
 
 try:
@@ -65,28 +69,6 @@ class RAGTool(BaseTool):
         },
         "required": ["query"],
     }
-    _CONVERSATIONAL_QUERIES = frozenset(
-        {
-            "hi",
-            "hello",
-            "hey",
-            "你好",
-            "你好啊",
-            "你好呀",
-            "您好",
-            "嗨",
-            "在吗",
-            "早上好",
-            "上午好",
-            "下午好",
-            "晚上好",
-            "谢谢",
-            "多谢",
-            "再见",
-            "你是谁",
-            "你叫什么",
-        }
-    )
     _QUERY_STOPWORDS = frozenset(
         {
             "and",
@@ -213,11 +195,13 @@ class RAGTool(BaseTool):
                 success=False,
                 error="threshold 必须在 0 到 1 之间。",
             )
-        if self._is_conversational_query(query):
+        conversational_turn = classify_conversational_turn(query)
+        if conversational_turn is not None:
             return ToolResult(
                 success=True,
                 output=(
-                    "你好！当前请求处于知识库检索模式，不会调用大模型进行闲聊。\n\n"
+                    f"{conversational_turn.response}\n\n"
+                    "当前请求处于知识库检索模式，不会调用大模型进行闲聊。\n\n"
                     "请提出与已上传资料相关的具体问题。"
                 ),
                 data={
@@ -450,8 +434,8 @@ class RAGTool(BaseTool):
 
     @classmethod
     def _is_conversational_query(cls, query: str) -> bool:
-        normalized = re.sub(r"[\s，。！？!?、,.]+", "", query).casefold()
-        return normalized in cls._CONVERSATIONAL_QUERIES
+        del cls
+        return is_conversational_task(query)
 
     @staticmethod
     def _has_keyword_evidence(result: Any) -> bool:

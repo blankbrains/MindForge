@@ -608,6 +608,42 @@ class AgentConfig(BaseSettings):
     research_mode: Literal["fast", "balanced", "deep"] = "balanced"
     source_policy: Literal["auto", "knowledge_base", "web"] = "auto"
     fallback_enabled: bool = True
+    direct_answer_enabled: bool = Field(default=True)
+    direct_answer_model: str = Field(default="")
+    direct_answer_timeout_seconds: float = Field(
+        default=20.0,
+        ge=2.0,
+        le=60.0,
+    )
+    direct_answer_min_confidence: float = Field(
+        default=0.72,
+        ge=0.0,
+        le=1.0,
+    )
+    direct_answer_max_input_chars: int = Field(
+        default=320,
+        ge=20,
+        le=2_000,
+    )
+    direct_answer_context_max_chars: int = Field(
+        default=6_000,
+        ge=0,
+        le=50_000,
+    )
+    direct_answer_max_concurrent: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+    )
+    planner_max_output_tokens: int = Field(default=1600, ge=128, le=16_384)
+    researcher_max_output_tokens: int = Field(default=4096, ge=256, le=32_768)
+    critic_max_output_tokens: int = Field(default=2400, ge=128, le=4_096)
+    synthesizer_max_output_tokens: int = Field(default=6000, ge=256, le=32_768)
+    direct_answer_max_output_tokens: int = Field(
+        default=7000,
+        ge=128,
+        le=16_384,
+    )
     max_iterations: int = Field(
         default=3,
         ge=1,
@@ -672,6 +708,7 @@ class AgentConfig(BaseSettings):
 class WebSearchConfig(BaseSettings):
     native_enabled: bool = Field(default=True)
     duckduckgo_enabled: bool = Field(default=False)
+    prefer_tavily: bool = Field(default=True)
     model_only_fallback: bool = Field(default=True)
     max_results: int = Field(default=5, ge=1, le=20)
     native_max_output_tokens: int = Field(default=512, ge=128, le=8192)
@@ -741,6 +778,35 @@ class ContextConfig(BaseSettings):
     min_relevance: float = Field(default=0.12, ge=0.0, le=1.0)
     summary_message_threshold: int = Field(default=12, ge=4, le=200)
     summary_max_tokens: int = Field(default=1200, ge=100, le=10_000)
+    summary_keep_recent_messages: int = Field(default=6, ge=2, le=50)
+    model_compression_enabled: bool = Field(default=True)
+    model_compression_model: str = Field(default="")
+    model_compression_timeout_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        le=120.0,
+    )
+    model_compression_source_max_chars: int = Field(
+        default=24_000,
+        ge=2_000,
+        le=200_000,
+    )
+    model_compression_min_source_chars: int = Field(
+        default=1_000,
+        ge=0,
+        le=100_000,
+    )
+    model_compression_min_coverage: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+    )
+    subtask_context_min_relevance: float = Field(
+        default=0.08,
+        ge=0.0,
+        le=1.0,
+    )
+    subtask_context_max_items: int = Field(default=8, ge=1, le=50)
     snapshot_max_item_chars: int = Field(
         default=12_000,
         ge=500,

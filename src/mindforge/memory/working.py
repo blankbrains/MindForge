@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from mindforge.context.ranker import lexical_relevance
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,25 @@ class MemoryEntry:
     timestamp: float = field(default_factory=time.time)
     importance: float = 0.5
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ContextView:
+    """One task-scoped, observable selection from working memory."""
+
+    text: str
+    selected_keys: tuple[str, ...]
+    excluded_keys: tuple[str, ...]
+    used_chars: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_context_ids": list(self.selected_keys),
+            "excluded_context_ids": list(self.excluded_keys),
+            "selected_count": len(self.selected_keys),
+            "excluded_count": len(self.excluded_keys),
+            "used_chars": self.used_chars,
+        }
 
 
 class WorkingMemory:
@@ -176,6 +197,82 @@ class WorkingMemory:
                 break
 
         return "".join(sections)
+
+    def get_relevant_context(
+        self,
+        query: str,
+        *,
+        max_chars: int,
+        include_types: set[str] | None = None,
+        min_relevance: float = 0.0,
+        max_items: int | None = None,
+        allowed_producer_ids: set[str] | None = None,
+    ) -> ContextView:
+        """Select an isolated context view for one concrete subtask."""
+        candidates: list[tuple[bool, float, float, MemoryEntry]] = []
+        for entry in self._entries.values():
+            if include_types is not None and entry.entry_type not in include_types:
+                continue
+            producer_id = entry.metadata.get("producer_subtask_id")
+            if (
+                producer_id is not None
+                and allowed_producer_ids is not None
+                and producer_id not in allowed_producer_ids
+            ):
+                continue
+            mandatory = bool(
+                entry.metadata.get("context_pinned")
+                or entry.metadata.get("context_explicitly_selected")
+                or entry.metadata.get("context_referenced")
+                or entry.metadata.get("context_follow_up_turn")
+            )
+            relevance = lexical_relevance(query, entry.content)
+            try:
+                importance = float(entry.importance)
+            except (TypeError, ValueError):
+                importance = 0.5
+            if mandatory or relevance >= min_relevance:
+                candidates.append((mandatory, relevance, importance, entry))
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+                item[2],
+                item[3].timestamp,
+            ),
+            reverse=True,
+        )
+        if max_items is not None:
+            candidates = candidates[: max(1, max_items)]
+
+        selected: list[str] = []
+        sections: list[str] = []
+        remaining = max(0, max_chars)
+        for _mandatory, _relevance, _importance, entry in candidates:
+            if remaining <= 0:
+                break
+            snippet = f"[{entry.entry_type}] {entry.content}\n"
+            bounded = snippet[:remaining]
+            if not bounded:
+                continue
+            sections.append(bounded)
+            selected.append(entry.key)
+            remaining -= len(bounded)
+
+        eligible_keys = {
+            entry.key
+            for entry in self._entries.values()
+            if include_types is None or entry.entry_type in include_types
+        }
+        selected_set = set(selected)
+        text = "".join(sections)
+        return ContextView(
+            text=text,
+            selected_keys=tuple(selected),
+            excluded_keys=tuple(sorted(eligible_keys - selected_set)),
+            used_chars=len(text),
+        )
 
     async def clear(self) -> None:
         """Reset working memory to empty."""

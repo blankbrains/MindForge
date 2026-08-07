@@ -376,7 +376,7 @@ export function startResearch(
           useResearchStore
             .getState()
             .fail(
-              "服务器繁忙，请稍后重试。若持续出现请检查 API Key 余额。",
+              "服务器内部处理失败，请稍后重试。若持续出现，请查看服务日志或联系管理员。",
             );
           return;
         }
@@ -409,7 +409,7 @@ export function startResearch(
         useResearchStore
           .getState()
           .fail(
-            "研究请求失败，请稍后重试。如持续出现请检查 API Key 余额。",
+            "研究请求失败，请稍后重试。若持续出现，请查看服务日志或联系管理员。",
           );
       }
     },

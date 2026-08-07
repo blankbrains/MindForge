@@ -79,6 +79,30 @@ def replace_summary(
     return get_active_summary(db, conversation_id=conversation_id) or {}
 
 
+def update_summary_compression_metadata(
+    db: Session,
+    *,
+    summary_id: str,
+    compression: dict[str, Any],
+) -> bool:
+    row = (
+        db.query(ConversationSummary)
+        .filter(
+            ConversationSummary.summary_id == summary_id,
+            ConversationSummary.status == "active",
+        )
+        .first()
+    )
+    if row is None:
+        return False
+    summary = dict(row.summary or {})
+    summary["_compression"] = dict(compression)
+    row.summary = summary
+    row.version += 1
+    db.flush()
+    return True
+
+
 def invalidate_summaries_for_message(db: Session, *, message_id: str) -> int:
     summary_ids = [
         row.derived_id

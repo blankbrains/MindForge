@@ -7,7 +7,7 @@ VECTOR_EMBEDDING_DIM）。
 """
 
 from __future__ import annotations
-from typing import List, Optional, AsyncIterator, Union
+from typing import Any, List, Optional, AsyncIterator, Literal, Union
 import asyncio
 
 import openai
@@ -69,6 +69,11 @@ class DeepSeekAdapter(BaseLLM):
         api_key: Optional[str] = None,
         base_url: str = DEEPSEEK_BASE_URL,
         max_retries: int = 0,
+        thinking_mode: Literal[
+            "default",
+            "enabled",
+            "disabled",
+        ] = "default",
         **kwargs,
     ):
         normalized_model = model.strip()
@@ -96,6 +101,11 @@ class DeepSeekAdapter(BaseLLM):
             api_key=key,
             include_action_sources=False,
         )
+        if thinking_mode not in {"default", "enabled", "disabled"}:
+            raise LLMConfigurationError(
+                "DeepSeek thinking_mode must be default, enabled, or disabled."
+            )
+        self._thinking_mode = thinking_mode
         self._extra_kwargs = kwargs
 
     @property
@@ -126,6 +136,7 @@ class DeepSeekAdapter(BaseLLM):
         response_format: Optional[dict] = None,
         temperature: float = 0.7,
         stream: bool = False,
+        max_output_tokens: int | None = None,
     ) -> Union[ChatResult, AsyncIterator[StreamEvent]]:
         body = dict(
             model=self.model,
@@ -133,6 +144,9 @@ class DeepSeekAdapter(BaseLLM):
             temperature=temperature,
             **self._extra_kwargs,
         )
+        if max_output_tokens is not None:
+            body["max_tokens"] = int(max_output_tokens)
+        self._apply_thinking_mode(body)
         if tools:
             body["tools"] = tools
         if response_format:
@@ -162,11 +176,7 @@ class DeepSeekAdapter(BaseLLM):
             ]
 
         content = msg.content or ""
-        if (
-            not content
-            and response_format
-            and response_format.get("type") == "json_object"
-        ):
+        if not content:
             content = extract_json_object_from_reasoning(msg)
 
         return ChatResult(
@@ -185,16 +195,26 @@ class DeepSeekAdapter(BaseLLM):
         # 流式 tool_calls 按 index 增量聚合，流结束后一次性发出完整 tool_calls
         tool_acc: dict[int, dict] = {}
         usage: dict[str, int] = {}
+        finish_reason = ""
+        reasoning_seen = False
+        content_seen = False
         async for chunk in stream:
             chunk_usage = normalize_token_usage(getattr(chunk, "usage", None))
             if chunk_usage:
                 usage = chunk_usage
             if not chunk.choices:
                 continue
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            chunk_finish_reason = getattr(choice, "finish_reason", None)
+            if chunk_finish_reason:
+                finish_reason = str(chunk_finish_reason)
+            delta = choice.delta
+            has_reasoning = has_reasoning_delta(delta)
+            reasoning_seen = reasoning_seen or has_reasoning
             if delta.content:
+                content_seen = True
                 yield StreamEvent(type="chunk", content=delta.content)
-            elif has_reasoning_delta(delta):
+            elif has_reasoning:
                 yield StreamEvent(type="heartbeat")
             if delta.tool_calls:
                 for tc in delta.tool_calls:
@@ -223,6 +243,8 @@ class DeepSeekAdapter(BaseLLM):
             type="done",
             usage=usage,
             model=self.model,
+            finish_reason=finish_reason,
+            reasoning_only=reasoning_seen and not content_seen,
         )
 
     # ------------------------------------------------------------------
@@ -244,6 +266,18 @@ class DeepSeekAdapter(BaseLLM):
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    def _apply_thinking_mode(self, body: dict[str, Any]) -> None:
+        if self._thinking_mode == "default":
+            return
+        existing = body.get("extra_body")
+        if existing is not None and not isinstance(existing, dict):
+            raise LLMConfigurationError(
+                "DeepSeek extra_body must be a mapping."
+            )
+        extra_body = dict(existing or {})
+        extra_body["thinking"] = {"type": self._thinking_mode}
+        body["extra_body"] = extra_body
+
     @staticmethod
     def _to_openai_msg(m: ChatMessage) -> dict:
         d: dict = {"role": m.role, "content": m.content}

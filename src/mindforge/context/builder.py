@@ -14,7 +14,12 @@ from mindforge.context.models import (
     ResearchRequestContext,
 )
 from mindforge.context.ranker import lexical_relevance, rank_candidates
-from mindforge.context.resolver import resolve_references
+from mindforge.context.resolver import (
+    latest_conversation_turn,
+    ordered_visible_messages,
+    resolve_references,
+)
+from mindforge.interaction import is_conversational_task
 
 
 class ContextBuilder:
@@ -42,6 +47,15 @@ class ContextBuilder:
         request: ResearchRequestContext,
     ) -> ContextBundle:
         mode = request.context_mode
+        if is_conversational_task(query):
+            return ContextBundle(
+                standalone_query=query.strip(),
+                requires_context=False,
+                items=[],
+                excluded=[],
+                budget_tokens=self._settings.budget_tokens,
+                used_tokens=0,
+            )
         disabled = (
             not self._settings.enabled
             or request.independent
@@ -60,6 +74,7 @@ class ContextBuilder:
 
         selected_ids = set(request.selected_context_ids)
         excluded_ids = set(request.excluded_context_ids)
+        referenced_message_ids = set(resolution.referenced_message_ids)
         candidates = self._collect_candidates(
             selected_ids,
             conversation_id=request.conversation_id,
@@ -92,10 +107,20 @@ class ContextBuilder:
                 policy_excluded.append(ContextSelection(candidate, "model_only"))
                 continue
             relevance = lexical_relevance(query, candidate.content)
+            directly_referenced = (
+                candidate.source_type == "message"
+                and candidate.source_id in referenced_message_ids
+            )
+            if directly_referenced:
+                candidate.metadata["referenced_by_query"] = True
             if (
                 mode == "auto"
-                and candidate.source_type in {"artifact", "memory"}
+                and candidate.source_type
+                in {"message", "artifact", "memory"}
                 and not candidate.pinned
+                and not candidate.explicitly_selected
+                and not directly_referenced
+                and not candidate.metadata.get("latest_turn")
                 and relevance < self._settings.min_relevance
             ):
                 policy_excluded.append(ContextSelection(candidate, "low_relevance"))
@@ -105,7 +130,7 @@ class ContextBuilder:
         ranked = rank_candidates(
             query,
             eligible,
-            referenced_message_ids=set(resolution.referenced_message_ids),
+            referenced_message_ids=referenced_message_ids,
         )
         selected, budget_excluded, used = allocate_budget(
             ranked,
@@ -129,7 +154,19 @@ class ContextBuilder:
         conversation_id: str | None,
     ) -> list[ContextCandidate]:
         candidates: list[ContextCandidate] = []
-        for message in self._recent_messages:
+        ordered_messages = ordered_visible_messages(self._recent_messages)
+        latest_turn_ids = {
+            str(message.get("message_id"))
+            for message in latest_conversation_turn(ordered_messages)
+            if message.get("message_id")
+        }
+        newest_first = list(reversed(ordered_messages))
+        recency_ranks = {
+            str(message.get("message_id")): rank
+            for rank, message in enumerate(newest_first)
+            if message.get("message_id")
+        }
+        for message in ordered_messages:
             source_id = str(message["message_id"])
             candidates.append(
                 ContextCandidate(
@@ -151,12 +188,15 @@ class ContextBuilder:
                         "role": message.get("role"),
                         "sequence": message.get("sequence"),
                         "same_conversation": True,
+                        "latest_turn": source_id in latest_turn_ids,
+                        "message_recency_rank": recency_ranks.get(source_id),
                     },
                 )
             )
         if self._summary:
             source_id = str(self._summary["summary_id"])
             summary = self._summary.get("summary") or {}
+            compression = dict(summary.get("_compression") or {})
             content = "\n".join(
                 [
                     f"目标：{summary.get('goal', '')}",
@@ -178,6 +218,30 @@ class ContextBuilder:
                     ),
                     metadata={"same_conversation": True},
                 )
+            )
+            candidates[-1].metadata.update(
+                {
+                    "compression_method": compression.get(
+                        "method",
+                        "deterministic",
+                    ),
+                    "compression_model": compression.get("model"),
+                    "compression_status": compression.get(
+                        "model_attempt_status",
+                        (
+                            "compressed"
+                            if compression.get("method") == "model"
+                            else "deterministic"
+                        ),
+                    ),
+                    "source_message_count": compression.get(
+                        "source_message_count",
+                        len(self._summary.get("source_message_ids") or []),
+                    ),
+                    "compressed_chars": compression.get("compressed_chars"),
+                    "from_sequence": self._summary.get("from_sequence"),
+                    "to_sequence": self._summary.get("to_sequence"),
+                }
             )
         for artifact in self._artifacts:
             source_id = str(artifact["artifact_id"])

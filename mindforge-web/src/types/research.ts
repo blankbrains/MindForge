@@ -15,6 +15,7 @@ export interface ResearchPlan {
   reasoning: string;
   planner_status?: "planned" | "direct" | "fallback";
   planner_error?: string | null;
+  contract_version?: string;
 }
 
 export interface AgentResult {
@@ -63,10 +64,17 @@ export interface CriticScore {
   should_refine: boolean;
   evaluation_status?: "evaluated" | "failed";
   evaluation_error?: string | null;
+  contract_violations?: string[];
+  contract_version?: string;
 }
 
 type SSEEventPayload =
   | { type: "trace_started" }
+  | {
+      type: "routing";
+      status: "start" | "done";
+      route?: "direct_answer" | "research";
+    }
   | { type: "planning"; status: "start" | "done" }
   | { type: "heartbeat"; timestamp: number }
   | { type: "plan_ready"; plan: ResearchPlan }

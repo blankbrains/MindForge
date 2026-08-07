@@ -6,10 +6,20 @@ import re
 from typing import Literal, Optional
 
 from mindforge.agents.base import AgentResult, BaseAgent
+from mindforge.agents.contracts import (
+    AGENT_CONTRACT_VERSION,
+    ResearchTaskType,
+    SUPPORTED_RESEARCH_TASK_TYPES,
+    research_output_instruction,
+    research_output_mode,
+    role_contract,
+)
 from mindforge.agents.response_guidance import (
+    adaptive_output_token_budget,
     build_response_guidance,
     response_profile,
 )
+from mindforge.interaction import is_conversational_task
 
 # ---------------------------------------------------------------------------
 # ResearcherAgent
@@ -36,7 +46,7 @@ _RESEARCHER_SYSTEM_PROMPT = """你是一名专业的研究助理。你可以使�
 7. 使用标准 Markdown：标题、段落和列表之间保留空行，每段只表达一个主题。
 8. 对比项、参数和统计数据等行列信息使用 GFM 表格；代码块必须标注语言。
 
-记住：来源工具提供可核验的证据；模型知识只能用于解释和组织，不能替代真实引用。"""
+记住：来源工具提供可核验的证据；模型知识只能用于解释和组织，不能替代真实引用。""" + "\n\n" + role_contract("researcher")
 
 
 class ResearcherAgent(BaseAgent):
@@ -47,28 +57,7 @@ class ResearcherAgent(BaseAgent):
     """
 
     model_role = "researcher"
-    _CONVERSATIONAL_TASKS = frozenset(
-        {
-            "hi",
-            "hello",
-            "hey",
-            "你好",
-            "你好啊",
-            "你好呀",
-            "您好",
-            "嗨",
-            "在吗",
-            "早上好",
-            "上午好",
-            "下午好",
-            "晚上好",
-            "谢谢",
-            "多谢",
-            "再见",
-            "你是谁",
-            "你叫什么",
-        }
-    )
+    deepseek_thinking_mode = "enabled"
     _TRANSFORMATION_RE = re.compile(
         r"^(?:(?:请|请你|帮我|麻烦你)\s*)?"
         r"(?:"
@@ -109,6 +98,8 @@ class ResearcherAgent(BaseAgent):
         "官网",
         "官方网站",
         "最新",
+        "目前",
+        "现在的",
         "当前版本",
         "实时",
         "今天",
@@ -133,6 +124,7 @@ class ResearcherAgent(BaseAgent):
         "online source",
         "official website",
         "latest",
+        "current",
         "current version",
         "citation",
         "verify",
@@ -152,10 +144,10 @@ class ResearcherAgent(BaseAgent):
         cls,
         task: str,
         *,
-        task_type: str = "research",
+        task_type: ResearchTaskType = "research",
     ) -> bool:
         normalized = " ".join(task.strip().casefold().split())
-        if not normalized or normalized in cls._CONVERSATIONAL_TASKS:
+        if not normalized or is_conversational_task(task):
             return False
         if task_type == "code":
             return False
@@ -199,6 +191,7 @@ class ResearcherAgent(BaseAgent):
             task,
             task_type=task_type,
             subtask_count=subtask_count,
+            final_report=total_subtasks <= 1,
         )
 
     @classmethod
@@ -257,6 +250,10 @@ class ResearcherAgent(BaseAgent):
         -------
         AgentResult with the final researched answer.
         """
+        if task_type not in SUPPORTED_RESEARCH_TASK_TYPES:
+            raise ValueError(f"Unsupported researcher task_type: {task_type!r}")
+        output_mode = research_output_mode(total_subtasks)
+        output_instruction = research_output_instruction(output_mode)
         guidance = self._TASK_TYPE_GUIDANCE.get(
             task_type,
             self._TASK_TYPE_GUIDANCE["research"],
@@ -274,6 +271,10 @@ class ResearcherAgent(BaseAgent):
         )
         execution_context = [
             f"## 子任务类型\n\n{task_type}: {guidance}",
+            (
+                "## 输出合约\n\n"
+                f"mode={output_mode}\n{output_instruction}"
+            ),
             f"## 回答深度\n\n{depth_guidance}",
         ]
         if normalized_subtopics:
@@ -299,11 +300,47 @@ class ResearcherAgent(BaseAgent):
                 )
             ),
         )
-        return await self._run_tool_loop(
+        agent_settings = getattr(
+            getattr(self, "_settings", None),
+            "agent",
+            None,
+        )
+        hard_output_limit = int(
+            getattr(
+                agent_settings,
+                "researcher_max_output_tokens",
+                4_096,
+            )
+        )
+        if output_mode == "evidence_brief" and task_type != "code":
+            output_token_budget = min(hard_output_limit, 3_000)
+        else:
+            output_token_budget = adaptive_output_token_budget(
+                task,
+                task_type=task_type,
+                hard_limit=hard_output_limit,
+            )
+        result = await self._run_tool_loop(
             task,
             context="\n\n".join(execution_context),
             max_rounds=max_rounds,
             require_sources=requirement != "not_required",
             source_requirement=requirement,
             deadline=deadline,
+            final_answer_instruction=output_instruction,
+            max_output_tokens=output_token_budget,
         )
+        result.data = {
+            **result.data,
+            "contract_version": AGENT_CONTRACT_VERSION,
+            "output_mode": output_mode,
+            "task_type": task_type,
+            "source_requirement": requirement,
+        }
+        result.metadata = {
+            **result.metadata,
+            "contract_version": AGENT_CONTRACT_VERSION,
+            "output_mode": output_mode,
+            "task_type": task_type,
+        }
+        return result

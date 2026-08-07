@@ -84,6 +84,7 @@ class WebSearchTool(BaseTool):
         native_max_output_tokens: Optional[int] = None,
         native_timeout_seconds: Optional[float] = None,
         native_failure_cooldown_seconds: Optional[float] = None,
+        prefer_tavily: Optional[bool] = None,
     ) -> None:
         super().__init__()
         from mindforge.config import get_settings
@@ -105,6 +106,11 @@ class WebSearchTool(BaseTool):
             settings.duckduckgo_enabled
             if duckduckgo_enabled is None
             else duckduckgo_enabled
+        )
+        self._prefer_tavily = (
+            settings.prefer_tavily
+            if prefer_tavily is None
+            else prefer_tavily
         )
         self._native_max_output_tokens = (
             settings.native_max_output_tokens
@@ -582,6 +588,45 @@ class WebSearchTool(BaseTool):
 
         native_result: ToolResult | None = None
         native_failure = self._native_circuit_failure()
+        tavily_attempted = False
+        if self._prefer_tavily and self.tavily_available:
+            tavily_attempted = True
+            try:
+                preferred_result = await asyncio.to_thread(
+                    self._search_tavily,
+                    query=query,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                    include_answer=include_answer,
+                    include_domains=include_domains,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Preferred Tavily search failed; trying provider-native "
+                    "search: %s",
+                    type(exc).__name__,
+                )
+            else:
+                preferred_sources = (
+                    preferred_result.data.get("sources", [])
+                    if preferred_result is not None
+                    and isinstance(preferred_result.data, dict)
+                    else []
+                )
+                if preferred_result is not None and preferred_sources:
+                    preferred_result.execution_time_ms = (
+                        time.perf_counter() - start
+                    ) * 1000
+                    return preferred_result
+                if (
+                    preferred_result is not None
+                    and not self.native_available
+                    and not self.duckduckgo_available
+                ):
+                    preferred_result.execution_time_ms = (
+                        time.perf_counter() - start
+                    ) * 1000
+                    return preferred_result
         if self.native_available:
             try:
                 native_result = await self._search_native(
@@ -657,7 +702,7 @@ class WebSearchTool(BaseTool):
                     include_answer=include_answer,
                     include_domains=include_domains,
                 )
-                if self.tavily_available
+                if self.tavily_available and not tavily_attempted
                 else None
             )
         except Exception as exc:

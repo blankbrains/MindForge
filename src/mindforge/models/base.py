@@ -1,6 +1,7 @@
 """模型抽象接口 — 支持多种 LLM 和 Embedding 提供者"""
 from __future__ import annotations
 
+import html
 import json
 import re
 from abc import ABC, abstractmethod
@@ -37,6 +38,8 @@ class StreamEvent:
     tool_calls: Optional[List[dict]] = None
     usage: dict[str, int] = field(default_factory=dict)
     model: str = ""
+    finish_reason: str = ""
+    reasoning_only: bool = False
 
 
 @dataclass
@@ -49,6 +52,117 @@ class NativeWebSearchResult:
     model: str = ""
     backend: str = ""
     answer_ready: bool = False
+
+
+_DSML_MARKER = r"\|\s*\|\s*DSML\s*\|\s*\|"
+_DSML_PROTOCOL_RE = re.compile(
+    rf"<\s*/?\s*{_DSML_MARKER}\s*"
+    r"(?:tool_calls|invoke|parameter)\b",
+    re.IGNORECASE,
+)
+_DSML_TOOL_BLOCK_RE = re.compile(
+    rf"<\s*{_DSML_MARKER}\s*tool_calls\s*>.*?"
+    rf"<\s*/\s*{_DSML_MARKER}\s*tool_calls\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_INVOKE_RE = re.compile(
+    rf"<\s*{_DSML_MARKER}\s*invoke\b(?P<attrs>[^>]*)>"
+    rf"(?P<body>.*?)"
+    rf"<\s*/\s*{_DSML_MARKER}\s*invoke\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_PARAMETER_RE = re.compile(
+    rf"<\s*{_DSML_MARKER}\s*parameter\b(?P<attrs>[^>]*)>"
+    rf"(?P<value>.*?)"
+    rf"<\s*/\s*{_DSML_MARKER}\s*parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ATTRIBUTE_RE = re.compile(
+    r"([A-Za-z_][\w.-]*)\s*=\s*(['\"])(.*?)\2",
+    re.DOTALL,
+)
+
+
+def contains_textual_tool_protocol(text: str) -> bool:
+    """Return whether model text contains an internal DSML tool protocol."""
+    normalized = html.unescape(str(text or "")).replace("｜", "|")
+    return _DSML_PROTOCOL_RE.search(normalized) is not None
+
+
+def extract_textual_tool_calls(
+    text: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Parse DeepSeek-style DSML calls that were returned as plain text."""
+    normalized = html.unescape(str(text or "")).replace("｜", "|")
+    calls: list[dict[str, Any]] = []
+    for index, invoke in enumerate(_DSML_INVOKE_RE.finditer(normalized), 1):
+        invoke_attrs = {
+            key.casefold(): value
+            for key, _quote, value in _ATTRIBUTE_RE.findall(
+                invoke.group("attrs")
+            )
+        }
+        tool_name = html.unescape(invoke_attrs.get("name", "")).strip()
+        if not tool_name:
+            continue
+        arguments: dict[str, Any] = {}
+        for parameter in _DSML_PARAMETER_RE.finditer(invoke.group("body")):
+            parameter_attrs = {
+                key.casefold(): value
+                for key, _quote, value in _ATTRIBUTE_RE.findall(
+                    parameter.group("attrs")
+                )
+            }
+            parameter_name = html.unescape(
+                parameter_attrs.get("name", "")
+            ).strip()
+            if not parameter_name:
+                continue
+            raw_value = html.unescape(parameter.group("value")).strip()
+            if parameter_attrs.get("boolean", "").casefold() == "true":
+                value: Any = raw_value.casefold() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            elif parameter_attrs.get("integer", "").casefold() == "true":
+                try:
+                    value = int(raw_value)
+                except ValueError:
+                    value = raw_value
+            elif parameter_attrs.get("number", "").casefold() == "true":
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = raw_value
+            else:
+                value = raw_value
+            arguments[parameter_name] = value
+        calls.append(
+            {
+                "id": f"textual-tool-{index}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(
+                        arguments,
+                        ensure_ascii=False,
+                    ),
+                },
+            }
+        )
+
+    cleaned = _DSML_TOOL_BLOCK_RE.sub("", normalized)
+    if calls and cleaned == normalized:
+        cleaned = _DSML_INVOKE_RE.sub("", normalized)
+        cleaned = re.sub(
+            rf"<\s*/?\s*{_DSML_MARKER}\s*tool_calls\s*>",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    return cleaned.strip(), calls
 
 
 def normalize_token_usage(usage: Any) -> dict[str, int]:
@@ -151,7 +265,15 @@ class BaseLLM(ABC):
         )
 
     @abstractmethod
-    async def chat(self, messages, tools=None, response_format=None, temperature=0.7, stream=False):
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        response_format=None,
+        temperature=0.7,
+        stream=False,
+        max_output_tokens=None,
+    ):
         pass
     @abstractmethod
     async def embed(self, texts):

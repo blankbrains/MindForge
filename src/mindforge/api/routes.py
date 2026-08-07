@@ -57,6 +57,7 @@ from mindforge.api.schemas import (
 from mindforge.api.context_routes import router as context_router
 from mindforge.agents.base import AgentResult
 from mindforge.agents.orchestrator import Orchestrator
+from mindforge.context.models import ResearchRequestContext
 from mindforge.ingestion.parsers import DocumentParser, DocumentParserError
 from mindforge.ingestion.chunker import (
     DocumentChunk,
@@ -99,6 +100,7 @@ _ENV_FILE_LOCK = threading.RLock()
 _SETTINGS_UPDATE_LOCK = threading.RLock()
 _RESEARCH_CANCELLATION_LOCK = threading.RLock()
 _ACTIVE_RESEARCH_CANCELLATIONS: dict[str, asyncio.Event] = {}
+_CONTEXT_COMPACTION_TASKS: set[asyncio.Task[None]] = set()
 IndexProgressCallback = Callable[
     [str, float, int, dict[str, float]],
     Awaitable[None],
@@ -1153,6 +1155,21 @@ def _prepare_research_context(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _standalone_request_context(
+    body: QueryRequest,
+    *,
+    run_id: str,
+) -> ResearchRequestContext:
+    """Preserve request-level context controls without a conversation."""
+    return ResearchRequestContext(
+        run_id=run_id,
+        context_mode=body.context_mode or "auto",
+        selected_context_ids=tuple(body.selected_context_ids),
+        excluded_context_ids=tuple(body.excluded_context_ids),
+        independent=body.independent,
+    )
+
+
 def _complete_research_context(prepared: Any, result: Any) -> bool:
     if prepared is None:
         return True
@@ -1166,6 +1183,17 @@ def _complete_research_context(prepared: Any, result: Any) -> bool:
             else result.setdefault("metadata", {})
         )
         metadata["context_persistence_status"] = "completed"
+        conversation_id = getattr(
+            getattr(prepared, "request", None),
+            "conversation_id",
+            None,
+        )
+        if (
+            conversation_id
+            and metadata.get("route") != "conversation"
+            and _schedule_context_summary_compaction(conversation_id)
+        ):
+            metadata["context_summary_compaction"] = "scheduled"
         return True
     except Exception as exc:
         logger.exception("Failed to finalize conversation context.")
@@ -1177,6 +1205,52 @@ def _complete_research_context(prepared: Any, result: Any) -> bool:
         metadata["context_persistence_status"] = "failed"
         metadata["context_persistence_error"] = str(exc)[:500]
         return False
+
+
+async def _refine_context_summary(conversation_id: str) -> None:
+    from mindforge.services.context_service import ContextService
+
+    result = await ContextService().refine_summary_with_model(
+        conversation_id=conversation_id,
+    )
+    status = str(result.get("status") or "")
+    if status in {"failed", "timeout", "rejected"}:
+        logger.warning(
+            "Conversation summary model compression did not complete: "
+            "conversation=%s status=%s error=%s",
+            conversation_id,
+            status,
+            result.get("error"),
+        )
+
+
+def _schedule_context_summary_compaction(conversation_id: str) -> bool:
+    if (
+        not get_settings().context.model_compression_enabled
+        or not has_llm_credentials()
+    ):
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    task = loop.create_task(_refine_context_summary(conversation_id))
+    _CONTEXT_COMPACTION_TASKS.add(task)
+
+    def finalize(completed: asyncio.Task[None]) -> None:
+        _CONTEXT_COMPACTION_TASKS.discard(completed)
+        try:
+            completed.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception(
+                "Conversation summary compression task failed: %s",
+                conversation_id,
+            )
+
+    task.add_done_callback(finalize)
+    return True
 
 
 def _abandon_research_context(
@@ -1254,6 +1328,7 @@ async def _execute_query_non_stream(
     llm_available: bool,
     start: float,
     prepared_context: Any = None,
+    request_context: ResearchRequestContext | None = None,
 ) -> QueryResponse:
     """Execute one non-streaming request inside the caller's trace context."""
     primary_failure: AgentResult | None = None
@@ -1266,7 +1341,12 @@ async def _execute_query_non_stream(
                 "run",
                 body.task,
                 request_context=(
-                    prepared_context.request if prepared_context else None
+                    getattr(prepared_context, "request", None)
+                    or request_context
+                    or _standalone_request_context(
+                        body,
+                        run_id=body.request_id or uuid.uuid4().hex,
+                    )
                 ),
                 context_bundle=(
                     prepared_context.bundle if prepared_context else None
@@ -1506,6 +1586,13 @@ async def query(body: QueryRequest):
                     request_id=request_id,
                     cancellation=cancellation,
                     prepared_context=prepared_context,
+                    request_context=(
+                        getattr(prepared_context, "request", None)
+                        or _standalone_request_context(
+                            body,
+                            run_id=request_id,
+                        )
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -1553,6 +1640,13 @@ async def query(body: QueryRequest):
                 llm_available=llm_available,
                 start=start,
                 prepared_context=prepared_context,
+                request_context=(
+                    getattr(prepared_context, "request", None)
+                    or _standalone_request_context(
+                        body,
+                        run_id=run_id,
+                    )
+                ),
             )
         except BaseException as exc:
             await asyncio.to_thread(
@@ -3524,20 +3618,22 @@ async def _stream_response(
     request_id: str | None = None,
     cancellation: asyncio.Event | None = None,
     prepared_context: Any = None,
+    request_context: ResearchRequestContext | None = None,
 ) -> AsyncGenerator[bytes, None]:
     """Stream SSE bytes while one producer task owns the trace context."""
     chunk_queue: asyncio.Queue[bytes | object] = asyncio.Queue()
     stream_finished = object()
 
     async def pump_chunks() -> None:
-        event_source = (
-            _stream_response_events(orch, task)
-            if prepared_context is None
-            else _stream_response_events(
-                orch,
-                task,
-                prepared_context=prepared_context,
-            )
+        event_kwargs: dict[str, Any] = {}
+        if prepared_context is not None:
+            event_kwargs["prepared_context"] = prepared_context
+        if request_context is not None:
+            event_kwargs["request_context"] = request_context
+        event_source = _stream_response_events(
+            orch,
+            task,
+            **event_kwargs,
         )
         async with aclosing(
             event_source
@@ -3636,19 +3732,27 @@ async def _stream_response_events(
     task: str,
     *,
     prepared_context: Any = None,
+    request_context: ResearchRequestContext | None = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE streaming — with automatic fallback to retrieval-only on LLM failure."""
     started = time.perf_counter()
     completed_result: AgentResult | dict[str, Any] | None = None
     primary_failure: AgentResult | None = None
     primary_failure_reason: str | None = None
+    effective_request_context = (
+        getattr(prepared_context, "request", None)
+        if prepared_context is not None
+        else request_context
+    )
+    if effective_request_context is None:
+        effective_request_context = request_context
     with _research_trace_context(task, transport="sse") as trace_span:
         if trace_span is not None:
             trace_span.input = {
                 "task": task,
                 "conversation_id": (
-                    prepared_context.request.conversation_id
-                    if prepared_context is not None
+                    effective_request_context.conversation_id
+                    if effective_request_context is not None
                     else None
                 ),
                 "context_snapshot_id": (
@@ -3675,9 +3779,7 @@ async def _stream_response_events(
                     orch,
                     "stream_run",
                     task,
-                    request_context=(
-                        prepared_context.request if prepared_context else None
-                    ),
+                    request_context=effective_request_context,
                     context_bundle=(
                         prepared_context.bundle if prepared_context else None
                     ),

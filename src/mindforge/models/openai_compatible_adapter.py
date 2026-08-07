@@ -169,6 +169,7 @@ class OpenAICompatibleAdapter(BaseLLM):
         response_format: dict | None = None,
         temperature: float = 0.7,
         stream: bool = False,
+        max_output_tokens: int | None = None,
     ) -> ChatResult | AsyncIterator[StreamEvent]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -176,6 +177,8 @@ class OpenAICompatibleAdapter(BaseLLM):
             "temperature": temperature,
             **self._request_kwargs,
         }
+        if max_output_tokens is not None:
+            body["max_tokens"] = int(max_output_tokens)
         if tools and self.supports_tools:
             body["tools"] = tools
         normalized_format = self._normalize_response_format(response_format)

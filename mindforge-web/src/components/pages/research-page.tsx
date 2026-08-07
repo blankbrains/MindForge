@@ -82,13 +82,15 @@ export function ResearchPage() {
 
   useEffect(() => {
     if (!session.isCompleted || !session.finalResult) return;
-    void refreshConversation();
     const metadata = session.finalResult.metadata;
     const runId =
       typeof metadata?.run_id === "string" ? metadata.run_id : null;
-    if (runId) {
-      void loadContextSnapshot(runId);
-    }
+    void (async () => {
+      await refreshConversation();
+      if (runId) {
+        await loadContextSnapshot(runId);
+      }
+    })();
   }, [
     loadContextSnapshot,
     refreshConversation,
@@ -107,6 +109,7 @@ export function ResearchPage() {
   const phaseLabel: Record<string, string> = {
     connecting: "正在连接",
     starting: "正在启动",
+    routing: "正在判断回答方式",
     planning: "正在规划",
     researching: "正在执行子任务",
     synthesizing: "正在合成报告",

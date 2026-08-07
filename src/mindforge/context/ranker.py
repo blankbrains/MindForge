@@ -46,15 +46,30 @@ def rank_candidates(
         relevance = lexical_relevance(query, candidate.content)
         score = relevance
         reasons: list[str] = []
+        directly_referenced = (
+            candidate.source_type == "message"
+            and candidate.source_id in referenced_message_ids
+        )
+        candidate.metadata["referenced_by_query"] = directly_referenced
         if candidate.explicitly_selected:
             score += 1.0
             reasons.append("用户显式选择")
-        if candidate.source_id in referenced_message_ids:
-            score += 0.8
-            reasons.append("当前问题明确引用")
+        if directly_referenced:
+            score += 1.25
+            reasons.append("当前追问引用最近一轮")
         if candidate.pinned:
             score += 0.65
             reasons.append("用户固定")
+        recency_rank = candidate.metadata.get("message_recency_rank")
+        if candidate.metadata.get("latest_turn"):
+            score += 0.35
+            reasons.append("最近一轮")
+        elif isinstance(recency_rank, int) and not isinstance(
+            recency_rank,
+            bool,
+        ):
+            score += max(0.0, 0.2 - recency_rank * 0.03)
+            reasons.append("近期会话")
         if candidate.metadata.get("same_conversation"):
             score += 0.2
             reasons.append("同一会话")
@@ -90,8 +105,10 @@ def rank_candidates(
         candidates,
         key=lambda item: (
             item.explicitly_selected,
+            bool(item.metadata.get("referenced_by_query")),
             item.pinned,
             item.score,
+            -int(item.metadata.get("message_recency_rank", 1_000_000)),
             sortable_created_at(item),
         ),
         reverse=True,

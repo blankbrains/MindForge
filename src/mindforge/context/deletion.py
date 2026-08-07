@@ -119,6 +119,11 @@ def delete_message(
         return False
     related = _run_messages(db, message)
     related_ids = [item.message_id for item in related]
+    deleted_auto_titles = {
+        _automatic_conversation_title(item.content)
+        for item in related
+        if item.role == "user"
+    }
     for related_message in related:
         context_items.invalidate_summaries_for_message(
             db,
@@ -151,6 +156,25 @@ def delete_message(
     ).delete(synchronize_session=False)
     for related_message in related:
         db.delete(related_message)
+    if conversation.title in deleted_auto_titles:
+        replacement = (
+            db.query(ConversationMessage)
+            .filter(
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.message_id.notin_(related_ids),
+                ConversationMessage.deleted_at.is_(None),
+                ConversationMessage.role == "user",
+            )
+            .order_by(ConversationMessage.sequence.asc())
+            .first()
+        )
+        conversation.title = (
+            _automatic_conversation_title(replacement.content)
+            if replacement is not None
+            else "新研究"
+        )
+        conversation.version += 1
+        conversation.updated_at = datetime.now(timezone.utc)
     db.flush()
     return True
 
@@ -230,6 +254,10 @@ def _run_messages(
         )
         .all()
     )
+
+
+def _automatic_conversation_title(content: str) -> str:
+    return content.strip().replace("\n", " ")[:80] or "新研究"
 
 
 def get_deletion_job(

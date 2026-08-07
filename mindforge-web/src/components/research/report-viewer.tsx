@@ -107,6 +107,9 @@ export function ReportViewer({ result }: Props) {
     typeof result.data?.refinement_failure === "string"
       ? result.data.refinement_failure
       : "";
+  const route = typeof metadata.route === "string" ? metadata.route : "";
+  const directAnswer = route === "direct_answer";
+  const conversationalAnswer = route === "conversation";
 
   return (
     <div className="space-y-4">
@@ -167,20 +170,38 @@ export function ReportViewer({ result }: Props) {
             <span className="font-semibold">缓存命中</span>
           </div>
         )}
-        <div>
-          <MetricLabel explanation="Critic 对报告完整性、证据、结构和表达的综合评分。会话型任务和部分模式不会运行评审。">
-            报告评分：
-          </MetricLabel>
-          {quality !== null ? (
-            <span className="font-semibold text-primary">
-              {quality.toFixed(1)} / 10
+        {directAnswer || conversationalAnswer ? (
+          <div>
+            <MetricLabel
+              explanation={
+                directAnswer
+                  ? "该请求使用无需外部检索的轻量直答链路，保留单任务计划与 Critic 评审。"
+                  : "该请求是确定性的会话响应，不进入研究、规划或评审。"
+              }
+            >
+              回答模式：
+            </MetricLabel>
+            <span className="font-semibold">
+              {directAnswer ? "轻量直答" : "会话响应"}
             </span>
-          ) : (
-            <span className="font-semibold text-text-muted">
-              {qualityStatus === "evaluation_failed" ? "评审失败" : "未评审"}
-            </span>
-          )}
-        </div>
+          </div>
+        ) : null}
+        {!conversationalAnswer && (
+          <div>
+            <MetricLabel explanation="Critic 对报告完整性、证据、结构和表达的综合评分。会话型任务和部分模式不会运行评审。">
+              报告评分：
+            </MetricLabel>
+            {quality !== null ? (
+              <span className="font-semibold text-primary">
+                {quality.toFixed(1)} / 10
+              </span>
+            ) : (
+              <span className="font-semibold text-text-muted">
+                {qualityStatus === "evaluation_failed" ? "评审失败" : "未评审"}
+              </span>
+            )}
+          </div>
+        )}
         {retrievalQuality !== null && (
           <div>
             <MetricLabel explanation="检索结果与当前问题的综合相关程度，用于判断证据是否足够支持回答。">
@@ -219,23 +240,23 @@ export function ReportViewer({ result }: Props) {
             </span>
           </div>
         )}
-        {metadata.subtask_count !== undefined && (
-          <div>
-            <MetricLabel explanation="Planner 将原始问题拆分出的研究任务数量，以及最终成功完成的数量。">
-              子任务：
-            </MetricLabel>
-            {completedSubtasks !== null ? (
-              <span className="font-semibold">
-                {completedSubtasks}/{String(metadata.subtask_count)} 完成
-                {failedSubtasks > 0 ? `，${failedSubtasks} 失败` : ""}
-              </span>
-            ) : (
-              <span className="font-semibold">
-                {String(metadata.subtask_count)}
-              </span>
-            )}
-          </div>
-        )}
+        {!conversationalAnswer && metadata.subtask_count !== undefined && (
+            <div>
+              <MetricLabel explanation="Planner 将原始问题拆分出的研究任务数量，以及最终成功完成的数量。">
+                子任务：
+              </MetricLabel>
+              {completedSubtasks !== null ? (
+                <span className="font-semibold">
+                  {completedSubtasks}/{String(metadata.subtask_count)} 完成
+                  {failedSubtasks > 0 ? `，${failedSubtasks} 失败` : ""}
+                </span>
+              ) : (
+                <span className="font-semibold">
+                  {String(metadata.subtask_count)}
+                </span>
+              )}
+            </div>
+          )}
         {result.trace_id && (
           <Link
             to="/observability"

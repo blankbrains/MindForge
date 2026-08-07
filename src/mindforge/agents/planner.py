@@ -14,6 +14,13 @@ from mindforge.agents.base import (
     BaseAgent,
     _estimate_cost_details,
 )
+from mindforge.agents.contracts import (
+    AGENT_CONTRACT_VERSION,
+    ResearchTaskType,
+    SUPPORTED_RESEARCH_TASK_TYPES,
+    is_finalization_only_task,
+    role_contract,
+)
 from mindforge.models.base import ChatMessage, ChatResult
 from mindforge.config import get_settings
 
@@ -31,7 +38,7 @@ class SubTask:
 
     task_id: str
     description: str
-    task_type: Literal["research", "analysis", "code", "verify"] = "research"
+    task_type: ResearchTaskType = "research"
     dependencies: list[str] = field(default_factory=list)
     status: Literal[
         "pending",
@@ -57,6 +64,7 @@ class ResearchPlan:
     planner_usage: dict[str, int] = field(default_factory=dict)
     planner_cost_usd: float | None = None
     planner_cost_status: str = "usage_unavailable"
+    contract_version: str = AGENT_CONTRACT_VERSION
 
     # ------------------------------------------------------------------
     def get_ready_tasks(self) -> list[SubTask]:
@@ -103,12 +111,7 @@ class ResearchPlan:
                 raise ValueError(
                     f"Task {task.task_id} has an empty description."
                 )
-            if task.task_type not in {
-                "research",
-                "analysis",
-                "code",
-                "verify",
-            }:
+            if task.task_type not in SUPPORTED_RESEARCH_TASK_TYPES:
                 raise ValueError(
                     f"Task {task.task_id} has unsupported task_type "
                     f"{task.task_type!r}."
@@ -137,6 +140,13 @@ class ResearchPlan:
                 )
             normalized = list(dict.fromkeys(task.dependencies))
             task.dependencies = normalized
+            if len(self.subtasks) > 1 and is_finalization_only_task(
+                task.description,
+                dependencies=normalized,
+            ):
+                raise ValueError(
+                    f"Task {task.task_id} duplicates final synthesis."
+                )
             for dependency in normalized:
                 if dependency not in known_ids:
                     raise ValueError(
@@ -174,6 +184,7 @@ class ResearchPlan:
             "reasoning": self.reasoning,
             "planner_status": self.planner_status,
             "planner_error": self.planner_error,
+            "contract_version": self.contract_version,
             "subtasks": [
                 {
                     "task_id": s.task_id,
@@ -223,6 +234,9 @@ class ResearchPlan:
                 if data.get("planner_error")
                 else None
             ),
+            contract_version=str(
+                data.get("contract_version") or AGENT_CONTRACT_VERSION
+            )[:50],
         )
 
 
@@ -264,13 +278,19 @@ _PLANNER_SYSTEM_PROMPT = """你是一名专业的研究规划师。你的任务�
       "subtopics": ["具体搜索关键词1", "具体搜索关键词2"]
     }
   ]
-}"""
+}""" + "\n\n" + role_contract("planner")
 
 
 class PlannerAgent(BaseAgent):
     """Decomposes a user task into a DAG-structured research plan."""
 
     model_role = "planner"
+    deepseek_thinking_mode = "disabled"
+    _FINAL_DELIVERABLE_RE = re.compile(
+        r"(?:生成|制定|构建|输出|给出).{0,24}"
+        r"(?:最终)?(?:决策矩阵|选型矩阵|评分矩阵)",
+        re.IGNORECASE,
+    )
     _COMPARISON_MARKERS = (
         "对比",
         "区别",
@@ -449,6 +469,16 @@ class PlannerAgent(BaseAgent):
             errors.append("子任务描述重复，未形成独立研究目标。")
         if any(not subtask.subtopics for subtask in plan.subtasks):
             errors.append("至少一个子任务缺少具体的 subtopics。")
+        if len(plan.subtasks) > 1 and any(
+            is_finalization_only_task(
+                subtask.description,
+                dependencies=subtask.dependencies,
+            )
+            for subtask in plan.subtasks
+        ):
+            errors.append(
+                "计划包含由 Synthesizer 负责的最终汇总或报告生成任务。"
+            )
 
         normalized_task = " ".join(task.casefold().split())
         comparison_task = cls._is_comparison_task(task)
@@ -512,6 +542,77 @@ class PlannerAgent(BaseAgent):
 
         return errors
 
+    @classmethod
+    def _duplicates_downstream_stage(
+        cls,
+        task: SubTask,
+    ) -> bool:
+        if is_finalization_only_task(
+            task.description,
+            dependencies=task.dependencies,
+        ):
+            return True
+        if task.dependencies and cls._FINAL_DELIVERABLE_RE.search(
+            task.description
+        ):
+            return True
+        return False
+
+    @classmethod
+    def _prune_finalization_branches(
+        cls,
+        plan: ResearchPlan,
+    ) -> list[str]:
+        """Remove model-generated work already owned by later pipeline stages.
+
+        Planner models sometimes append a final comparison/report task even
+        though Synthesizer and Critic already own final composition and review.
+        Removing that terminal branch is deterministic and preserves the
+        independent evidence tasks. Invalid dependency structures are left
+        untouched so normal validation can reject them.
+        """
+        if len(plan.subtasks) <= 1 or any(
+            not isinstance(task.dependencies, list)
+            for task in plan.subtasks
+        ):
+            return []
+
+        removed_ids = {
+            task.task_id
+            for task in plan.subtasks
+            if cls._duplicates_downstream_stage(task)
+        }
+        if not removed_ids:
+            return []
+
+        while True:
+            descendants = {
+                task.task_id
+                for task in plan.subtasks
+                if task.task_id not in removed_ids
+                and any(
+                    dependency in removed_ids
+                    for dependency in task.dependencies
+                )
+            }
+            if not descendants:
+                break
+            removed_ids.update(descendants)
+
+        retained = [
+            task for task in plan.subtasks if task.task_id not in removed_ids
+        ]
+        if not retained:
+            return []
+
+        plan.subtasks = retained
+        normalized_ids = sorted(str(task_id) for task_id in removed_ids)
+        logger.info(
+            "Planner normalization removed finalization branch: %s",
+            ", ".join(normalized_ids),
+        )
+        return normalized_ids
+
     # ------------------------------------------------------------------
     async def run(self, task: str) -> ResearchPlan:
         """Decompose *task* into a ResearchPlan.
@@ -554,6 +655,7 @@ class PlannerAgent(BaseAgent):
                 plan_dict["plan_id"] = uuid.uuid4().hex[:12]
 
                 plan = ResearchPlan.from_dict(plan_dict)
+                self._prune_finalization_branches(plan)
                 plan.validate(max_subtasks=settings.agent.max_subtasks)
                 quality_errors = self._quality_errors(
                     task,

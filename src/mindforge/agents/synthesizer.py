@@ -10,8 +10,13 @@ from mindforge.agents.base import (
     BaseAgent,
     _estimate_cost_details,
 )
+from mindforge.agents.contracts import (
+    AGENT_CONTRACT_VERSION,
+    role_contract,
+)
 from mindforge.agents.critic import CriticScore
 from mindforge.agents.response_guidance import (
+    adaptive_output_token_budget,
     build_response_guidance,
     response_profile,
 )
@@ -47,7 +52,7 @@ _SYNTHESIZER_SYSTEM_PROMPT = """你是一名专业的研究综合编辑。你的
 - 明确说明哪些问题缺少证据，以及这会如何限制结论。
 - 只能综合所提供的子任务发现和来源，不得用模型记忆补造事实、数据或引用。
 - 可以解释已有证据，但必须区分证据支持的结论与合理推断。
-- 不得为了填充固定章节而重复内容或虚构细节。"""
+- 不得为了填充固定章节而重复内容或虚构细节。""" + "\n\n" + role_contract("synthesizer")
 
 
 @dataclass(frozen=True)
@@ -123,10 +128,132 @@ def _synthesis_output_instruction(
     )
 
 
+def _build_synthesis_prompt(
+    *,
+    task: str,
+    subtask_results: list[dict[str, Any]],
+    all_sources: Optional[list[dict[str, Any]]],
+    critic_feedback: Optional[CriticScore],
+    configured_context_max_chars: int,
+    current_draft: str | None = None,
+) -> str:
+    """Build one authoritative prompt for sync and streaming synthesis."""
+    subtask_count = len(subtask_results)
+    context_budget = _effective_synthesis_context_budget(
+        configured_context_max_chars,
+        task,
+        subtask_count=subtask_count,
+    )
+    bounded_current_draft = ""
+    findings_budget = context_budget
+    if current_draft and current_draft.strip():
+        draft_budget = min(30_000, max(4_000, context_budget // 2))
+        bounded_current_draft = _bounded_finding_output(
+            current_draft,
+            draft_budget,
+        )
+        findings_budget = max(4_000, context_budget - draft_budget)
+    per_subtask_chars = _per_subtask_budget(
+        findings_budget,
+        subtask_count,
+    )
+    findings_lines: list[str] = []
+    for index, subtask_result in enumerate(subtask_results, 1):
+        description = _bounded_label(
+            subtask_result.get(
+                "description",
+                subtask_result.get("task_id", f"Subtask {index}"),
+            )
+        )
+        output = _bounded_finding_output(
+            subtask_result.get(
+                "output",
+                subtask_result.get("result", ""),
+            ),
+            per_subtask_chars,
+        )
+        citation_map = subtask_result.get("citation_map")
+        mapping_text = ""
+        if isinstance(citation_map, dict) and citation_map:
+            mapping_text = (
+                "\n\n该子任务的引用编号映射："
+                + "，".join(
+                    f"局部 [{local}] -> 全局 [{global_index}]"
+                    for local, global_index in citation_map.items()
+                )
+                + "。最终答案必须改用全局编号。"
+            )[:1_000]
+        findings_lines.append(
+            f"### 子任务 {index}: {description}\n\n"
+            f"{output}{mapping_text}\n"
+        )
+    findings_text = "\n".join(findings_lines)
+    if len(findings_text) > findings_budget:
+        findings_text = (
+            findings_text[:findings_budget].rstrip()
+            + "\n\n[子任务上下文已达到综合预算上限]"
+        )
+
+    prompt_parts = [
+        f"## 原始研究任务\n\n{task}\n",
+        f"## 子任务发现\n\n{findings_text}\n",
+    ]
+    if bounded_current_draft:
+        prompt_parts.append(
+            "## 当前草稿\n\n"
+            f"{bounded_current_draft}\n\n"
+            "这是一次增量精炼。必须以当前草稿为基线，只修改评审明确指出的"
+            "缺陷；保留已经正确、有证据支撑且表达清晰的内容、结构和引用。"
+            "不得从零重写，不得用较短的新稿覆盖更完整的有效内容。\n"
+        )
+    if all_sources:
+        source_lines = ["来源列表："]
+        for source in all_sources:
+            source_index = source.get("index", "")
+            title = source.get(
+                "title",
+                source.get("source", "Untitled"),
+            )
+            url = source.get("url", "")
+            source_lines.append(
+                f"  [{source_index}] {title}"
+                + (f" — {url}" if url else "")
+            )
+        prompt_parts.append(
+            "## 来源\n\n" + "\n".join(source_lines) + "\n"
+        )
+    if critic_feedback is not None:
+        feedback_lines = [
+            "评审反馈（必须逐项回应）：",
+            f"  总分: {critic_feedback.overall}/10",
+            "  问题:",
+        ]
+        feedback_lines.extend(
+            f"    - {issue}" for issue in critic_feedback.issues
+        )
+        feedback_lines.append("  建议:")
+        feedback_lines.extend(
+            f"    - {suggestion}"
+            for suggestion in critic_feedback.suggestions
+        )
+        prompt_parts.append(
+            "## 评审反馈\n\n" + "\n".join(feedback_lines) + "\n"
+        )
+    prompt_parts.append(
+        _synthesis_output_instruction(
+            task,
+            subtask_count=subtask_count,
+            has_sources=bool(all_sources),
+        )
+    )
+    return "\n".join(prompt_parts)
+
+
 class SynthesizerAgent(BaseAgent):
     """Generates the final structured research report from subtask results."""
 
     model_role = "synthesizer"
+    deepseek_thinking_mode = "disabled"
 
     @property
     def name(self) -> str:
@@ -146,6 +273,7 @@ class SynthesizerAgent(BaseAgent):
         *,
         temperature: Optional[float] = None,
         max_attempts: int = 3,
+        current_draft: str | None = None,
     ) -> AgentResult:
         """Synthesize subtask findings into the final report.
 
@@ -166,104 +294,21 @@ class SynthesizerAgent(BaseAgent):
         -------
         AgentResult with ``output`` containing the final report text.
         """
-        # --- Build the findings block ---
-        synthesis_context_max_chars = int(
-            getattr(
-                self._settings.agent,
-                "synthesis_context_max_chars",
-                60_000,
-            )
-        )
-        synthesis_context_max_chars = _effective_synthesis_context_budget(
-            synthesis_context_max_chars,
-            task,
-            subtask_count=len(subtask_results),
-        )
-        per_subtask_chars = _per_subtask_budget(
-            synthesis_context_max_chars,
-            len(subtask_results),
-        )
-        findings_lines: list[str] = []
-        for i, sr in enumerate(subtask_results, 1):
-            desc = _bounded_label(
-                sr.get("description", sr.get("task_id", f"Subtask {i}"))
-            )
-            output = _bounded_finding_output(
-                sr.get("output", sr.get("result", "")),
-                per_subtask_chars,
-            )
-            citation_map = sr.get("citation_map")
-            mapping_text = ""
-            if isinstance(citation_map, dict) and citation_map:
-                mapping_text = (
-                    "\n\nCitation remapping for this subtask: "
-                    + ", ".join(
-                        f"local [{local}] -> global [{global_index}]"
-                        for local, global_index in citation_map.items()
-                    )
-                    + ". Rewrite citations to the global numbers."
-                )
-                mapping_text = mapping_text[:1_000]
-            findings_lines.append(
-                f"### Subtask {i}: {desc}\n\n{output}{mapping_text}\n"
-            )
-
-        findings_text = "\n".join(findings_lines)
-        if len(findings_text) > synthesis_context_max_chars:
-            findings_text = (
-                findings_text[:synthesis_context_max_chars].rstrip()
-                + "\n\n[子任务上下文已达到综合预算上限]"
-            )
-
         try:
-            # --- Build the sources block ---
-            sources_text = ""
-            if all_sources:
-                src_lines = ["Consolidated source list:"]
-                for s in all_sources:
-                    idx = s.get("index", "")
-                    title = s.get("title", s.get("source", "Untitled"))
-                    url = s.get("url", "")
-                    if url:
-                        src_lines.append(f"  [{idx}] {title} — {url}")
-                    else:
-                        src_lines.append(f"  [{idx}] {title}")
-                sources_text = "\n".join(src_lines)
-
-            # --- Build the feedback block ---
-            feedback_text = ""
-            if critic_feedback is not None:
-                fb_lines = [
-                    "Critic feedback to address:",
-                    f"  Overall score: {critic_feedback.overall}/10",
-                    "  Issues:",
-                ]
-                for issue in critic_feedback.issues:
-                    fb_lines.append(f"    - {issue}")
-                fb_lines.append("  Suggestions:")
-                for suggestion in critic_feedback.suggestions:
-                    fb_lines.append(f"    - {suggestion}")
-                feedback_text = "\n".join(fb_lines)
-
-            # --- Assemble the user prompt ---
-            user_prompt_parts: list[str] = [
-                f"## 原始研究任务\n\n{task}\n",
-                f"## 子任务发现\n\n{findings_text}\n",
-            ]
-            if sources_text:
-                user_prompt_parts.append(f"## 来源\n\n{sources_text}\n")
-            if feedback_text:
-                user_prompt_parts.append(f"## 评审反馈（需回应）\n\n{feedback_text}\n")
-
-            user_prompt_parts.append(
-                _synthesis_output_instruction(
-                    task,
-                    subtask_count=len(subtask_results),
-                    has_sources=bool(all_sources),
-                )
+            user_prompt = _build_synthesis_prompt(
+                task=task,
+                subtask_results=subtask_results,
+                all_sources=all_sources,
+                critic_feedback=critic_feedback,
+                configured_context_max_chars=int(
+                    getattr(
+                        self._settings.agent,
+                        "synthesis_context_max_chars",
+                        60_000,
+                    )
+                ),
+                current_draft=current_draft,
             )
-
-            user_prompt = "\n".join(user_prompt_parts)
 
             messages = [
                 ChatMessage(role="system", content=self.system_prompt),
@@ -275,6 +320,18 @@ class SynthesizerAgent(BaseAgent):
                 messages,
                 temperature=temp,
                 max_attempts=max_attempts,
+                max_output_tokens=adaptive_output_token_budget(
+                    task,
+                    subtask_count=len(subtask_results),
+                    final_report=True,
+                    hard_limit=int(
+                        getattr(
+                            self._settings.agent,
+                            "synthesizer_max_output_tokens",
+                            6_000,
+                        )
+                    ),
+                ),
             )
             output = result.content or ""
             success = bool(output.strip())
@@ -306,6 +363,7 @@ class SynthesizerAgent(BaseAgent):
                 token_usage=usage,
                 metadata={
                     "model": model_used,
+                    "contract_version": AGENT_CONTRACT_VERSION,
                 },
                 cost_usd=cost_estimate.amount_usd,
                 cost_status=cost_estimate.status,
@@ -322,91 +380,23 @@ class SynthesizerAgent(BaseAgent):
         *,
         temperature: Optional[float] = None,
         max_attempts: int = 3,
+        current_draft: str | None = None,
     ):
         """Yield report chunks followed by one usage-bearing result event."""
-        synthesis_context_max_chars = int(
-            getattr(
-                self._settings.agent,
-                "synthesis_context_max_chars",
-                60_000,
-            )
-        )
-        synthesis_context_max_chars = _effective_synthesis_context_budget(
-            synthesis_context_max_chars,
-            task,
-            subtask_count=len(subtask_results),
-        )
-        per_subtask_chars = _per_subtask_budget(
-            synthesis_context_max_chars,
-            len(subtask_results),
-        )
-        findings_lines: list[str] = []
-        for i, sr in enumerate(subtask_results, 1):
-            desc = _bounded_label(
-                sr.get("description", sr.get("task_id", f"Subtask {i}"))
-            )
-            output = _bounded_finding_output(
-                sr.get("output", sr.get("result", "")),
-                per_subtask_chars,
-            )
-            citation_map = sr.get("citation_map")
-            mapping_text = ""
-            if isinstance(citation_map, dict) and citation_map:
-                mapping_text = (
-                    "\n\n该子任务的引用编号映射："
-                    + "，".join(
-                        f"局部 [{local}] -> 全局 [{global_index}]"
-                        for local, global_index in citation_map.items()
-                    )
-                    + "。最终报告必须改用全局编号。"
+        user_prompt = _build_synthesis_prompt(
+            task=task,
+            subtask_results=subtask_results,
+            all_sources=all_sources,
+            critic_feedback=critic_feedback,
+            configured_context_max_chars=int(
+                getattr(
+                    self._settings.agent,
+                    "synthesis_context_max_chars",
+                    60_000,
                 )
-                mapping_text = mapping_text[:1_000]
-            findings_lines.append(
-                f"### 子任务 {i}: {desc}\n\n{output}{mapping_text}\n"
-            )
-        findings_text = "\n".join(findings_lines)
-        if len(findings_text) > synthesis_context_max_chars:
-            findings_text = (
-                findings_text[:synthesis_context_max_chars].rstrip()
-                + "\n\n[子任务上下文已达到综合预算上限]"
-            )
-
-        sources_text = ""
-        if all_sources:
-            src_lines = ["来源列表:"]
-            for s in all_sources:
-                idx = s.get("index", "")
-                title = s.get("title", s.get("source", "Untitled"))
-                url = s.get("url", "")
-                src_lines.append(f"  [{idx}] {title}" + (f" — {url}" if url else ""))
-            sources_text = "\n".join(src_lines)
-
-        feedback_text = ""
-        if critic_feedback is not None:
-            fb_lines = ["评审反馈（需回应）:", f"  总分: {critic_feedback.overall}/10", "  问题:"]
-            for issue in critic_feedback.issues:
-                fb_lines.append(f"    - {issue}")
-            fb_lines.append("  建议:")
-            for suggestion in critic_feedback.suggestions:
-                fb_lines.append(f"    - {suggestion}")
-            feedback_text = "\n".join(fb_lines)
-
-        user_prompt_parts: list[str] = [
-            f"## 原始研究任务\n\n{task}\n",
-            f"## 子任务发现\n\n{findings_text}\n",
-        ]
-        if sources_text:
-            user_prompt_parts.append(f"## 来源\n\n{sources_text}\n")
-        if feedback_text:
-            user_prompt_parts.append(f"## 评审反馈（需回应）\n\n{feedback_text}\n")
-        user_prompt_parts.append(
-            _synthesis_output_instruction(
-                task,
-                subtask_count=len(subtask_results),
-                has_sources=bool(all_sources),
-            )
+            ),
+            current_draft=current_draft,
         )
-        user_prompt = "\n".join(user_prompt_parts)
 
         messages = [
             ChatMessage(role="system", content=self.system_prompt),
@@ -417,10 +407,24 @@ class SynthesizerAgent(BaseAgent):
         output_parts: list[str] = []
         usage: dict[str, int] = {}
         model_used = getattr(self._llm, "_model", self._model_name)
+        finish_reason = ""
+        reasoning_only = False
         async for event in self._chat_stream(
             messages,
             temperature=temp,
             max_attempts=max_attempts,
+            max_output_tokens=adaptive_output_token_budget(
+                task,
+                subtask_count=len(subtask_results),
+                final_report=True,
+                hard_limit=int(
+                    getattr(
+                        self._settings.agent,
+                        "synthesizer_max_output_tokens",
+                        6_000,
+                    )
+                ),
+            ),
         ):
             if event.type == "chunk" and event.content:
                 output_parts.append(event.content)
@@ -431,9 +435,18 @@ class SynthesizerAgent(BaseAgent):
             elif event.type == "done":
                 usage = event.usage or {}
                 model_used = event.model or model_used
+                finish_reason = event.finish_reason
+                reasoning_only = event.reasoning_only
 
         output = "".join(output_parts)
         success = bool(output.strip())
+        failure_reason = None
+        if not success:
+            failure_reason = (
+                "reasoning_budget_exhausted"
+                if reasoning_only and finish_reason == "length"
+                else "empty_llm_response"
+            )
         cost_estimate = _estimate_cost_details(
             model_used,
             usage,
@@ -448,11 +461,16 @@ class SynthesizerAgent(BaseAgent):
                 data={
                     "subtask_count": len(subtask_results),
                     "source_count": len(all_sources) if all_sources else 0,
-                    "failure_reason": (
-                        None if success else "empty_llm_response"
-                    ),
+                    "failure_reason": failure_reason,
+                    "finish_reason": finish_reason or None,
+                    "reasoning_only": reasoning_only,
                 },
-                metadata={"model": model_used},
+                metadata={
+                    "model": model_used,
+                    "contract_version": AGENT_CONTRACT_VERSION,
+                    "finish_reason": finish_reason or None,
+                    "reasoning_only": reasoning_only,
+                },
                 token_usage=usage,
                 cost_usd=cost_estimate.amount_usd,
                 cost_status=cost_estimate.status,
