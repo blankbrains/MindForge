@@ -1,138 +1,155 @@
-# MindForge - 自适应研究助理系统
+# MindForge — 自适应研究助理系统
 
-> 全栈 Multi-Agent RAG · React 19 前端 · FastAPI 后端 · 混合检索 · SSE 流式交互
+> **全栈 Multi-Agent RAG** · React 19 前端 · FastAPI 后端 · 混合检索 · SSE 流式交互
 
-MindForge 是一个可自托管的自适应研究助理。它结合多 Agent 编排、知识库检索、
-联网搜索、会话上下文和质量评审，生成带来源、历史记录和执行 Trace 的研究结果。
+[![CI](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml/badge.svg)](https://github.com/blankbrains/MindForge/actions/workflows/ci.yml)
 
 ## 项目概述
 
-MindForge 根据问题类型选择确定性社交回复、模型辅助直接回答或完整研究流程。复杂问题
-会被拆解为可执行的子任务，由 Researcher 收集证据，Synthesizer 组织报告，Critic
-评审并按策略精炼结果。
+MindForge 是一个可自托管的自适应研究助理系统，由 **Python 后端**
+（FastAPI + Multi-Agent RAG）和 **React 前端**（TypeScript + Tailwind CSS）构成。
+它根据问题类型选择确定性社交回复、模型辅助直接回答或完整研究流程；复杂问题会被
+拆解为可执行的子任务，并结合知识库、联网搜索和工具调用生成可追溯报告。
 
-### 前端页面
+### 🖥️ 前端界面
 
 | 页面 | 功能 |
 | --- | --- |
-| 概览 | 查看 PostgreSQL、Redis、Qdrant 状态和系统统计。 |
-| 研究工作台 | 输入问题，查看实时任务进度、报告、来源、评分和费用。 |
-| 知识库 | 上传、索引、启停、查看和删除文档。 |
-| 研究历史 | 查看和管理已完成的研究结果。 |
-| 可观测 | 查看研究 Trace、Agent、模型和工具调用。 |
-| 系统配置 | 配置模型 Provider、检索策略、研究参数和 Langfuse。 |
+| 📊 **概览 Dashboard** | 查看 PostgreSQL、Redis、Qdrant 状态和系统统计。 |
+| 🔬 **研究工作台** | 输入问题，查看实时任务进度、报告、来源、评分、Token 与费用。 |
+| 📚 **知识库** | 上传、索引、启停、查看和删除文档。 |
+| 🕐 **研究历史** | 查看和管理已完成的研究结果。 |
+| 📈 **可观测** | 查看研究 Trace、Agent、模型和工具调用。 |
+| ⚙️ **系统配置** | 配置模型 Provider、检索策略、研究参数和 Langfuse。 |
 
-### 核心能力
+### 🎯 核心能力
 
 | 能力 | 说明 |
 | --- | --- |
-| 自适应请求路由 | 为社交交互、稳定知识问题和复杂研究请求选择合适的执行链路。 |
-| 多 Agent 研究 | Planner、Researcher、Synthesizer、Critic 分工完成规划、检索、综合和评审。 |
-| 会话上下文 | 支持追问、自动或手动上下文、独立研究、快照、固定、遗忘和删除。 |
-| 混合检索 | 结合 Qdrant 向量检索、BM25、RRF 融合和 Cross-Encoder 重排序。 |
-| 文档知识库 | 支持 PDF、DOCX、HTML、Markdown、TXT 的解析、OCR、表格和图片资产处理。 |
-| 高级索引 | 支持 RAPTOR 层次摘要索引、GraphRAG 图谱索引和可选视觉索引。 |
-| 多模型接入 | 支持 OpenAI、DeepSeek、Kimi、GLM、OpenAI-compatible API 和本地兼容服务。 |
-| 联网搜索 | 支持 Provider 原生搜索、Tavily 和 DuckDuckGo。 |
-| 流式与取消 | 通过 SSE 展示研究阶段和答案增量，并支持按 `request_id` 取消任务。 |
-| 可观测性 | 记录 Agent、模型、工具、耗时、Token、费用、结果和失败原因。 |
+| 🧭 **自适应请求路由** | 为社交交互、稳定知识问题和复杂研究请求选择合适的执行链路。 |
+| 🧠 **多 Agent 研究** | Planner、Researcher、Synthesizer、Critic 分工完成规划、检索、综合和评审。 |
+| 💬 **会话上下文** | 支持追问、自动或手动上下文、独立研究、快照、固定、遗忘和删除。 |
+| 🔍 **混合检索** | 结合 Qdrant 向量检索、BM25、RRF 融合和 Cross-Encoder 重排序。 |
+| 📄 **文档知识库** | 支持 PDF、DOCX、HTML、Markdown、TXT 的解析、OCR、表格和图片资产处理。 |
+| 🧱 **高级索引** | 支持 RAPTOR 层次摘要索引、GraphRAG 图谱索引和可选视觉索引。 |
+| ⚡ **统一模型接口** | 支持 OpenAI、DeepSeek、Kimi、GLM、OpenAI-compatible API 和本地兼容服务。 |
+| 🌐 **联网搜索** | 支持 Provider 原生搜索、Tavily 和 DuckDuckGo。 |
+| 📡 **SSE 流式与取消** | 实时展示研究阶段和答案增量，并支持按 `request_id` 取消任务。 |
+| 📊 **可观测性** | 记录 Agent、模型、工具、耗时、Token、费用、结果和失败原因。 |
 
-### 工作流程
+### 🔄 工作流程
 
 ```mermaid
 flowchart TD
-    A[用户输入问题] --> B{请求路由}
-    B -->|社交交互| C[确定性回复]
-    B -->|稳定知识| D[Direct Answer]
-    B -->|研究请求| E[构建会话上下文]
-    E --> F[Planner 生成任务 DAG]
+    A[🙋 用户输入问题] --> B{🧭 请求路由}
+    B -->|社交交互| C[💬 确定性回复]
+    B -->|稳定知识| D[⚡ Direct Answer]
+    B -->|研究请求| E[🧠 构建会话上下文]
+    E --> F[🧭 Planner 生成任务 DAG]
 
-    subgraph G[Researcher 并行执行]
-        G1[RAGTool]
-        G2[WebSearchTool]
-        G3[CodeExecutor]
-        G4[CitationVerifier]
+    subgraph G[🔬 Researcher 并行执行]
+        G1[📚 RAGTool]
+        G2[🌐 WebSearchTool]
+        G3[💻 CodeExecutor]
+        G4[✅ CitationVerifier]
     end
 
     F --> G1
     F --> G2
     F --> G3
     F --> G4
-    G1 --> H[Synthesizer 汇总结果]
+    G1 --> H[📝 Synthesizer 汇总结果]
     G2 --> H
     G3 --> H
     G4 --> H
 
-    H --> I{Critic 评审}
-    I -->|满足质量要求| J[引用校验与结果持久化]
+    H --> I{🎯 Critic 评审}
+    I -->|满足质量要求| J[✅ 引用校验与结果持久化]
     I -->|需要精炼| H
     C --> J
     D --> J
-    J --> K[报告、历史、Context Snapshot 与 Trace]
+    J --> K[📄 报告 · 历史 · Context Snapshot · Trace]
 ```
 
-## 技术栈
+### 🛠️ 技术栈
 
-| 层级 | 技术 |
+| 层 | 技术 |
 | --- | --- |
-| 前端 | React 19、TypeScript、Vite、Tailwind CSS、TanStack Router/Query、Zustand |
-| 前端交互 | React Flow、Recharts、react-markdown、eventsource-parser |
-| 后端 | Python 3.10+、FastAPI、Pydantic、SQLAlchemy、Alembic |
-| 数据 | PostgreSQL、Redis、Qdrant |
-| 检索 | BGE、BM25、RRF、Cross-Encoder Reranker、RAPTOR、GraphRAG |
-| 文档解析 | pdfplumber、PaddleOCR、python-docx、BeautifulSoup |
-| 可观测 | 本地 Trace、Langfuse |
-| 部署 | Docker Compose、CPU/GPU 依赖锁文件 |
+| 🖥️ **前端框架** | React 19 · TypeScript · Tailwind CSS v4 · Vite |
+| 🗂️ **前端状态** | TanStack Router · TanStack Query · Zustand |
+| 📈 **前端交互** | React Flow · Recharts · react-markdown · eventsource-parser |
+| 🤖 **Agent 编排** | Direct Answer · Planner · Researcher · Synthesizer · Critic |
+| 🔎 **检索引擎** | Qdrant · BM25 · RRF · Cross-Encoder Reranker |
+| 🏗️ **高级检索** | RAPTOR · GraphRAG · 可选视觉索引 |
+| 🧰 **Agent 工具** | 知识库检索 · Web 搜索 · 代码执行 · 引用校验 |
+| 🧩 **模型** | OpenAI · DeepSeek · Kimi · GLM · OpenAI-compatible · Local |
+| 🧠 **上下文与记忆** | Conversation · Context Snapshot · Research Artifact · User Memory |
+| 📄 **文档解析** | pdfplumber · PaddleOCR · python-docx · BeautifulSoup |
+| 🗄️ **数据与缓存** | PostgreSQL 16 · Redis · Qdrant |
+| ⚡ **API 与观测** | FastAPI · SSE · Pydantic v2 · 本地 Trace · Langfuse |
+| 🐳 **部署** | Docker Compose · CPU/GPU 依赖锁文件 |
 
-## 项目结构
+## 📁 项目结构
 
 ```text
 MindForge/
-├── src/mindforge/
-│   ├── agents/          # Agent、Direct Answer 与 Orchestrator
-│   ├── api/             # FastAPI、REST、SSE 和接口 Schema
-│   ├── context/         # 上下文构建、压缩、快照和删除治理
-│   ├── ingestion/       # 文档解析、分块、Embedding、RAPTOR
-│   ├── retrieval/       # 向量、BM25、重排序与 GraphRAG
-│   ├── tools/           # RAG、搜索、代码和引用校验工具
-│   ├── models/          # Provider 注册表与模型适配器
-│   ├── memory/          # 工作、情节和语义记忆
-│   ├── services/        # 会话、索引、上下文和健康检查服务
-│   └── observability/   # Trace 与 Langfuse
-├── mindforge-web/       # React 前端
-├── migrations/          # Alembic 数据库迁移
-├── tests/               # 后端测试
-├── docker-compose.yml
-├── docker-compose.gpu.yml
-├── .env.example
-└── start.sh
+├── start.sh                        # 一体化启动脚本
+├── pyproject.toml                  # Python 项目与依赖声明
+├── docker-compose.yml              # 应用、PostgreSQL、Redis、Qdrant 编排
+├── docker-compose.gpu.yml          # GPU 部署覆盖配置
+├── Dockerfile                      # 生产镜像构建
+├── migrations/                     # Alembic 数据库迁移
+├── .env.example                    # 运行配置模板
+├── .github/workflows/ci.yml        # CI
+│
+├── mindforge-web/                  # React 前端
+│   └── src/
+│       ├── components/             # 页面与业务组件
+│       ├── hooks/                  # 研究会话与数据请求 Hooks
+│       ├── store/                  # Zustand 状态管理
+│       ├── routes/                 # 路由定义
+│       └── types/                  # TypeScript 类型
+│
+├── src/mindforge/                  # Python 后端
+│   ├── agents/                     # Agent、Direct Answer 与 Orchestrator
+│   ├── api/                        # FastAPI、REST、SSE 和接口 Schema
+│   ├── context/                    # 上下文构建、压缩、快照和删除治理
+│   ├── ingestion/                  # 文档解析、分块、Embedding、RAPTOR
+│   ├── retrieval/                  # 向量、BM25、重排序与 GraphRAG
+│   ├── tools/                      # RAG、搜索、代码和引用校验工具
+│   ├── models/                     # Provider 注册表与模型适配器
+│   ├── memory/                     # 工作、情节和语义记忆
+│   ├── services/                   # 会话、索引、上下文和健康检查服务
+│   ├── repositories/               # PostgreSQL 数据访问层
+│   └── observability/              # Trace 与 Langfuse
+│
+└── tests/                          # pytest 测试
 ```
 
-## 快速启动
+## 🚀 快速启动
 
-推荐在 Linux 服务器上使用 Docker Compose 部署。
+### 环境要求
 
-### 1. 准备配置
+| 组件 | 要求 | 说明 |
+| --- | --- | --- |
+| 🐍 Python | `>= 3.10` | Docker 与 CI 使用 Python 3.11。 |
+| 🐳 Docker | 推荐 | 一次启动应用、PostgreSQL、Redis 和 Qdrant。 |
+| 🟢 Node.js | `>= 22` | 与 Dockerfile、CI 和 Vite 8 对齐。 |
+| 📦 npm | `>= 10` | 用于前端开发和构建。 |
+
+### 🐳 1. 使用 Docker Compose 启动
 
 ```bash
 git clone https://github.com/blankbrains/MindForge.git
 cd MindForge
 cp .env.example .env
-```
 
-在 `.env` 中配置数据库密码、`DATABASE_URL`、`APP_SECRET`、LLM Provider、模型和
-API Key。完整配置字段见 `.env.example`。
-
-### 2. 启动服务
-
-CPU：
-
-```bash
+# 配置 .env：DATABASE_URL、POSTGRES_PASSWORD、APP_SECRET、LLM Provider 和 API Key
 docker compose config --quiet
 docker compose up -d --build
 ```
 
-GPU：
+GPU 部署：
 
 ```bash
 docker compose \
@@ -141,7 +158,7 @@ docker compose \
   up -d --build
 ```
 
-### 3. 检查状态
+### 🟢 2. 检查服务
 
 ```bash
 curl --fail http://127.0.0.1:8000/api/v1/ready
@@ -149,12 +166,46 @@ docker compose ps
 docker compose logs -f mindforge
 ```
 
-默认访问地址为 `http://127.0.0.1:8000`，FastAPI 文档位于 `/docs`。
+默认访问地址为 `http://127.0.0.1:8000`，FastAPI 接口文档位于 `/docs`。
 
-## 模型、搜索与上下文配置
+### 🧩 3. 本地开发
+
+```bash
+bash start.sh
+bash start.sh --dev
+```
+
+前端单独启动：
+
+```bash
+cd mindforge-web
+npm ci
+npm run dev
+```
+
+## ⚙️ 运行配置
+
+### 统一配置规则
+
+项目根目录 `.env` 是后端、Vite 和 Docker Compose 的统一运行配置源。配置
+`DATABASE_URL`、数据库密码、`APP_SECRET`、Provider、模型和 API Key 后，
+通过 `docker compose config --quiet` 检查配置。
+
+### 模型配置
 
 设置页面可为 Planner、Researcher、Critic、Synthesizer 和 Direct Answer 分别选择
-模型。Provider 配置支持模型发现、工具调用、JSON 模式、流式用量统计和原生联网搜索。
+模型。Provider 支持模型发现、工具调用、JSON 模式、流式用量统计和原生联网搜索。
+
+| Provider | 用途 |
+| --- | --- |
+| OpenAI | OpenAI 原生 API 与 OpenAI Responses 搜索。 |
+| DeepSeek | DeepSeek API。 |
+| Kimi | Moonshot/Kimi API 与内置联网。 |
+| GLM | 智谱 GLM API 与 Web Search。 |
+| 通用接口 | 其他 OpenAI-compatible 云服务。 |
+| 本地模型 | vLLM、Ollama、LM Studio 等兼容服务。 |
+
+### 联网搜索与上下文
 
 联网搜索支持 Provider 原生搜索、Tavily 和 DuckDuckGo。配置 `TAVILY_API_KEY` 后，
 可通过 `WEB_SEARCH_PREFER_TAVILY` 控制 Tavily 与原生搜索的优先级。
@@ -162,7 +213,7 @@ docker compose logs -f mindforge
 上下文系统支持自动、手动、关闭和独立研究模式。长会话使用规则摘要和可选模型压缩，
 每次研究都会保存不可变 `ContextSnapshot` 供后续查看。
 
-## API 与 SSE
+## 📡 API 与 SSE
 
 | API | 作用 |
 | --- | --- |
@@ -177,26 +228,19 @@ docker compose logs -f mindforge
 | `/api/v1/observability/*` | 查看和管理 Trace。 |
 | `/api/v1/health` / `/api/v1/ready` | 检查服务与依赖就绪状态。 |
 
-流式研究会发送路由、规划、子任务、综合、评审、精炼、答案增量、取消和完成状态。前端
-使用请求标识处理进度更新和取消操作。
+流式研究通过 SSE 发送路由、规划、子任务、综合、评审、精炼、答案增量、取消和完成
+状态。前端使用请求标识处理进度更新和取消操作。
 
-## 配置分类
+## 🔄 CI/CD 与验证
 
-| 前缀 | 用途 |
-| --- | --- |
-| `API_*` | 服务地址、鉴权、上传限制和索引并发。 |
-| `LLM_*` | Provider、角色模型、Embedding 和费用。 |
-| `AGENT_*` | 研究模式、直接回答、超时、并发和任务限制。 |
-| `WEB_SEARCH_*` / `TAVILY_*` | 联网搜索策略。 |
-| `RETRIEVAL_*` | 召回、重排序和阈值。 |
-| `PARSER_*` / `VISUAL_*` | 文档、OCR、表格、图片和视觉解析。 |
-| `RAPTOR_*` / `GRAPH_*` | 层次索引和图谱索引。 |
-| `CONTEXT_*` / `MEMORY_*` | 会话上下文、压缩、快照和记忆。 |
-| `OBSERVABILITY_*` | Trace 与 Langfuse。 |
-| `SANDBOX_*` | 代码执行限制。 |
-| `VITE_*` | 前端请求和流式渲染。 |
+GitHub Actions 自动执行：
 
-## 开发与验证
+- **ruff check**：Python 静态检查。
+- **pytest**：后端单元与回归测试。
+- **前端质量检查**：ESLint 与 TypeScript/Vite 生产构建。
+- **Docker Compose 校验**：展开并检查部署配置。
+
+本地验证命令：
 
 ```bash
 ruff check src/ tests/
@@ -209,13 +253,41 @@ npm --prefix mindforge-web run build
 docker compose config --quiet
 ```
 
-## 安全说明
+## ✨ 技术亮点
 
-- `.env`、运行数据、索引、Trace、模型缓存和本地文档不进入 Git。
-- API Key 加密保存，接口返回时展示脱敏值。
-- 对外部署使用 HTTPS、访问控制和强随机密钥。
-- 服务提供 CORS 配置、安全响应头、上传限制、模型发现保护和代码执行限制。
+### 🧠 自适应 Agent 编排
 
-## License
+- **多路径路由**：社交交互、直接回答和完整研究使用不同执行链路。
+- **DAG 任务分解**：Planner 为复杂问题生成有依赖关系的子任务。
+- **角色合约**：Planner、Researcher、Synthesizer 和 Critic 保持明确职责边界。
+- **质量评审**：Critic 评审结果并驱动受控精炼。
 
-[MIT](LICENSE)
+### 🔍 混合检索与知识库
+
+- **Dense + BM25 + RRF**：融合语义检索和关键词检索结果。
+- **Cross-Encoder 精排**：对候选片段进行相关性重排序。
+- **RAPTOR + GraphRAG**：支持层次摘要索引与实体关系索引。
+- **异步索引任务**：文档上传、解析、Embedding 和索引进度可追踪、可取消。
+
+### 💬 上下文与记忆治理
+
+- **可观测上下文**：展示候选内容、选择原因、Token 成本和实际使用快照。
+- **长会话压缩**：规则摘要与模型压缩配合控制上下文长度。
+- **细粒度治理**：支持固定、排除、遗忘和删除会话内容。
+
+### 📈 可观测与工程化
+
+- **完整 Trace**：记录 Agent、模型、工具、耗时、Token、费用和失败原因。
+- **多 Provider 适配**：模型、工具调用、JSON 模式和联网能力按 Provider 配置。
+- **可复现部署**：Docker Compose 与 CPU/GPU 依赖锁文件支持一致的部署流程。
+- **安全配置**：API Key 加密保存，接口返回脱敏值，支持访问控制和安全响应头。
+
+## 📄 许可证
+
+本项目基于 [MIT 协议](LICENSE) 开源，可自由使用、修改和分发。
+
+---
+
+<p align="center">
+  <sub>Built with React 19 · FastAPI · Qdrant · PostgreSQL</sub>
+</p>
